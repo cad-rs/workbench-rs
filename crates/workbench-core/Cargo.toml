@@ -1,0 +1,16 @@
+[package]
+name = "workbench-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "workbench-rs 平台运行时：产品装配、命令执行、任务泵、布局持久化"
+
+[dependencies]
+workbench-api = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rfd = { workspace = true }
+env_logger = { workspace = true }
+async-executor = { workspace = true }
+async-io = { workspace = true }
+futures-lite = { workspace = true }

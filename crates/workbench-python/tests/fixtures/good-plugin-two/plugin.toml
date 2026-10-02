@@ -1,0 +1,6 @@
+[plugin]
+id = "test.two"
+name = "Two"
+version = "0.1.0"
+api_version = "1"
+entry_point = "main.py:register"

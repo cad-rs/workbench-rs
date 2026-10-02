@@ -1,0 +1,6 @@
+[plugin]
+id = "test.badver"
+name = "BadVersion"
+version = "0.1.0"
+api_version = "99"
+entry_point = "main.py:register"

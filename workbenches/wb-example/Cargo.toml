@@ -1,0 +1,12 @@
+[package]
+name = "wb-example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "示例 Workbench 模块：只依赖 workbench-api，不依赖任何 GUI 框架"
+
+[dependencies]
+workbench-api = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-io = { workspace = true }

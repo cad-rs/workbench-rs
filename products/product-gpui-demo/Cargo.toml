@@ -1,0 +1,18 @@
+[package]
+name = "product-gpui-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "示例产品：构建时选定 gpui 前端"
+
+[[bin]]
+name = "product-gpui-demo"
+path = "src/main.rs"
+
+[dependencies]
+workbench-api = { workspace = true }
+workbench-core = { workspace = true }
+workbench-ui-gpui = { workspace = true }
+workbench-python = { workspace = true }
+wb-example = { workspace = true }
+env_logger = { workspace = true }

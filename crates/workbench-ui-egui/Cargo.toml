@@ -1,0 +1,15 @@
+[package]
+name = "workbench-ui-egui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "workbench-rs 的 egui 前端适配器（产品构建时选定一种 GUI）"
+
+[dependencies]
+workbench-api = { workspace = true }
+workbench-core = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true }
+egui_tiles = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

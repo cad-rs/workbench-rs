@@ -1,0 +1,10 @@
+[package]
+name = "workbench-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "workbench-rs 平台契约层：ID、几何、绘制抽象、注册表、服务与任务模型"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

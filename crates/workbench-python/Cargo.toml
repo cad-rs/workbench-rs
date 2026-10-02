@@ -1,0 +1,13 @@
+[package]
+name = "workbench-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "workbench-rs 的 Python 插件宿主：清单、发现、Host API 与生命周期"
+
+[dependencies]
+workbench-api = { workspace = true }
+workbench-core = { workspace = true }
+pyo3 = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }

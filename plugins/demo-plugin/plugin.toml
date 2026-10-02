@@ -1,0 +1,17 @@
+# workbench-rs 演示插件清单（design.md §11.2）
+[plugin]
+id = "com.example.demo"
+name = "Demo Plugin"
+version = "0.1.0"
+api_version = "1"
+entry_point = "plugin.py:register"
+
+[compatibility]
+products = ["*"]
+
+# 权限声明用于审计与提示；进程内 Python 不构成安全沙箱（§11.5）
+[permissions]
+document_read = false
+document_write = false
+filesystem_read = false
+network = false
