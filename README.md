@@ -1,5 +1,7 @@
 # workbench-rs
 
+> 仓库：https://github.com/cad-rs/workbench-rs
+
 通用工程桌面应用框架（CAD / 机械设计 / 工业仿真方向）的 Rust 实现。
 需求与架构见 [docs/design.md](docs/design.md)，开发计划与阶段记录见 [docs/plan.md](docs/plan.md)。
 
