@@ -1,17 +1,18 @@
-//! workbench-rs 平台契约层。
+//! workbench-rs platform contract layer.
 //!
-//! 本 crate 定义 GUI 无关的平台 API：ID、几何与绘制抽象、命令、任务、文档、
-//! 工作区模型与 Workbench 扩展点。Workbench 模块只允许依赖本 crate
-//! （不依赖 egui / gpui / wgpu，design.md 验收 #21）。
+//! This crate defines the GUI-agnostic platform APIs: IDs, geometry and the
+//! painting abstraction, commands, tasks, documents, the workspace model, and
+//! Workbench extension points. Workbench modules may only depend on this crate
+//! (never on egui / gpui / wgpu — design.md acceptance item #21).
 //!
-//! # 下游视角速查
+//! # Quick reference by downstream role
 //!
-//! | 你是谁 | 看哪里 |
+//! | You are... | Look at |
 //! |---|---|
-//! | 产品开发者 | workbench-core 的 WorkbenchAppBuilder 与 cli 模块 |
-//! | Workbench 开发者 | workbench::Workbench + registry::Registry + command::CommandDef |
-//! | 视图/面板作者 | view::ViewInstance + paint::PaintBackend（GUI 无关绘制） |
-//! | 插件宿主 | workbench-python crate（本 crate 之上，Host API v1） |
+//! | a product developer | workbench-core's WorkbenchAppBuilder and the cli module |
+//! | a Workbench developer | workbench::Workbench + registry::Registry + command::CommandDef |
+//! | a view/panel author | view::ViewInstance + paint::PaintBackend (GUI-free drawing) |
+//! | a plugin host | the workbench-python crate (Host API v1, layered on this crate) |
 
 pub mod command;
 pub mod documents;
@@ -27,7 +28,8 @@ pub mod view;
 pub mod workbench;
 pub mod workspace;
 
-/// 平台契约版本（随发布递增；插件 Host API 版本另行管理，见 workbench-python）。
+/// Platform contract version (bumped per release; the plugin Host API version
+/// is managed separately — see workbench-python).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use command::{

@@ -1,288 +1,403 @@
-# workbench-rs 开发计划（垂直切片 M1）
+# workbench-rs Development Plan (vertical slice M1 and later phases)
 
-对应需求文档：`docs/design.md`。本计划把阶段 0（GUI 选型验证）与阶段 1（平台最小闭环）合并为一个可运行的垂直切片。
+Implements docs/design.md. This plan merged Phase 0 (GUI validation) and
+Phase 1 (minimal platform loop) into one runnable vertical slice; later
+sections record the completed phases 2, 3, 5, RibbonBar, and release prep.
 
-## 1. 本期目标与范围
+## 1. Goals and scope of the vertical slice
 
-### 1.1 目标
+### 1.1 Goals
 
-用一个完整切片验证 design.md 的核心架构：
+Validate the core architecture with one complete slice:
 
-1. 平台核心与 GUI **完全解耦**：Workbench 模块只依赖 `workbench-api`，不依赖 egui/gpui（验收 #21）；
-2. **产品构建时固定 GUI**：`product-egui-demo` 与 `product-gpui-demo` 是两个独立二进制，各自只链接一种前端（验收 #1/#22/#23）；
-3. 主窗口包含 **工具栏（RibbonBar 简化替身）、四周 Dock Panel、中央多标签内容区、状态栏/任务反馈区**（验收 #3）；
-4. Workbench 注册 **命令、工具栏组、Dock Panel、中央视图、文档类型、服务**（验收 #4）；
-5. 命令统一入口：工具栏、快捷键、视图内部交互都走命令系统（验收 #5）；
-6. 命令支持 **同步立即完成** 与 **后台线程执行**，后台任务有进度、协作式取消、明确终态（验收 #14/#15/#16）；
-7. 后台任务通过 **文档版本校验 + 受控提交** 写回文档，不直接改 UI 状态（验收 #17）；
-8. 可撤销命令支持 **撤销/重做**，不可撤销命令明确标识（验收 #18）；
-9. 布局用 **稳定 ID** 保存/恢复，缺失模块的布局项被跳过而不是启动失败（验收 #8/#9）；
-10. 视图通过 **GUI 无关的绘制抽象（PaintBackend）** 渲染，普通视图不接触 wgpu（验收 #10）。
+1. platform core fully decoupled from the GUI: Workbench modules depend only
+   on `workbench-api`, never on egui/gpui (acceptance #21);
+2. **the product fixes its GUI at build time**: `product-egui-demo` and
+   `product-gpui-demo` are separate binaries, each linking exactly one
+   frontend (acceptance #1/#22/#23);
+3. main window: **toolbar (RibbonBar stand-in), dock panels on four sides,
+   central multi-tab area, status bar / task feedback** (acceptance #3);
+4. Workbench registers **commands, toolbar groups, dock panels, central views,
+   document types, services** (acceptance #4);
+5. unified command entry: toolbar, hotkeys, and in-view interactions all go
+   through the command system (acceptance #5);
+6. commands support **sync (immediate)** and **background (threaded)**
+   execution; background tasks have progress, cooperative cancellation, and
+   terminal states (acceptance #14/#15/#16);
+7. background tasks write back through **document version checks + controlled
+   commits**, never touching UI state directly (acceptance #17);
+8. reversible commands support **undo/redo**; irreversible ones are marked
+   (acceptance #18);
+9. layout persists/restores with **stable IDs**; entries referencing missing
+   modules are skipped, never breaking startup (acceptance #8/#9);
+10. views render through a **GUI-agnostic PaintBackend**; ordinary views never
+    touch wgpu (acceptance #10).
 
-### 1.2 明确不做（留待后续里程碑）
+### 1.2 Explicitly out of scope (later milestones)
 
-| 项 | 原因 / 计划 |
+| Item | Reason / plan |
 |---|---|
-| RibbonBar（Tab/Group/Contextual Tab） | 用户指定本期用简单工具栏替代；工具栏模型按 Ribbon 形状建模（Group→Items，稳定 ID + 命令绑定），后续可平滑升级 |
-| wgpu 渲染服务 | 阶段 2 后；本期 PaintBackend 已预留"渲染能力按需声明"的位置 |
-| Python 插件（pyo3 Host API） | 阶段 3；本期先固化注册表/命令/上下文等将被 Host API 复用的接口 |
-| 浮动面板、跨区域拖拽停靠 | egui_tiles 已提供树形停靠基础，先验证固定四区 + 区域内标签 |
-| 菜单栏、命令面板 | RibbonBar 一起做 |
-| Rust 动态库插件 | 非目标（design.md §3.2） |
+| RibbonBar (Tab/Group/Contextual Tab) | replaced by a simple toolbar per product decision; the toolbar model is Ribbon-shaped (Group→Items, stable IDs, command binding), so the upgrade is smooth |
+| wgpu render service | phase 2+; PaintBackend already reserves the "capability declared per view" slot |
+| Python plugins (pyo3 Host API) | phase 3; interfaces the Host API will reuse are fixed first |
+| floating panels, cross-area drag-docking | egui_tiles already provides tree docking; validate fixed four areas + in-area tabs first |
+| menu bar, command palette | together with RibbonBar |
+| Rust dynamic-library plugins | non-goal (design.md §3.2) |
 
-### 1.3 技术选型（已确认）
+### 1.3 Technology choices (confirmed)
 
-- **egui 侧**：`egui` + `eframe`（窗口/事件循环）+ `egui_tiles`（树形 Dock/标签容器）。
-- **gpui 侧**：`gpui-ce` 0.2.x（crates.io 社区维护版，声明为 `gpui = { package = "gpui-ce" }`）+ `gpui-ce-platform`（font-kit）+ `gpui_ce_components` 0.2.0（官方 README 推荐组合）。
-- 平台核心零 GUI 依赖；仅 `serde/serde_json`（布局持久化）、`rfd`（系统文件对话框，OS 层基础设施）。
+- **egui side**: `egui` + `eframe` (window/event loop) + `egui_tiles` (tree
+  docking/tab containers).
+- **gpui side**: `gpui-ce` 0.2.x (community crates.io fork, declared as
+  `gpui = { package = "gpui-ce" }`) + `gpui-ce-platform` (font-kit) +
+  `gpui_ce_components` 0.2.0 (official README combination).
+- The platform core has zero GUI dependencies; only `serde/serde_json` (layout
+  persistence) and `rfd` (system file dialog, OS-level infrastructure).
 
-## 2. Workspace 结构与依赖方向
+## 2. Workspace structure and dependency direction
 
 ```text
 crates/
-  workbench-api        # 契约层：ID、几何/颜色、PaintBackend、Registry、贡献定义、
-                       #   ServiceHost(文档/任务/工作区/日志)、ViewInstance、CommandCtx、Workbench trait
-  workbench-core       # 运行时：产品装配、命令注册表+执行、任务事件泵、
-                       #   上下文快照、布局持久化、平台命令(新建/打开/保存/undo/redo/关闭标签)
-  workbench-ui-egui    # egui 前端适配器：渲染工作区模型 + PaintBackend 实现
-  workbench-ui-gpui    # gpui 前端适配器：同上
+  workbench-api        contracts: IDs, geometry/color, PaintBackend, Registry,
+                       contribution definitions, ServiceHost (docs/tasks/workspace/logs),
+                       ViewInstance, CommandCtx, Workbench trait
+  workbench-core       runtime: product assembly, command registry + execution, task pump,
+                       context snapshots, layout persistence, platform commands
+                       (new/open/save/undo/redo/close tab)
+  workbench-ui-egui    egui frontend: renders the workspace model + PaintBackend impl
+  workbench-ui-gpui    gpui frontend: same
 workbenches/
-  wb-example           # 示例 Workbench：只依赖 workbench-api（验收 #21 的硬约束）
+  wb-example           example Workbench: depends only on workbench-api (acceptance #21)
 products/
-  product-egui-demo    # 依赖 core + ui-egui + wb-example
-  product-gpui-demo    # 依赖 core + ui-gpui + wb-example
+  product-egui-demo    depends on core + ui-egui + wb-example
+  product-gpui-demo    depends on core + ui-gpui + wb-example
 ```
 
-依赖方向（与 design.md §5.1 一致）：
+Dependency direction (design.md §5.1):
 
 ```text
-product-* ─→ ui-*  ─→ core ─→ api
-product-* ─→ wb-example ─→ api     （绝不经过 ui-* / egui / gpui）
+product-* -> ui-*  -> core -> api
+product-* -> wb-example -> api     (never through ui-* / egui / gpui)
 ```
 
-## 3. 关键设计决策
+## 3. Key design decisions
 
-### 3.1 视图呈现：GUI 无关的 PaintBackend（design.md §9）
+### 3.1 View presentation: GUI-agnostic PaintBackend (design.md §9)
 
-`ViewInstance::paint(&mut self, painter: &mut dyn PaintBackend, rect: Rect, ctx: &mut ViewCtx)`。
-PaintBackend 提供 fill_rect / stroke_rect / line / circle / text / measure_text 六个原语，
-egui 适配器用 `egui::Painter` 实现，gpui 适配器用 canvas 元素 + paint_quad/paint_text 实现。
-视图自管命中测试（面板中的"取消"按钮即视图绘制 + 点击命中），证明该抽象足够支撑工程面板的常见交互。
-普通视图完全不接触 GPU；wgpu 能力后续作为可选 trait 扩展（`GpuViewInstance`），与本 trait 并列。
+`ViewInstance::paint(&mut self, painter: &mut dyn PaintBackend, rect: Rect, ctx: &mut ViewCtx)`.
+PaintBackend offers fill_rect / stroke_rect / line / circle / text /
+measure_text; the egui adapter implements it over `egui::Painter`, the gpui
+adapter over a canvas element + paint_quad/paint_text. Views own their hit
+testing (the cancel button in a panel is view-drawn + click hit-test),
+proving the abstraction supports common engineering-panel interactions.
+Ordinary views never touch the GPU; the wgpu capability slots in later as a
+parallel optional trait.
 
-### 3.2 视图实例与核心状态的自借用
+### 3.2 View instances vs core state self-borrowing
 
-视图实例（Box<dyn ViewInstance>）存放于核心状态（面板/标签槽位）内，绘制时又需要 &mut 核心状态。
-采用**换出-换回**（`mem::replace` 占位）模式：绘制前把实例从槽位取出，绘制后放回。egui/gpui 两端一致。
+View instances (`Box<dyn ViewInstance>`) live inside core state (panel/tab
+slots) yet painting needs `&mut` core state. Solution: **take-out/put-back**
+(`mem::replace` with a placeholder) before painting. Identical on egui/gpui.
 
-### 3.3 命令系统（design.md §10）
+### 3.3 Command system (design.md §10)
 
-- `CommandDef { id, title, hotkey, enabled: Option<EnableFn>, kind }`；
-- `kind = Sync(handler)`：UI 线程立即执行；`kind = Background(collect)`：UI 线程收集输入并返回 TaskSpec，核心投入后台线程；
-- 后台任务经 `TaskCtx`（stage/progress/log/check_cancelled）回报事件，终态为 Succeeded/Failed/Cancelled（§10.2 状态机）；
-- 任务结果携带 `DocCommit { doc_id, expect_revision, label, content }`，主线程 frame_tick 泵事件时**校验文档版本**后提交（§10.5），版本过期则拒绝并记日志；
-- 启用状态由 `CtxSnapshot { active_document, active_view_type, work_mode }` 驱动，中央标签切换 → 上下文更新 → 工具栏按钮状态刷新（验收 #7）。
+- `CommandDef { id, title, hotkey, enabled: Option<EnableFn>, kind }`;
+- `kind = Sync(handler)`: executes immediately on the UI thread;
+  `kind = Background(collect)`: collects input on the UI thread and returns a
+  TaskSpec; the core dispatches it to a background thread;
+- background tasks report through `TaskCtx` (stage/progress/log/check_cancelled)
+  with terminal states Succeeded/Failed/Cancelled (§10.2 state machine);
+- task results carry `DocCommit { doc_id, expect_revision, label, content }`;
+  the core validates the **document version** inside the frame_tick event pump
+  before committing (§10.5), rejecting stale revisions with a log entry;
+- enablement derives from `CtxSnapshot { active_document, active_view_type,
+  work_mode }`; switching the central tab updates the context and toolbar
+  button states (acceptance #7).
 
-### 3.4 文档与撤销（design.md §12.1/12.2）
+### 3.4 Documents and undo (design.md §12.1/12.2)
 
-平台维护通用文档生命周期（新建/打开/保存/脏标记/修订号/标题），领域内容以 `Box<dyn DocumentContent>` 类型擦除存放，
-由 Workbench 注册 `DocumentTypeDef { extensions, create_default, serialize, deserialize }` 提供编解码。
-撤销采用快照式（`before/after` 内容克隆）——对切片够用；design.md 要求的"不强制全量复制"留作大文档优化点（历史条目可换 delta）。
+The platform owns the document lifecycle (create/open/save/dirty flag/
+revision/title); domain content is stored type-erased as
+`Box<dyn DocumentContent>`; Workbenches register
+`DocumentTypeDef { extensions, create_default, serialize, deserialize }`.
+Undo is snapshot-based (`before/after` content clones) — sufficient for the
+slice; the "no forced full copy" requirement remains an optimization point for
+large documents (history entries can become deltas).
 
-### 3.5 布局持久化（design.md §6.5）
+### 3.5 Layout persistence (design.md §6.5)
 
-`layout.json`（产品配置目录）：面板（稳定 ID → 区域/顺序/尺寸/可见）、中央标签（视图类型 ID + 标题）、活动标签、区域活动页、工作模式。
-恢复时未注册的 ID 跳过并记日志；每帧可保存、启动时恢复。
+`layout.json` (product config dir): panels (stable ID → area/order/size/
+visible), central tabs (view type ID + title), active tab, per-area active
+page, work mode. On restore, unregistered IDs are skipped and logged.
 
-### 3.6 工具栏模型（RibbonBar 前身）
+### 3.6 Toolbar model (precursor of the RibbonBar)
 
-`ToolbarGroup { id, title, items: Vec<ToolbarItem::Command { command, label? }> }`——与 Ribbon 的 Group→Item 同构，
-升级 RibbonBar 时仅需在外层加 Tab 维度与控件类型，命令绑定与状态机制不变。
+`ToolbarGroup { id, title, items: Vec<ToolbarItem::Command { command, label? }> }`
+— isomorphic to the Ribbon's Group→Item; upgrading to a full RibbonBar only
+adds the Tab dimension and widget kinds, keeping command binding and state
+mechanics unchanged.
 
-## 4. 里程碑与任务分解
+## 4. Milestones and task breakdown
 
-| # | 里程碑 | 内容 | 验证 |
+| # | Milestone | Content | Verification |
 |---|---|---|---|
-| M0 | 骨架 | workspace、7 crate + 2 product、依赖组合（gpui-ce 官方组合 / egui_tiles）解析通过 | `cargo check` |
-| M1 | api 契约层 | ID/几何/PaintBackend/Registry/ServiceHost/任务与文档模型 | 编译 + 单测 |
-| M2 | core 运行时 | 装配、命令执行、任务泵、快照、平台命令、布局持久化 | `cargo test`（无窗口可测） |
-| M3 | wb-example | 文档类型+6 个演示命令+4 个面板+2 个中央视图 | selfcheck |
-| M4 | egui 前端 | 工作区渲染、PaintBackend、快捷键、egui_tiles 停靠 | 编译 + smoke |
-| M5 | gpui 前端 | 同上（gpui-ce + components 组合） | 编译 + smoke |
-| M6 | 收尾 | 全量测试、selfcheck(--selfcheck 无头自检)、smoke(--smoke 2s 自动退出)、文档 | 汇总报告 |
+| M0 | skeleton | workspace, crates + products, dependency resolution (gpui-ce combo / egui_tiles) | `cargo check` |
+| M1 | api contracts | IDs/geometry/PaintBackend/Registry/ServiceHost/task & document models | compile + unit tests |
+| M2 | core runtime | assembly, command execution, task pump, snapshots, platform commands, layout persistence | `cargo test` (headless) |
+| M3 | wb-example | doc type + 6 demo commands + 4 panels + 2 central views | selfcheck |
+| M4 | egui frontend | workspace rendering, PaintBackend, hotkeys, egui_tiles docking | compile + smoke |
+| M5 | gpui frontend | same (gpui-ce + components combo) | compile + smoke |
+| M6 | wrap-up | full tests, headless `--selfcheck`, `--smoke` (2s auto-exit), docs | summary report |
 
-## 5. 验收映射（design.md §17 → 本期实现）
+## 5. Acceptance mapping (design.md §17 → this slice)
 
-- #1/#22/#23 → 两个独立 product crate，各自唯一 GUI；
-- #3/#4/#5 → 工具栏 + Dock + 中央标签 + 命令系统统一入口；
-- #6/#7 → 打开/激活/重排/关闭标签，切换即刷新 CtxSnapshot 与按钮状态；
-- #8/#9 → layout.json 稳定 ID 持久化，未知 ID 跳过；
-- #10 → PaintBackend 普通 GPU 无关视图；
-- #14/#15/#16 → Sync/Background 命令、进度、取消、终态、状态栏展示；
-- #17 → DocCommit + revision 校验；
-- #18 → 快照式 undo/redo + 不可撤销命令标识（`CommandDef::undoable=false` 只记日志不入历史）；
-- #19/#20 → 插件机制本期未涉及，Registry 预留初始化错误隔离（catch_unwind）与 API 版本字段；
-- #21 → wb-example 的 Cargo.toml 无任何 GUI 依赖（CI 可断言）。
+- #1/#22/#23 → two independent product crates, each with exactly one GUI;
+- #3/#4/#5 → toolbar + dock + central tabs + unified command entry;
+- #6/#7 → open/activate/reorder/close tabs; switching refreshes CtxSnapshot and button states;
+- #8/#9 → layout.json stable-ID persistence, unknown IDs skipped;
+- #10 → PaintBackend, ordinary GPU-free views;
+- #14/#15/#16 → Sync/Background commands, progress, cancellation, terminal states, status bar;
+- #17 → DocCommit + revision check;
+- #18 → snapshot undo/redo + irreversible commands marked (logged, not in history);
+- #19/#20 → plugin mechanism deferred; Registry keeps initialization error isolation
+  (catch_unwind) and the API version field;
+- #21 → wb-example's Cargo.toml has zero GUI dependencies (assertable in CI).
 
-## 6. 风险与对策
+## 6. Risks and mitigations
 
-| 风险 | 对策 |
+| Risk | Mitigation |
 |---|---|
-| gpui-ce API 与记忆不符、迭代快 | 先 `cargo fetch` 后直接读 `~/.cargo/registry/src` 中的真实源码再写适配器；先编译最小窗口骨架再堆功能 |
-| gpui_ce_components 与 gpui-ce 版本不统一导致类型分裂 | 依赖统一放 workspace.dependencies；`cargo tree -i gpui-ce` 断言单一实例 |
-| egui_tiles 与自有工作区模型冲突 | 核心保存"逻辑布局"（面板→区域），egui_tiles 只作为 egui 端的物理布局器；gpui 端用自绘简单布局，两端不要求像素一致（§6.6） |
-| 平台抽象过度 | 严格按验收清单裁剪，没有 UI 需求的接口一律不加 |
+| gpui-ce API drift | `cargo fetch` first, read the real sources under `~/.cargo/registry/src`, compile a minimal window skeleton before adding features |
+| gpui_ce_components / gpui-ce version mismatch splitting types | all deps in workspace.dependencies; assert single instance via `cargo tree -i gpui-ce` |
+| egui_tiles conflicting with the workspace model | core stores the "logical layout" (panel→area); egui_tiles is only the egui-side physical layouter; gpui uses hand-rolled simple layout — pixel parity not required (§6.6) |
+| over-abstracted platform | strictly trim to the acceptance checklist; no interface without a UI need |
 
-## 7. 阶段 2 实施记录（异步命令与事务，已完成）
+## 7. Phase 2 record (async commands & transactions, done)
 
-对应 design.md §18 阶段 2 与 §10 命令系统。在 M1 垂直切片基础上补齐：
+Implements design.md §18 phase 2 and §10. Built on the M1 vertical slice:
 
-### 7.1 三档命令执行模型（§10.6 调用路径的完整实现）
+### 7.1 Three-tier command execution (complete §10.6 invocation path)
 
-| 档位 | API | 载体 | 适用 |
+| Tier | API | Carrier | Use |
 |---|---|---|---|
-| Sync | `CommandKind::Sync` | UI 线程立即执行 | 轻量操作（<16ms） |
-| Async（新增） | `CommandKind::Async` → `AsyncSpec{ job: TaskCtx → BoxFuture }` | **平台共享异步执行器**（`workbench-core::executor::AsyncExecutor`，async-executor + 2 工作线程） | 轻量并发 IO/轮询，`async_io::Timer` 等异步等待，不独占线程 |
-| Background | `CommandKind::Background` → `TaskSpec{ job: &mut TaskCtx → Result }` | 每任务独占线程 | 重 CPU/阻塞 IO |
+| Sync | `CommandKind::Sync` | UI thread, immediate | lightweight ops (<16ms) |
+| Async (new) | `CommandKind::Async` → `AsyncSpec{ job: TaskCtx → BoxFuture }` | **platform shared async executor** (`workbench-core::executor::AsyncExecutor`, async-executor + 2 workers) | light concurrent IO/polling, `Timer::after` awaits, no dedicated thread |
+| Background | `CommandKind::Background` → `TaskSpec{ job: &mut TaskCtx → Result }` | dedicated thread per task | heavy CPU / blocking IO |
 
-### 7.2 统一命令调用结果（§10.1/§16.4）
+### 7.2 Unified command invocation results (§10.1/§16.4)
 
-- `execute_command_tracked() → CommandInvocation { record, result, task_id }`：同步命令立即终态；异步/后台返回任务句柄；
-- 平台维护**调用历史环形缓冲**（100 条）：`recent_invocations()` 可查询每次调用的 `execution/status/task_id/note`；
-- 异步与后台任务的终态事件自动推进对应调用记录（Succeeded/Failed/Cancelled + 备注），未注册命令也留有 Failed 记录。
+- `execute_command_tracked() → CommandInvocation { record, result, task_id }`:
+  sync commands reach a terminal state immediately; async/background return a task handle;
+- the platform keeps a **ring-buffer invocation history** (100 entries):
+  `recent_invocations()` exposes execution/status/task_id/note per invocation;
+- terminal task events automatically advance the matching invocation record;
+  unknown commands also leave a Failed record.
 
-### 7.3 文档事务（§10.5/§12.2）
+### 7.3 Document transactions (§10.5/§12.2)
 
-- `DocCommit { expect_revision }` 版本校验提交（M1 已有）；本期补充 `DocumentService::revision()` 查询 API；
-- 过期版本/已关闭文档一律拒绝并记录警告日志（策略：Reject；领域模块参与定义的其他策略留扩展点）。
+- `DocCommit { expect_revision }` version-checked commit (from M1); this phase
+  adds the `DocumentService::revision()` query API;
+- stale revisions / closed documents are always rejected with a warning log
+  (policy: Reject; other policies remain a domain extension point).
 
-### 7.4 验证
+### 7.4 Verification
 
-- 新增 5 项单元测试：异步完成+记录终态、异步协作取消、执行器并发（4 任务/2 线程池）、调用历史环形容量+未注册记录、修订号 API；
-- selfcheck 扩展至 **12 项**（新增 #10 异步命令、#11 统一调用结果、#12 修订号 API），egui/gpui 双端 12/12 通过；
-- 双 GUI `--smoke` 通过，进程干净退出（执行器线程经 shutdown 标志退出，产品入口 `process::exit(0)` 兜底）；
-- demo 新增「异步扫描(执行器)」命令，任务面板显示任务载体标签（`[异步]`/`[线程]`）。
+- 5 new unit tests: async completion + record terminal state, async
+  cooperative cancel, executor concurrency (4 tasks / 2-thread pool), ring
+  history + unknown-command record, revision API;
+- selfcheck extended to **12 items**; egui/gpui both 12/12;
+- both GUIs `--smoke` pass with clean process exit (executor threads exit via
+  shutdown flag; product entry `process::exit(0)` as a backstop);
+- demo adds an "Async scan (executor)" command; task panel shows the carrier
+  tag (`[async]`/`[thread]`).
 
-## 8. 阶段 3 实施记录（Python 插件闭环，已完成）
+## 8. Phase 3 record (Python plugin loop, done)
 
-对应 design.md §11 与 §18 阶段 3。新增 crate `workbench-python`（pyo3 0.29 + auto-initialize）。
+Implements design.md §11 and §18 phase 3. New crate `workbench-python`
+(pyo3 0.29 + auto-initialize).
 
-### 8.1 插件模型
+### 8.1 Plugin model
 
-| 环节 | 实现 |
+| Aspect | Implementation |
 |---|---|
-| 清单 | `plugin.toml`（§11.2 字段：id/name/version/api_version/entry_point/compatibility/permissions），`toml` 解析 + 校验（空 ID、非法字符、入口格式） |
-| 发现 | `discover(dirs)`：目录列表下每个含 `plugin.toml` 的子目录；产品发现路径 = 仓库 `plugins/` + `%APPDATA%/<product-id>/plugins` |
-| 版本检查 | `api_version != "1"`（`HOST_API_VERSION`）→ 拒绝加载并给出可读原因（验收 #20） |
-| 生命周期 | importlib 从文件加载模块 → 调用 `register(api)` → 收集请求 → 统一落盘到 `Registry`；重复 ID 跳过 |
-| 错误隔离 | 清单/加载/执行失败全部进入 `plugins_rejected`（原因可查询），应用继续运行（验收 #19） |
-| 来源标记 | `CommandDef::source` / `ToolbarGroup::source`；`remove_commands_from_source()` 支持卸载清理（§16.2） |
+| manifest | `plugin.toml` (§11.2 fields), toml parsing + validation (empty ID, bad chars, entry format) |
+| discovery | `discover(dirs)`: subdirectories of the search dirs containing `plugin.toml`; product paths = repo `plugins/` + `%APPDATA%/<product-id>/plugins` |
+| version check | `api_version != "1"` (`HOST_API_VERSION`) → refuse with a readable reason (acceptance #20) |
+| lifecycle | importlib module load → call `register(api)` → collect requests → apply to `Registry` atomically; duplicate IDs skipped |
+| error isolation | manifest/load/execution failures land in `plugins_rejected` (reason queryable); the app keeps running (acceptance #19) |
+| source tagging | `CommandDef::source` / `ToolbarGroup::source`; `remove_commands_from_source()` supports unload cleanup (§16.2) |
 
-### 8.2 Host API v1（design.md §11.3/§11.4 的子集）
+### 8.2 Host API v1 (subset of design.md §11.3/§11.4)
 
 ```python
 def register(api):
-    api.log_info("…")
-    api.register_command(id, title, callback)                    # 同步：UI 线程，可返回字符串备注
-    api.register_command(id, title, callback, background=True)   # 后台：callback(task, args) 任务线程
-    api.add_toolbar_item(group, command, label=None)             # 工具栏贡献（组不存在则创建）
-    api.api_version                                              # 宿主 API 版本
-# task 对象：report(fraction, stage) / set_stage / log / check_cancelled()（抛 PluginCancelled）/ is_cancelled()
+    api.log_info("...")
+    api.register_command(id, title, callback)                    # sync: UI thread, may return a note string
+    api.register_command(id, title, callback, background=True)   # background: callback(task, args) on a task thread
+    api.add_toolbar_item(group, command, label=None)             # toolbar contribution (group auto-created)
+    api.api_version                                              # host API version
+# task object: report(fraction, stage) / set_stage / log / check_cancelled() (raises PluginCancelled) / is_cancelled
 ```
 
-- Python 回调期间不持注册表借用——请求先收集（`Collected`），register 返回后统一应用（重复 ID/来源校验走平台路径）；
-- 协作式取消：`task.check_cancelled()` 抛 `PluginCancelled`，宿主映射为任务 Cancelled 终态；
-- GIL 边界：同步插件命令在 UI 线程 attach；后台命令在任务线程 attach（CPython 周期性让出 GIL，UI 不会被长时间阻塞；重计算任务应走 background 档）。
+- Python callbacks never hold a registry borrow — requests are collected
+  (`Collected`) and applied after `register` returns (duplicate ID / source
+  validation via the platform path);
+- cooperative cancellation: `task.check_cancelled()` raises `PluginCancelled`,
+  mapped by the host to the Cancelled task state;
+- GIL boundary: sync plugin commands attach on the UI thread; background
+  commands attach on the task thread (CPython releases the GIL periodically —
+  heavy jobs should use the background tier).
 
-### 8.3 演示插件与验证
+### 8.3 Demo plugin and verification
 
-- `plugins/demo-plugin/`：同步命令 `demo.hello`（返回备注进调用历史）+ 后台进度任务 `demo.python_progress` + 工具栏组 `plugin.demo`；
-- selfcheck 扩展至 **14 项**（#13 发现/注册/工具栏贡献、#14 同步备注 + 后台任务完成），egui/gpui 双端 14/14；
-- `workbench-python` 专项测试 **9 项**：清单解析/版本拒绝/ID 校验、好插件装载与来源标记、损坏语法隔离、重复 ID 跳过、同步命令备注进历史、Python 异常→命令 Failed、后台任务完成与协作取消、来源移除清理；
-- 运行前提：Python 解释器目录需在 PATH（本机 `C:\ProgramData\miniforge3`），构建用解释器经 `.cargo/config.toml` 的 `PYO3_PYTHON` 指定。
+- `plugins/demo-plugin/`: sync command `demo.hello` (note into invocation
+  history) + background progress task `demo.python_progress` + toolbar group
+  `plugin.demo`;
+- selfcheck extended to **14 items**; egui/gpui both 14/14;
+- `workbench-python` dedicated tests, **9 items**: manifest parse / version
+  reject / ID validation, good-plugin load with source tag, broken-syntax
+  isolation, duplicate-ID skip, sync note into history, Python exception →
+  command Failed, background completion and cooperative cancel, source removal
+  cleanup;
+- runtime requirement: the Python interpreter directory must be on PATH (this
+  machine: `C:\ProgramData\miniforge3`); the build interpreter is set via
+  `PYO3_PYTHON` in `.cargo/config.toml`.
 
-## 9. RibbonBar 实施记录（design.md §6.1/§7，已完成）
+## 9. RibbonBar record (design.md §6.1/§7, done)
 
-按原计划以简单工具栏过渡，本期升级为完整 RibbonBar。
+Originally a simple toolbar per product decision; upgraded to a full RibbonBar.
 
-### 9.1 平台模型（workbench-api）
+### 9.1 Platform model (workbench-api)
 
-- `RibbonTab { id, title, groups: Vec<ToolbarGroup>, source }`——Tab 维度叠加在既有 Group→Item 模型上，命令绑定与启用状态机制不变；
-- `WorkspaceState::add_ribbon_tab()`：同 ID Tab 合并组、组内同 ID 合并条目（受控贡献 §7.3）；
-- `add_toolbar_group()` 成为兼容入口：组落入默认 Tab `app.home`「主页」——平台命令、插件 `add_toolbar_item` 等旧路径零改动迁移；
-- `active_ribbon_tab` 持久化进 `LayoutFile`（旧布局文件无此字段回落首个 Tab，未注册 Tab 回落并记诊断）；
-- `Registry::add_ribbon_tab()`：装配期收集，`build()` 先注册显式 Tab 再落 legacy 组。
+- `RibbonTab { id, title, groups: Vec<ToolbarGroup>, source }` — the Tab
+  dimension layered over the existing Group→Item model; command binding and
+  enablement mechanics unchanged;
+- `WorkspaceState::add_ribbon_tab()`: same-ID Tabs merge groups, same-ID
+  groups merge items (controlled contribution, §7.3);
+- `add_toolbar_group()` becomes the compatibility entry: groups land in the
+  default Tab `app.home` ("Home") — platform commands and plugin
+  `add_toolbar_item` migrate with zero changes;
+- `active_ribbon_tab` persists in `LayoutFile` (old layout files fall back to
+  the first Tab; unregistered Tabs fall back with a diagnostic);
+- `Registry::add_ribbon_tab()`: collected during assembly; `build()` registers
+  explicit Tabs first, then legacy groups.
 
-### 9.2 前端渲染（egui / gpui）
+### 9.2 Frontend rendering (egui / gpui)
 
-- 两端均为「Tab 行 + 活动 Tab 的 Group 行」两段式 Ribbon：Tab 高亮（egui 描边 / gpui 蓝色下划线）、组内命令按钮横排、组名与按钮行等宽居中、组分隔线、悬停 tooltip（命令名 + 快捷键）、命令启用状态实时刷新；
-- wb-example 分两个 Tab：「主页」（文件/编辑/图形 + 平台「窗口」组 + 插件 `plugin.demo` 组）、「工具」（视图/演示）。
+Both render a two-band Ribbon: Tab row + Group row of the active Tab. Active
+Tab highlighted (egui outline / gpui underline), commands horizontally laid
+out, group captions centered under the command row, group separators, hover
+tooltips (command + hotkey), live enablement.
 
-### 9.3 验证与修复
+wb-example organizes two Tabs: "Home" (file/edit/shape groups + platform
+"Window" group + plugin `plugin.demo` group) and "Tools" (view/demo).
 
-- 新增 2 项 Ribbon 单元测试（Tab 合并/legacy 兼容/活动 Tab 切换/布局往返/未注册 Tab 回落），core 18 项、python 9 项全过；
-- selfcheck 扩展至 **15 项**（#15 Ribbon 模型检查），egui/gpui 双端 15/15；
-- **真实渲染经 GPU 回读截图确认**（见 §9.4 方法）：两端的 Tab 行、5 个命令组、组名、禁用态按钮（撤销/重做按上下文置灰）、插件贡献组、中文文本全部正确。
+### 9.3 Verification and fixes
 
-### 9.4 本期排障记录（重要经验）
+- 2 new Ribbon unit tests (Tab merge / legacy compat / active Tab switch /
+  layout round-trip / unregistered Tab fallback); core 18, python 9, all green;
+- selfcheck extended to **15 items**; egui/gpui both 15/15;
+- **real rendering confirmed via GPU readback screenshots**: Tab rows, 5
+  command groups, group captions, disabled buttons (undo/redo greyed by
+  context), plugin-contributed group, and CJK text all correct.
 
-1. **GDI 截屏读不到 GPU 窗口**：`CopyFromScreen`（白）与 `PrintWindow`（黑）均无法捕获 Directx/GL 交换链内容，造成"窗口白屏"的误判。可靠方法：① `EFRAME_SCREENSHOT_TO=<path>` 环境变量（eframe 内置 GPU 回读，退出时存 PNG）；② egui_kittest 离屏渲染（已验证后移除，保留记录）。
-2. **egui 缺 CJK 字形**：内置字体无中文，已加载系统字体回退（msyh.ttc 等 7 个候选路径，跨平台）。
-3. **egui 反应式渲染 vs smoke 退出**：界面静止后 egui 不产帧，`logic()` 不被调用，smoke 的 Close 永不发送（旧版写死 2.5s 恰在活动帧窗口内掩盖了此问题）。修复：smoke 期间 `request_repaint_after(200ms)`；同时 `--smoke` 支持自定义秒数（`--smoke [secs]`，默认 2.5），此前秒数参数被忽略。
-4. eframe 切换为 **glow 后端**（wgpu 呈现在本机同样白屏但无诊断信息；glow 为 egui 官方传统后端，路径更保守）。
+### 9.4 Debugging notes (valuable lessons)
 
-## 10. 阶段 5 实施记录（生产级扩展第一期，已完成）
+1. **GDI screenshots cannot read GPU windows**: `CopyFromScreen` (white) and
+   `PrintWindow` (black) both miss DirectX/GL swapchains, causing a long
+   "blank window" misdiagnosis. Reliable methods: (a) the
+   `EFRAME_SCREENSHOT_TO=<path>` env var (built-in eframe GPU readback, PNG on
+   exit); (b) egui_kittest offscreen rendering (used once, then removed).
+2. **egui lacks CJK glyphs**: built-in fonts have no Chinese; system font
+   fallbacks now load (msyh.ttc etc., 7 candidate paths, cross-platform).
+3. **egui reactive rendering vs smoke exit**: when the UI is idle egui emits
+   no frames, so `logic()` stops being called and the smoke Close never fires
+   (the old hard-coded 2.5s fit inside the startup activity window and masked
+   this). Fix: `request_repaint_after(200ms)` during smoke; also `--smoke`
+   now accepts a duration (`--smoke [secs]`, default 2.5) — the value was
+   previously ignored.
+4. eframe switched to the **glow backend** (wgpu presentation also appeared
+   blank locally with zero diagnostics; glow is egui's traditional backend
+   with a more conservative path).
 
-对应 design.md §18 阶段 5。按"真实产品需要"裁剪落地 5 项，1 项设计预留。
+## 10. Phase 5 record (production hardening, first batch, done)
 
-### 10.1 设置服务（§12.4）
+Implements design.md §18 phase 5. Landed 5 items trimmed by real product need,
+1 item design-reserved.
 
-- `api::Settings`：扁平点分键的 JSON 持久化（`<配置目录>/settings.json`），写入即落盘；
-- 首个消费方：`autosave.interval_secs`（默认 30，最小 5）。
+### 10.1 Settings service (§12.4)
 
-### 10.2 自动保存 + 崩溃恢复（§12.1/§18）
+- `api::Settings`: flat dotted-key JSON persistence (`<config dir>/settings.json`),
+  write-through; first consumer: `autosave.interval_secs` (default 30, min 5).
 
-- 会话标记：`<配置目录>/session.clean`——build 时删除、Drop 时写入；缺失即判定异常退出；
-- 自动保存：`frame_tick` 按间隔对**脏文档**序列化到 `<配置目录>/autosave/`（内容文件 + JSON 旁车元数据），不改文档 dirty/path；
-- 启动恢复：无 clean 标记时自动打开自动保存文档，标题加 `[恢复]` 前缀并标记未保存（保存失败保留未保存状态的既有语义不变），恢复后清理目录；
-- `app.autosave.now` 命令手动触发；selfcheck 以**子进程自举**验证全链路（A 会话脏文档→自动保存→删标记模拟崩溃→B 会话恢复）。
+### 10.2 Autosave + crash recovery (§12.1/§18)
 
-### 10.3 插件运行时管理（§16.2/§18）
+- session marker: `<config dir>/session.clean` — deleted at build, written on
+  Drop; missing means abnormal exit;
+- autosave: `frame_tick` serializes **dirty documents** into
+  `<config dir>/autosave/` (content file + JSON sidecar metadata) on interval,
+  without touching document dirty/path state;
+- startup recovery: without a clean marker, autosaved documents reopen with a
+  `[Recovered]` title prefix and dirty=true (existing "save failure keeps
+  unsaved state" semantics intact); the directory is cleaned afterwards;
+- `app.autosave.now` command for manual trigger; the selfcheck validates the
+  full chain via a **subprocess bootstrap** (session A dirty doc → autosave →
+  delete marker → session B recovery).
 
-- `AppServices::disable_plugin(id)`：移除插件命令（`Registry::remove_commands_from_source`）、清理 Ribbon 组/Tab（`WorkspaceState::remove_commands`）、更新 `host.plugins` 状态镜像；
-- 平台命令 `app.plugins.disable`（args: id）；
-- 平台「插件」面板：列出 Loaded/Rejected/Disabled 及原因，Loaded 项提供「禁用」按钮（面板内自绘 + 命中测试）。
+### 10.3 Plugin runtime management (§16.2/§18)
 
-### 10.4 诊断面板 + 帧统计（§16.3/§18）
+- `AppServices::disable_plugin(id)`: removes plugin commands
+  (`Registry::remove_commands_from_source`), cleans Ribbon groups/Tabs
+  (`WorkspaceState::remove_commands`), updates the `host.plugins` mirror;
+- platform command `app.plugins.disable` (args: id);
+- platform "Plugins" panel: lists Loaded/Rejected/Disabled with reasons;
+  Loaded entries expose a Disable button (panel-drawn + hit-tested).
 
-- `ServiceHost::record_frame(dt_ms)`：前端每帧上报（egui logic / gpui render），维护帧数与 EMA 平均帧耗时；
-- 平台「诊断」面板：GUI 后端标签（`builder.with_backend_label`）、运行时长、帧统计、文档/未保存数、后台任务、自动保存状态与间隔。
+### 10.4 Diagnostics panel + frame statistics (§16.3/§18)
 
-### 10.5 自动化与性能测试（§16.4/§18）
+- `ServiceHost::record_frame(dt_ms)`: reported by the frontend every frame
+  (egui logic / gpui render), maintaining frame count and EMA frame time;
+- platform "Diagnostics" panel: GUI backend label
+  (`builder.with_backend_label`), uptime, frame stats, document/unsaved
+  counts, background tasks, autosave state and interval.
 
-- `core/tests/perf.rs` 3 项：1 万次同步命令分发（µs 级/次）、20k 元素大文档 200 次可撤销编辑 + 满容量撤销/重做、100 个并发后台任务泵——带宽松量级断言防退化；
-- `scripts/verify.ps1`：check → 全量 test → 双 selfcheck → 双 smoke 一键验证（含 Python PATH 处理）；
-- `[profile.release]` 调优（thin LTO、codegen-units=1、strip debuginfo）。
+### 10.5 Automation & performance tests (§16.4/§18)
 
-### 10.6 设计预留（本期未实现，触发条件与形状）
+- `core/tests/perf.rs`, 3 items: 10k sync command dispatches (µs-level each),
+  200 reversible edits + full-capacity undo/redo on a 20k-element document,
+  100 concurrent background tasks through the pump — with loose magnitude
+  assertions against regressions;
+- `scripts/verify.ps1`: check → full tests → both selfchecks → both smokes in
+  one shot (handles the Python PATH);
+- `[profile.release]` tuning (thin LTO, codegen-units=1, strip debuginfo).
 
-| 项 | 触发条件 | 设计草图 |
+### 10.6 Design reservations (not implemented; trigger conditions and shape)
+
+| Item | Trigger | Sketch |
 |---|---|---|
-| 不可信插件进程隔离（§11.5"如需要"） | 出现运行不可信插件的真实需求 | manifest 增加 `sandbox = "process"`；产品二进制 `--plugin-worker <dir>` 子进程模式内嵌 pyo3 加载插件，宿主经 stdio JSON-RPC 转发 register/call/progress；命令调用走现有 InvocationRecord 通道 |
-| 插件来源管理与更新 | 插件分发渠道建立后 | `plugin.toml [source]` + 本地 repo 目录比对版本（无网络依赖的增量） |
-| GPU 资源恢复/视图诊断 | wgpu 渲染服务落地后（§9.4） | 渲染服务持有设备生命周期，诊断面板扩展 GPU 适配器/视图资源条目 |
-| 多平台打包 | 多平台发行需求确立后 | cargo-dist 或 per-target 脚本；Windows 包已可由 release profile + verify.ps1 产出 |
+| process isolation for untrusted plugins (§11.5 "if needed") | a real need to run untrusted plugins | manifest gains `sandbox = "process"`; product binary gains a `--plugin-worker <dir>` subprocess mode embedding pyo3; host forwards register/call/progress over stdio JSON-RPC; command calls reuse the existing InvocationRecord channel |
+| plugin source management & updates | once a distribution channel exists | `plugin.toml [source]` + local repo directory version comparison (no network dependency initially) |
+| GPU resource recovery / view diagnostics | after the wgpu render service lands (§9.4) | render service owns device lifecycle; diagnostics panel gains GPU adapter / per-view resource entries |
+| multi-platform packaging | once multi-platform distribution is needed | cargo-dist or per-target scripts; the Windows package is already producible via release profile + verify.ps1 |
 
-## 11. 开源发布准备（已完成）
+## 11. Open-source release preparation (done)
 
-- 协议收敛为 **MIT**（workspace `license` + 根 [LICENSE](LICENSE)）；
-- 全部可发布 crate 元数据齐备：description/keywords/categories/repository/readme；
-- crates.io 名称可用性已确认（workbench-api/core/python/ui-egui/ui-gpui/example 均可用）；
-- `wb-example` 包名改为 `workbench-example`（lib 名保持 `wb_example`，代码零改动）；
-- 内部依赖在 workspace.dependencies 中补 `version`（path+version 双声明，满足发布要求）；
-- 两个示例产品 `publish = false`；
-- `cargo package -p workbench-api`（含构建验证）通过；其余 crate 的 package 失败仅为
-  "依赖尚未发布到 registry" 的顺序约束，README「发布」一节已写明发布顺序（api → core → 其余）；
-- eframe 移除内部调试 feature `__screenshot`（验证手法保留在 README 注记）；
-- 清理遗留：selfcheck 的 `_path_use` 死代码、`Check::skip` 的多余 allow；
-- `.cargo/config.toml` 的 PYO3_PYTHON 加多平台探测说明（机器相关值，开源后各机器自行调整）。
+- License converged to **MIT** (workspace `license` + root [LICENSE](LICENSE));
+- all publishable crates carry full metadata: description/keywords/categories/
+  repository/readme;
+- crates.io name availability confirmed (workbench-api/core/python/ui-egui/
+  ui-gpui/example all free);
+- `wb-example` package renamed to `workbench-example` (lib name stays
+  `wb_example`, zero code changes);
+- internal dependencies in workspace.dependencies gained `version` (path +
+  version dual declaration, required for publishing);
+- both example products `publish = false`;
+- `cargo package -p workbench-api` (including build verification) passes; the
+  other crates' package failures are only the "dependency not yet published"
+  ordering constraint — the README "Publishing" section documents the order
+  (api → core → the rest);
+- eframe drops the internal debug feature `__screenshot` (the verification
+  method is preserved as a README note);
+- leftovers cleaned: selfcheck `_path_use` dead code, `Check::skip` redundant allow;
+- `.cargo/config.toml` `PYO3_PYTHON` gains cross-platform probing notes
+  (machine-specific value; each machine adjusts after open-sourcing).

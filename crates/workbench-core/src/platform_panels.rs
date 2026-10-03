@@ -1,4 +1,7 @@
-//! 平台内置面板（阶段 5，§18）：诊断面板与插件管理面板。
+//! Built-in platform panels (phase 5, §18): the Diagnostics and Plugins
+//! management panels. Drawn through the GUI-agnostic PaintBackend and
+//! registered into every product by platform_cmds.
+
 //! 通过 GUI 无关的 PaintBackend 绘制，随 platform_cmds 注册进每个产品。
 
 use workbench_api as wb;

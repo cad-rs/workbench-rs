@@ -1,6 +1,8 @@
-//! egui 前端适配器：把平台工作区模型渲染为 egui/eframe 窗口。
+//! egui frontend adapter for workbench-rs: renders the platform workspace
+//! model into an egui/eframe window.
 //!
-//! 本 crate 是 GUI 侧唯一接触 egui 的地方；Workbench 模块与平台核心不依赖 egui。
+//! This crate is the only place on the GUI side that touches egui; Workbench
+//! modules and the platform core never depend on egui.
 
 use std::time::{Duration, Instant};
 

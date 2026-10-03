@@ -1,30 +1,32 @@
-# 插件开发指南（Host API v1）
+# Plugin Authoring Guide (Host API v1)
 
-面向 Python 插件开发者。运行前提见 README「Python 插件」一节。
+For Python plugin developers. Runtime prerequisites: see "Python plugins" in
+the README.
 
-## 插件结构
+## Plugin layout
 
 ```text
 my-plugin/
-  plugin.toml     # 清单（必须）
-  plugin.py       # 入口脚本（清单 entry_point 指向）
-  ...             # 其他资源随插件目录一起分发
+  plugin.toml     # manifest (required)
+  plugin.py       # entry script (pointed to by the manifest entry_point)
+  ...             # other resources ship with the plugin directory
 ```
 
-## 清单 plugin.toml
+## Manifest: plugin.toml
 
 ```toml
 [plugin]
-id = "com.example.my-plugin"   # 稳定且唯一（字母/数字/./-/_）
+id = "com.example.my-plugin"   # stable and unique (letters/digits/./-/_)
 name = "My Plugin"
 version = "0.1.0"
-api_version = "1"              # 必须等于宿主 HOST_API_VERSION（当前 "1"），否则拒绝加载
+api_version = "1"              # must equal the host HOST_API_VERSION ("1"), otherwise refused
 entry_point = "plugin.py:register"
 
 [compatibility]
-products = ["*"]               # 可选：限定产品 ID
+products = ["*"]               # optional: restrict to product IDs
 
-[permissions]                  # 可选：审计与提示用途（进程内 Python 不构成安全沙箱）
+[permissions]                  # optional: audit/prompt purposes only
+                               # (in-process Python is not a security sandbox)
 document_read = false
 document_write = false
 filesystem_read = false
@@ -33,64 +35,76 @@ network = false
 
 ## Host API
 
-插件被发现后会调用 `register(api)`（UI 线程、GIL 内）。API 对象：
+After discovery the host calls `register(api)` (UI thread, inside the GIL).
+The `api` object:
 
-| 方法 | 说明 |
+| Method | Description |
 |---|---|
-| `api.register_command(id, title, callback, background=False)` | 注册命令。重复 id 报错 |
-| `api.add_toolbar_item(group, command, label=None)` | 向 Ribbon 工具栏贡献条目；组不存在则创建（组内同 id 命令自动合并） |
-| `api.log_info(msg)` | 装配期日志（出现在平台日志） |
-| `api.api_version` | 宿主 API 版本 |
+| `api.register_command(id, title, callback, background=False)` | register a command; duplicate ids raise |
+| `api.add_toolbar_item(group, command, label=None)` | contribute a Ribbon toolbar item; the group is auto-created (same-id commands merge into the group) |
+| `api.log_info(msg)` | assembly-time log (shows up in the platform log) |
+| `api.api_version` | host API version |
 
-### 同步命令（UI 线程）
+### Sync commands (UI thread)
 
-`callback(args)`，`args` 是 `dict`（命令参数键值）。可返回 `str` 作为执行备注（进入调用历史与状态栏日志），返回 `None` 即完成。执行异常会转为命令失败（`CommandResult::Failed`），平台捕获并记录——不会拖垮宿主。
+`callback(args)` where `args` is a `dict` (command arguments). May return a
+`str` used as the execution note (lands in the invocation history and status
+log), or `None` to simply finish. Exceptions become command failures
+(`CommandResult::Failed`) — the platform captures and logs them; the host never
+crashes.
 
 ```python
 def hello(args):
     name = (args or {}).get("name") or "world"
     return "hello, %s!" % name
 
-api.register_command(id="my.hello", title="问好", callback=hello)
+api.register_command(id="my.hello", title="Greet", callback=hello)
 ```
 
-### 后台命令（任务线程，可取消、可报进度）
+### Background commands (task thread, cancellable, reportable)
 
-`callback(task, args)` 在后台任务线程执行（GIL 自动获取）。`task` 对象：
+`callback(task, args)` runs on a background task thread (GIL acquired
+automatically). The `task` object:
 
-| 方法 | 说明 |
+| Method | Description |
 |---|---|
-| `task.report(fraction=None, stage=None)` | 进度（0.0~1.0）与阶段文本 |
-| `task.set_stage(stage)` | 只更新阶段文本 |
-| `task.log(msg)` | 任务日志（进入平台日志） |
-| `task.check_cancelled()` | 已取消时抛出 `PluginCancelled`——循环里调用它即可协作式退出 |
-| `task.is_cancelled()` | 非抛出式查询 |
+| `task.report(fraction=None, stage=None)` | progress (0.0~1.0) and stage text |
+| `task.set_stage(stage)` | update the stage text only |
+| `task.log(msg)` | task log (into the platform log) |
+| `task.check_cancelled()` | raises `PluginCancelled` once cancelled — call it in loops for cooperative exit |
+| `task.is_cancelled()` | non-raising query |
 
 ```python
 import time
 
 def progress_job(task, args):
     for i in range(20):
-        task.check_cancelled()          # 用户取消 → 任务终态 Cancelled
-        task.report(i / 20, "步骤 %d" % (i + 1))
+        task.check_cancelled()          # user cancel -> task ends Cancelled
+        task.report(i / 20, "step %d" % (i + 1))
         time.sleep(0.1)
 
-api.register_command(id="my.progress", title="长任务", callback=progress_job, background=True)
+api.register_command(id="my.progress", title="Long Task", callback=progress_job, background=True)
 ```
 
-### 工具栏贡献
+### Toolbar contributions
 
 ```python
-api.add_toolbar_item(group="my.tools", command="my.hello", label="问好")   # 创建组 my.tools
-api.add_toolbar_item(group="my.tools", command="my.progress")             # 组已存在则追加
+api.add_toolbar_item(group="my.tools", command="my.hello", label="Greet")  # creates group my.tools
+api.add_toolbar_item(group="my.tools", command="my.progress")             # existing group: appends
 ```
 
-组名建议带插件前缀（如 `my.tools`）。也可以向既有组贡献（跨模块受控合并）。
+Prefix group names with your plugin id (e.g. `my.tools`). Contributing into
+existing groups (controlled cross-module merge) is also supported.
 
-## 生命周期与边界
+## Lifecycle and boundaries
 
-- 清单非法 / `api_version` 不兼容 / `register()` 抛异常 → 插件被**拒绝加载**（原因可在平台日志与「插件」面板查看），其余插件与宿主不受影响；
-- 运行时可在「插件」面板点击「禁用」：移除该插件注册的全部命令与工具栏贡献（会话内生效）；
-- 同 id 插件后发现的被跳过；
-- 文档读写在 Host API v1 尚未开放（计划 v1.1：`api.document` 只读快照 + 经命令的受控写入）；
-- 需要长耗时计算务必用 `background=True`；同步命令在 UI 线程执行，超过 ~16ms 会拖慢界面。
+- invalid manifest / incompatible `api_version` / `register()` exception → the
+  plugin is **refused** (reason visible in the platform log and the Plugins
+  panel); other plugins and the host are unaffected;
+- the Plugins panel offers runtime **Disable**: removes every command and
+  toolbar contribution the plugin registered (session-scoped);
+- a duplicate plugin id is skipped for later discoveries;
+- document read/write is not exposed in Host API v1 (planned for v1.1:
+  `api.document` read-only snapshot + controlled writes via commands);
+- long computation must use `background=True`; sync commands run on the UI
+  thread — anything beyond ~16ms will lag the interface.

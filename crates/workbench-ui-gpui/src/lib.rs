@@ -1,7 +1,9 @@
-//! gpui 前端适配器：把平台工作区模型渲染为 gpui-ce 窗口。
+//! gpui frontend adapter for workbench-rs: renders the platform workspace
+//! model into a gpui-ce window.
 //!
-//! 本 crate 是 GUI 侧唯一接触 gpui 的地方。布局采用与 egui 端等价的
-//! 固定四区 + 中央标签结构（两端的物理实现独立，design.md §6.6）。
+//! This crate is the only place on the GUI side that touches gpui. The layout
+//! mirrors the egui side (fixed four dock areas + central tabs); the two
+//! physical implementations are independent (design.md §6.6).
 
 use std::sync::{Arc, Mutex};
 

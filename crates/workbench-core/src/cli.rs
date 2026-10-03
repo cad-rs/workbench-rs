@@ -1,18 +1,19 @@
-//! 产品命令行入口辅助（让下游产品的 `main` 保持极简）。
+//! Product command-line entry helpers (keeps downstream product `main`s tiny).
 //!
-//! 统一解析三类模式：
-//! - （默认）运行 GUI；
-//! - `--selfcheck`：无头自检，进程退出码 0/1；
-//! - `--selfcheck-crash`：崩溃恢复探针（由 selfcheck 以子进程方式调用，
-//!   依赖 `WB_CRASH_DIR` 环境变量）；
-//! - `--smoke [秒]`：运行指定秒数后自动退出（默认 2.5 秒），自动化冒烟用。
+//! Parses the common modes:
+//! - (default) run the GUI;
+//! - `--selfcheck`: headless selfcheck, process exit code 0/1;
+//! - `--selfcheck-crash`: crash-recovery probe (invoked by the selfcheck as a
+//!   subprocess; requires the `WB_CRASH_DIR` environment variable);
+//! - `--smoke [secs]`: run for the given seconds and exit (default 2.5),
+//!   for automated smoke tests.
 //!
-//! 典型产品 `main`（完整示例见 README「集成指南」）：
+//! A typical product `main` (full example in the README "Integration guide"):
 //!
 //! ```text
 //! fn main() {
 //!     let cli = workbench_core::cli::from_env();
-//!     let builder = workbench_core::WorkbenchAppBuilder::new("com.example.prod", "我的产品")
+//!     let builder = workbench_core::WorkbenchAppBuilder::new("com.example.prod", "My Product")
 //!         .with_backend_label("egui")
 //!         .with_workbench(my_workbench)
 //!         .with_plugin_stage(workbench_python::plugin_stage(
@@ -22,26 +23,27 @@
 //!
 //!     match cli.mode {
 //!         CliMode::Selfcheck => workbench_core::selfcheck::exit_with(&mut builder.build().unwrap()),
-//!         CliMode::CrashProbe => workbench_core::cli::crash_probe_exit(|| builder_like()),
-//!         CliMode::Run => { my_frontend::run(builder, "我的产品").unwrap(); std::process::exit(0); }
+//!         CliMode::CrashProbe => workbench_core::cli::crash_probe_exit(|| make_builder()),
+//!         CliMode::Run => { my_frontend::run(builder, "My Product").unwrap(); std::process::exit(0); }
 //!     }
 //! }
 //! ```
+
 
 use std::path::PathBuf;
 
 use crate::WorkbenchAppBuilder;
 
-/// CLI 解析结果。
+/// The parsed command line.
 #[derive(Clone, Debug)]
 pub struct Cli {
-    /// 运行模式。
+    /// The run mode.
     pub mode: CliMode,
-    /// `--smoke [秒]` 的秒数；仅在 `--smoke` 时为 Some。
+    /// Seconds for `--smoke [secs]`; Some only when `--smoke` was given.
     pub smoke_secs: Option<f32>,
 }
 
-/// 运行模式。
+/// The run mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CliMode {
     /// 运行 GUI（默认）。
@@ -68,7 +70,7 @@ impl Cli {
         }
     }
 
-    /// 把 smoke 配置应用到装配器。
+    /// Apply the smoke configuration to the assembly builder.
     pub fn apply(&self, builder: WorkbenchAppBuilder) -> WorkbenchAppBuilder {
         match self.smoke_secs {
             Some(secs) => builder.smoke(secs),
@@ -77,23 +79,24 @@ impl Cli {
     }
 }
 
-/// 无头自检并退出进程（退出码 0 = 全部通过）。
+/// Run the headless selfcheck and exit the process (exit code 0 = all passed).
 pub fn selfcheck_exit(builder: WorkbenchAppBuilder) -> ! {
     let mut app = builder.build().expect("产品装配失败");
     std::process::exit(crate::selfcheck::run(&mut app));
 }
 
-/// 崩溃恢复探针并退出进程（阶段 5 自检的子进程模式）。
+/// Run the crash-recovery probe and exit the process (the phase-5 selfcheck's subprocess mode).
 ///
-/// `make_builder` 会被调用两次（会话 A 产生自动保存 + 会话 B 验证恢复），
-/// 必须使用独立的配置目录（由 `WB_CRASH_DIR` 环境变量指定）。
+/// `make_builder` is called twice (session A produces the autosave, session B
+/// verifies the recovery) and must use an isolated config directory (given by
+/// the `WB_CRASH_DIR` environment variable).
 pub fn crash_probe_exit(make_builder: impl Fn() -> WorkbenchAppBuilder) -> ! {
     let dir = PathBuf::from(
-        std::env::var("WB_CRASH_DIR").expect("需要 WB_CRASH_DIR 环境变量"),
+        std::env::var("WB_CRASH_DIR").expect("the WB_CRASH_DIR environment variable is required"),
     );
     let code = crate::selfcheck::crash_probe(
-        make_builder().build().expect("会话 A 装配失败"),
-        || make_builder().build().expect("会话 B 装配失败"),
+        make_builder().build().expect("session A assembly failed"),
+        || make_builder().build().expect("session B assembly failed"),
         &dir.join("result.json"),
     );
     std::process::exit(code);

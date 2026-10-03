@@ -1,9 +1,11 @@
-//! workbench-rs 平台运行时。
+//! workbench-rs platform runtime.
 //!
-//! 下游整合入口：
-//! - [`WorkbenchAppBuilder`]：产品装配（选择 Workbench 模块、插件阶段、默认布局）；
-//! - [`cli`]：产品命令行约定（运行 / `--selfcheck` / `--selfcheck-crash` / `--smoke`）；
-//! - [`selfcheck`]：无头自检（探测式，无关项自动跳过）。
+//! Integration entry points for downstream code:
+//! - [`WorkbenchAppBuilder`]: product assembly (choose Workbench modules,
+//!   plugin stages, default layout);
+//! - [`cli`]: product CLI conventions (run / `--selfcheck` /
+//!   `--selfcheck-crash` / `--smoke`);
+//! - [`selfcheck`]: headless selfcheck (probe-based; unrelated items SKIP).
 
 pub mod app;
 pub mod cli;

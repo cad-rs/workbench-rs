@@ -1,9 +1,11 @@
-# workbench-rs 本机构建配置
+# workbench-rs local build configuration
 #
-# PYO3_PYTHON：pyo3 构建脚本使用的 Python 解释器（需要带 libs/ 与 include/ 的完整安装）。
-# 当前值是开发机的 miniforge3 路径——在其他机器上请：
-#   1) 改成你的解释器路径，或
-#   2) 删除此节，确保 `python` 在 PATH 上（pyo3 会自动探测），或
-#   3) 使用环境变量 PYO3_PYTHON 覆盖。
+# PYO3_PYTHON: the Python interpreter used by pyo3's build script
+# (a full installation with libs/ and include/ is required).
+# The value below is the development machine's miniforge3 path — on other
+# machines, either:
+#   1) change it to your interpreter path, or
+#   2) delete this section and keep `python` on PATH (pyo3 auto-detects), or
+#   3) override via the PYO3_PYTHON environment variable.
 [env]
 PYO3_PYTHON = "C:/ProgramData/miniforge3/python.exe"

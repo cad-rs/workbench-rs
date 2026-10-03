@@ -27,11 +27,12 @@ impl Check {
     }
 }
 
-/// 运行全部自检，返回进程退出码。
-/// 崩溃恢复探针（阶段 5，`--selfcheck-crash` 模式调用）：
-/// 会话 A 打开画布并添加图形（脏文档）→ 自动保存 → drop 后删除 clean 标记
-/// （模拟异常退出）→ `reopen` 构建会话 B（build 时应自动恢复）。
-/// 把恢复的文档标题写入 `out`（JSON 数组），成功返回 0。
+/// Runs the full selfcheck suite; returns the process exit code.
+/// Crash-recovery probe (phase 5, invoked in the `--selfcheck-crash` mode):
+/// session A opens the canvas and adds shapes (dirty document) -> autosave ->
+/// drop removes the clean marker (simulating an abnormal exit) -> `reopen`
+/// builds session B (which should auto-recover).
+/// Writes the recovered document titles to `out` (a JSON array); returns 0 on success.
 pub fn crash_probe(
     session_a: AppRuntime,
     mut reopen: impl FnMut() -> AppRuntime,
