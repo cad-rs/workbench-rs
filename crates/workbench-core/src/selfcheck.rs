@@ -4,7 +4,6 @@
 //! 领域内容通过文档类型注册的序列化接口 + 通用 JSON 读取校验，
 //! 核心不依赖任何领域 crate。
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use workbench_api as api;
@@ -23,7 +22,6 @@ impl Check {
         Self { name: name.into(), ok, skipped: false, detail: detail.into() }
     }
     /// 前置条件不满足时跳过（探测式自检：任何产品都能运行，无关项自动 SKIP）。
-    #[allow(dead_code)]
     fn skip(name: impl Into<String>, reason: impl Into<String>) -> Self {
         Self { name: name.into(), ok: false, skipped: true, detail: reason.into() }
     }
@@ -565,6 +563,3 @@ fn pump_until_idle(app: &mut AppRuntime, timeout: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
-
-#[allow(dead_code)]
-fn _path_use(_: &Path) {}

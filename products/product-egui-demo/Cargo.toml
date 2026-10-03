@@ -3,7 +3,8 @@ name = "product-egui-demo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "示例产品：构建时选定 egui 前端"
+description = "Demo product built on workbench-rs (not published)"
+publish = false
 
 [[bin]]
 name = "product-egui-demo"
@@ -18,5 +19,5 @@ workbench-api = { workspace = true }
 workbench-core = { workspace = true }
 workbench-ui-egui = { workspace = true }
 workbench-python = { workspace = true }
-wb-example = { workspace = true }
+workbench-example = { workspace = true }
 env_logger = { workspace = true }

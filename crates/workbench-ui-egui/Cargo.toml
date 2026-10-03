@@ -1,9 +1,13 @@
 [package]
 name = "workbench-ui-egui"
+description = "egui frontend adapter for workbench-rs (eframe glow backend + egui_tiles docking)"
+keywords = ["egui", "gui", "workbench", "docking"]
+categories = ["gui"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "workbench-rs 的 egui 前端适配器（产品构建时选定一种 GUI）"
+repository.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 workbench-api = { workspace = true }

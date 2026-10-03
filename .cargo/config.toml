@@ -1,5 +1,9 @@
-# workspace 本地构建配置
-# PYO3_PYTHON 指向构建 pyo3 时使用的解释器（需带 libs/ 与 include/ 的完整安装）。
-# 本机使用 miniforge3 的 Python 3.12；在其他机器开发时按实际路径调整。
+# workbench-rs 本机构建配置
+#
+# PYO3_PYTHON：pyo3 构建脚本使用的 Python 解释器（需要带 libs/ 与 include/ 的完整安装）。
+# 当前值是开发机的 miniforge3 路径——在其他机器上请：
+#   1) 改成你的解释器路径，或
+#   2) 删除此节，确保 `python` 在 PATH 上（pyo3 会自动探测），或
+#   3) 使用环境变量 PYO3_PYTHON 覆盖。
 [env]
 PYO3_PYTHON = "C:/ProgramData/miniforge3/python.exe"

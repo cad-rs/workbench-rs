@@ -5864,9 +5864,9 @@ dependencies = [
  "eframe",
  "egui",
  "env_logger",
- "wb-example",
  "workbench-api",
  "workbench-core",
+ "workbench-example",
  "workbench-python",
  "workbench-ui-egui",
 ]
@@ -5876,9 +5876,9 @@ name = "product-gpui-demo"
 version = "0.1.0"
 dependencies = [
  "env_logger",
- "wb-example",
  "workbench-api",
  "workbench-core",
+ "workbench-example",
  "workbench-python",
  "workbench-ui-gpui",
 ]
@@ -8686,16 +8686,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wb-example"
-version = "0.1.0"
-dependencies = [
- "async-io",
- "serde",
- "serde_json",
- "workbench-api",
-]
-
-[[package]]
 name = "web-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9665,6 +9655,16 @@ dependencies = [
  "env_logger",
  "futures-lite",
  "rfd",
+ "serde",
+ "serde_json",
+ "workbench-api",
+]
+
+[[package]]
+name = "workbench-example"
+version = "0.1.0"
+dependencies = [
+ "async-io",
  "serde",
  "serde_json",
  "workbench-api",

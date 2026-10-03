@@ -272,3 +272,17 @@ def register(api):
 | 插件来源管理与更新 | 插件分发渠道建立后 | `plugin.toml [source]` + 本地 repo 目录比对版本（无网络依赖的增量） |
 | GPU 资源恢复/视图诊断 | wgpu 渲染服务落地后（§9.4） | 渲染服务持有设备生命周期，诊断面板扩展 GPU 适配器/视图资源条目 |
 | 多平台打包 | 多平台发行需求确立后 | cargo-dist 或 per-target 脚本；Windows 包已可由 release profile + verify.ps1 产出 |
+
+## 11. 开源发布准备（已完成）
+
+- 协议收敛为 **MIT**（workspace `license` + 根 [LICENSE](LICENSE)）；
+- 全部可发布 crate 元数据齐备：description/keywords/categories/repository/readme；
+- crates.io 名称可用性已确认（workbench-api/core/python/ui-egui/ui-gpui/example 均可用）；
+- `wb-example` 包名改为 `workbench-example`（lib 名保持 `wb_example`，代码零改动）；
+- 内部依赖在 workspace.dependencies 中补 `version`（path+version 双声明，满足发布要求）；
+- 两个示例产品 `publish = false`；
+- `cargo package -p workbench-api`（含构建验证）通过；其余 crate 的 package 失败仅为
+  "依赖尚未发布到 registry" 的顺序约束，README「发布」一节已写明发布顺序（api → core → 其余）；
+- eframe 移除内部调试 feature `__screenshot`（验证手法保留在 README 注记）；
+- 清理遗留：selfcheck 的 `_path_use` 死代码、`Check::skip` 的多余 allow；
+- `.cargo/config.toml` 的 PYO3_PYTHON 加多平台探测说明（机器相关值，开源后各机器自行调整）。

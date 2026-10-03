@@ -1,9 +1,17 @@
 [package]
-name = "wb-example"
+name = "workbench-example"
+description = "Example Workbench module for workbench-rs: commands, panels, views, document type (depends only on workbench-api)"
+keywords = ["workbench", "gui", "example"]
+categories = ["gui", "development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "示例 Workbench 模块：只依赖 workbench-api，不依赖任何 GUI 框架"
+repository.workspace = true
+readme = "../../README.md"
+
+[lib]
+name = "wb_example"
+path = "src/lib.rs"
 
 [dependencies]
 workbench-api = { workspace = true }

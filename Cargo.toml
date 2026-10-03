@@ -14,16 +14,20 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "MIT"
+repository = "https://github.com/cad-rs/workbench-rs"
 
 [workspace.dependencies]
-# 内部 crate
-workbench-api = { path = "crates/workbench-api" }
-workbench-core = { path = "crates/workbench-core" }
-workbench-ui-egui = { path = "crates/workbench-ui-egui" }
-workbench-ui-gpui = { path = "crates/workbench-ui-gpui" }
-workbench-python = { path = "crates/workbench-python" }
-wb-example = { path = "workbenches/wb-example" }
+# 内部 crate（path + version 双声明，成员 crate 可直接发布到 crates.io）
+workbench-api = { path = "crates/workbench-api", version = "0.1.0" }
+workbench-core = { path = "crates/workbench-core", version = "0.1.0" }
+workbench-ui-egui = { path = "crates/workbench-ui-egui", version = "0.1.0" }
+workbench-ui-gpui = { path = "crates/workbench-ui-gpui", version = "0.1.0" }
+workbench-python = { path = "crates/workbench-python", version = "0.1.0" }
+workbench-example = { path = "workbenches/wb-example", version = "0.1.0" }
+
+# 共享元数据键
+# keywords/categories 各 crate 自行声明（crates.io 限制：keywords ≤5，category 须为官方列表）
 
 # 通用
 serde = { version = "1", features = ["derive"] }
@@ -40,14 +44,13 @@ futures-lite = "2"
 pyo3 = { version = "0.29", features = ["auto-initialize"] }
 toml = "0.9"
 
-# egui 前端（glow 后端：Windows 上呈现路径兼容性更好，且与屏幕捕获兼容）
+# egui 前端（glow 后端：Windows 上呈现路径兼容性更好）
 egui = "0.36"
 eframe = { version = "0.36", default-features = false, features = [
     "accesskit",
     "default_fonts",
     "links",
     "glow",
-    "__screenshot",
 ] }
 egui_tiles = "0.17"
 

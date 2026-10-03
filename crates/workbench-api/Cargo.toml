@@ -1,9 +1,13 @@
 [package]
 name = "workbench-api"
+description = "GUI-agnostic platform contracts for workbench-rs: commands, tasks, documents, workspace/Ribbon model, painting abstraction"
+keywords = ["gui", "workbench", "desktop", "commands", "plugins"]
+categories = ["gui", "development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "workbench-rs 平台契约层：ID、几何、绘制抽象、注册表、服务与任务模型"
+repository.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 serde = { workspace = true }

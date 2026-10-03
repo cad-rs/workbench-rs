@@ -2,6 +2,8 @@
 
 > 仓库：https://github.com/cad-rs/workbench-rs
 
+
+协议：[MIT](LICENSE)。crate 均以 `workbench-*` 命名发布到 crates.io（见文末发布说明）。
 通用工程桌面应用框架（CAD / 机械设计 / 工业仿真方向）的 Rust 实现。
 需求与架构见 [docs/design.md](docs/design.md)，开发计划与阶段记录见 [docs/plan.md](docs/plan.md)。
 
@@ -15,7 +17,7 @@ crates/
   workbench-ui-gpui     gpui 前端适配器（gpui-ce + 官方组件库）
   workbench-python      Python 插件宿主（pyo3，Host API v1）
 workbenches/
-  wb-example            示例 Workbench 模块（只依赖 workbench-api）
+  wb-example            示例 Workbench 模块（包名 workbench-example，只依赖 workbench-api）
 products/
   product-egui-demo     示例产品 A（构建时选定 egui）
   product-gpui-demo     示例产品 B（构建时选定 gpui）
@@ -144,3 +146,17 @@ impl wb::Workbench for CadWorkbench {
 - **RibbonBar**：`RibbonTab → Group → Command` 三级模型（稳定 ID、受控合并、活动 Tab 持久化），双端渲染经 GPU 回读截图验证。
 - **阶段 5（生产级扩展第一期）**：设置服务、自动保存 + 崩溃恢复、插件管理面板、诊断面板与帧统计、性能回归测试 + 一键验证脚本。
 - 待办：wgpu 渲染服务（可选能力）、不可信插件进程隔离（设计草图见 plan.md §10.6）、多平台打包。
+
+## 发布（crates.io）
+
+可发布 crate：`workbench-api`、`workbench-core`、`workbench-python`、`workbench-ui-egui`、`workbench-ui-gpui`、`workbench-example`（全部 MIT，元数据齐全；`cargo package -p workbench-api` 已含构建验证通过）。两个示例产品不发布（`publish = false`）。
+
+内部依赖已声明版本号，发布须按依赖顺序执行：
+
+```bash
+cargo publish -p workbench-api
+cargo publish -p workbench-core
+cargo publish -p workbench-python   # 以及 workbench-example / ui-egui / ui-gpui（此后顺序任意）
+```
+
+发布前运行 `powershell -File scripts/verify.ps1 -SkipSmoke` 做最终确认。
