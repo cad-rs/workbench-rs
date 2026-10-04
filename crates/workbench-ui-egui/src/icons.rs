@@ -101,3 +101,13 @@ impl IconCache {
         Some((id, Vec2::new(w as f32 / ppp, h as f32 / ppp)))
     }
 }
+
+/// 在 `center` 处按 `size` 整张绘制已渲染的图标纹理。
+pub fn paint_texture(painter: &egui::Painter, tex: egui::TextureId, center: egui::Pos2, size: Vec2) {
+    painter.image(
+        tex,
+        egui::Rect::from_center_size(center, size),
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}

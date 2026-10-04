@@ -1189,7 +1189,9 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
             // 缓存都按内容哈希命中，启动后再加字体会一直命中旧字形
             let mut cjk_font = None;
             for name in ["cjk.ttf", "cjk.otf"] {
-                if let Some(bytes) = web_fetch_bytes(&format!("assets/fonts/{name}")).await {
+                if let Some(bytes) =
+                    wb::asyncrt::fetch_bytes(&format!("assets/fonts/{name}")).await
+                {
                     cjk_font = Some(bytes);
                     break;
                 }
@@ -1298,21 +1300,3 @@ fn launch_app(
     }
 }
 
-/// fetch 一个同源二进制资源（非 2xx / 不存在 → None）。
-#[cfg(target_arch = "wasm32")]
-async fn web_fetch_bytes(url: &str) -> Option<Vec<u8>> {
-    use wasm_bindgen::JsCast;
-    let window = web_sys::window()?;
-    let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url))
-        .await
-        .ok()?;
-    let response: web_sys::Response = response.dyn_into().ok()?;
-    if !response.ok() {
-        return None;
-    }
-    let buffer =
-        wasm_bindgen_futures::JsFuture::from(response.array_buffer().ok()?).await.ok()?;
-    // ArrayBuffer → Uint8Array：需用构造包装，dyn_into 不跨类型
-    let bytes = js_sys::Uint8Array::new(&buffer.into());
-    Some(bytes.to_vec())
-}

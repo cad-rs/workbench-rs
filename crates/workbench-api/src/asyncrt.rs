@@ -52,3 +52,24 @@ impl std::future::Future for SleepAfter {
         std::task::Poll::Pending
     }
 }
+
+/// fetch 一个同源二进制资源（非 2xx / 不存在 → None）。
+///
+/// 两个 web 前端共用：egui 的 CJK 字体加载与 gpui 的首帧前字体注入。
+#[cfg(target_arch = "wasm32")]
+pub async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
+    use wasm_bindgen::JsCast;
+    let window = web_sys::window()?;
+    let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url))
+        .await
+        .ok()?;
+    let response: web_sys::Response = response.dyn_into().ok()?;
+    if !response.ok() {
+        return None;
+    }
+    let buffer =
+        wasm_bindgen_futures::JsFuture::from(response.array_buffer().ok()?).await.ok()?;
+    // ArrayBuffer → Uint8Array：需用构造包装，dyn_into 不跨类型
+    let bytes = js_sys::Uint8Array::new(&buffer.into());
+    Some(bytes.to_vec())
+}

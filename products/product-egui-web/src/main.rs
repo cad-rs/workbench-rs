@@ -14,8 +14,8 @@ fn main() {
     // 内嵌/无头环境拿不到控制台历史：panic 与入口错误同时写入 DOM 便于诊断
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("PANIC: {info}");
-        eframe::web_sys::console::error_1(&msg.clone().into());
         web_dom_append(&msg);
+        eframe::web_sys::console::error_1(&msg.into());
     }));
 
     let builder = workbench_core::WorkbenchAppBuilder::new(
@@ -32,8 +32,8 @@ fn main() {
     wasm_bindgen_futures::spawn_local(async move {
         if let Err(e) = workbench_ui_egui::run_web(builder, "wb-canvas").await {
             let msg = format!("run_web failed: {e:?}");
-            eframe::web_sys::console::error_1(&msg.clone().into());
             web_dom_append(&msg);
+            eframe::web_sys::console::error_1(&msg.into());
         }
     });
 }

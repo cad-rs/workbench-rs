@@ -17,12 +17,6 @@ pub trait AssetSource: Send + Sync {
     fn load(&self, path: &str) -> Option<Cow<'static, [u8]>>;
 }
 
-impl AssetSource for () {
-    fn load(&self, _path: &str) -> Option<Cow<'static, [u8]>> {
-        None
-    }
-}
-
 /// 链式资源源：按顺序查找，第一个命中者生效（后面的源提供回退）。
 ///
 /// 典型用法：`ChainedAssets::new(vec![产品源, 平台标准源])`——产品可以用
@@ -34,10 +28,6 @@ pub struct ChainedAssets {
 impl ChainedAssets {
     pub fn new(sources: Vec<Arc<dyn AssetSource>>) -> Self {
         Self { sources }
-    }
-
-    pub fn push(&mut self, source: Arc<dyn AssetSource>) {
-        self.sources.push(source);
     }
 }
 

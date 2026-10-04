@@ -10,7 +10,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-workbench-api = { workspace = true }
 workbench-core = { workspace = true }
 workbench-ui-gpui = { workspace = true }
 workbench-example = { workspace = true }

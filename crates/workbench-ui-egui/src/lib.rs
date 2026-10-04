@@ -101,13 +101,7 @@ impl wb::PaintBackend for EguiPainter<'_> {
             .icons
             .texture(self.painter.ctx(), path, area.size(), Self::color(color))
         {
-            let draw_rect = egui::Rect::from_center_size(area.center(), size);
-            self.painter.image(
-                tex,
-                draw_rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            icons::paint_texture(self.painter, tex, area.center(), size);
         }
     }
 }
@@ -505,21 +499,12 @@ impl egui_tiles::Behavior<PaneKind> for WbBehavior<'_> {
             );
             let text_pos = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), text_rect).min;
             if let Some(path) = &icon {
-                let icon_rect = egui::Rect::from_center_size(
-                    egui::pos2(inner.left() + icon_px * 0.5, tab_rect.center().y),
-                    Vec2::splat(icon_px),
-                );
+                let icon_center = egui::pos2(inner.left() + icon_px * 0.5, tab_rect.center().y);
                 if let Some((tex, size)) = self
                     .icons
                     .texture(ui.ctx(), path, Vec2::splat(icon_px), text_color)
                 {
-                    let draw_rect = egui::Rect::from_center_size(icon_rect.center(), size);
-                    ui.painter().image(
-                        tex,
-                        draw_rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
+                    icons::paint_texture(ui.painter(), tex, icon_center, size);
                 }
             }
             ui.painter().galley(text_pos, galley, text_color);
@@ -1020,80 +1005,44 @@ pub async fn run_web(
 ) -> Result<(), wasm_bindgen::JsValue> {
     use wasm_bindgen::JsCast;
 
-    web_stage("run_web:entered");
     let assets = builder.asset_source();
-    let canvas = web_sys::window()
+    let canvas = eframe::web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.get_element_by_id(canvas_id))
         .ok_or_else(|| {
             wasm_bindgen::JsValue::from_str(&format!("canvas #{canvas_id} not found"))
         })?
-        .dyn_into::<web_sys::HtmlCanvasElement>()?;
-    web_stage("run_web:canvas-found");
+        .dyn_into::<eframe::web_sys::HtmlCanvasElement>()?;
 
-    let result = eframe::WebRunner::new()
+    eframe::WebRunner::new()
         .start(
             canvas,
             eframe::WebOptions::default(),
             Box::new(move |cc| {
-                web_stage("run_web:creator-called");
                 install_web_fonts(&cc.egui_ctx);
                 let core = builder.build().expect("产品装配失败");
-                web_stage("run_web:core-built");
                 Ok(Box::new(EguiHost::new(core, IconCache::new(assets))))
             }),
         )
-        .await;
-    web_stage(if result.is_ok() {
-        "run_web:start-ok"
-    } else {
-        "run_web:start-err"
-    });
-    result
-}
-
-/// 诊断标记：把启动阶段写入 `window.__wbStage`（浏览器端可读）。
-#[cfg(target_arch = "wasm32")]
-fn web_stage(mark: &str) {
-    let global = js_sys::global();
-    let _ = js_sys::Reflect::set(
-        &global,
-        &wasm_bindgen::JsValue::from_str("__wbStage"),
-        &wasm_bindgen::JsValue::from_str(mark),
-    );
+        .await
 }
 
 /// Web 端 CJK 回退字体：异步从同源 `assets/fonts/` 加载（见
 /// scripts/web-copy-font.ps1）；不存在时保持 egui 内置字体。
+///
+/// 注意 `Context::set_fonts` 只在**下一次 pass** 生效且不触发重绘：
+/// 若字体在首帧后才到达（大字体文件、慢网络），必须主动请求 repaint，
+/// 否则新字体永远不会应用（界面停留在内置字体的首帧）。
 #[cfg(target_arch = "wasm32")]
 fn install_web_fonts(ctx: &egui::Context) {
     let ctx = ctx.clone();
     wasm_bindgen_futures::spawn_local(async move {
         for name in ["cjk.ttf", "cjk.otf"] {
-            let url = format!("assets/fonts/{name}");
-            if let Some(data) = fetch_bytes(&url).await {
+            if let Some(data) = wb::asyncrt::fetch_bytes(&format!("assets/fonts/{name}")).await {
                 apply_cjk_font(&ctx, data);
+                ctx.request_repaint();
                 return;
             }
         }
     });
-}
-
-/// fetch 一个同源二进制资源（非 2xx / 不存在 → None）。
-#[cfg(target_arch = "wasm32")]
-async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
-    use wasm_bindgen::JsCast;
-    let window = web_sys::window()?;
-    let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url))
-        .await
-        .ok()?;
-    let response: web_sys::Response = response.dyn_into().ok()?;
-    if !response.ok() {
-        return None;
-    }
-    let buffer =
-        wasm_bindgen_futures::JsFuture::from(response.array_buffer().ok()?).await.ok()?;
-    // ArrayBuffer → Uint8Array：需用构造包装，dyn_into 不跨类型
-    let bytes = js_sys::Uint8Array::new(&buffer.into());
-    Some(bytes.to_vec())
 }
