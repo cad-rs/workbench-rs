@@ -105,6 +105,7 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
             ctx.host().log.info(format!("已新建文档「{title}」"));
             CommandResult::done()
         })
+        .icon(crate::assets::icons::NEW)
         .hotkey(Hotkey::new(KeyCode::N).ctrl(true)),
     );
 
@@ -117,6 +118,7 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
             };
             open_path(ctx, &path)
         })
+        .icon(crate::assets::icons::OPEN)
         .hotkey(Hotkey::new(KeyCode::O).ctrl(true)),
     );
 
@@ -144,6 +146,7 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
                 save_as_flow(ctx, doc_id)
             }
         })
+        .icon(crate::assets::icons::SAVE)
         .hotkey(Hotkey::new(KeyCode::S).ctrl(true))
         .enabled_when(|snap| snap.active_document.is_some()),
     );
@@ -174,6 +177,7 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
                 Err(e) => CommandResult::failed(e),
             }
         })
+        .icon(crate::assets::icons::UNDO)
         .hotkey(Hotkey::new(KeyCode::Z).ctrl(true))
         .enabled_when(|snap| {
             snap.active_document.as_ref().map(|d| d.can_undo).unwrap_or(false)
@@ -193,6 +197,7 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
                 Err(e) => CommandResult::failed(e),
             }
         })
+        .icon(crate::assets::icons::REDO)
         .hotkey(Hotkey::new(KeyCode::Y).ctrl(true))
         .enabled_when(|snap| {
             snap.active_document.as_ref().map(|d| d.can_redo).unwrap_or(false)

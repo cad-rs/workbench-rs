@@ -1,0 +1,5 @@
+# trunk 配置：wasm32 产品（gpui 前端，WebGPU 渲染）。
+# 用法：trunk serve（开发） / trunk serve --release / trunk build --release
+[build]
+target = "index.html"
+dist = "dist"

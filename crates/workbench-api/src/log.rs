@@ -35,7 +35,7 @@ pub struct LogEntry {
 pub struct LogStore {
     entries: VecDeque<LogEntry>,
     capacity: usize,
-    start: std::time::Instant,
+    start: web_time::Instant,
     total_written: u64,
 }
 
@@ -44,7 +44,7 @@ impl LogStore {
         Self {
             entries: VecDeque::new(),
             capacity,
-            start: std::time::Instant::now(),
+            start: web_time::Instant::now(),
             total_written: 0,
         }
     }

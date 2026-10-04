@@ -275,27 +275,43 @@ impl TaskManager {
     }
 
     pub fn spawn(&mut self, spec: TaskSpec) -> TaskId {
-        let session = self.begin(&spec.title, spec.cancellable, TaskKind::Thread);
-        let handle = session.handle.clone();
-        let tx = self.tx.clone();
-        let _ = std::thread::Builder::new()
-            .name(format!("wb-task-{}", session.id.0))
-            .spawn(move || {
-                let mut ctx = TaskCtx::new(handle, spec.input);
-                let outcome = match (spec.job)(&mut ctx) {
-                    Ok(commit) => TaskOutcome::Succeeded { note: None, commit },
-                    Err(TaskFailure::Cancelled) => TaskOutcome::Cancelled,
-                    Err(TaskFailure::Error(e)) => TaskOutcome::Failed { error: e },
-                };
-                let _ = tx.send(TaskEvent::Finished {
-                    id: session.id,
-                    outcome,
-                });
-            })
-            .map(|_| ())
-            .map_err(|e| format!("任务线程创建失败: {e}"))
-            .ok();
-        session.id
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Web 构建：无线程支持，后台任务直接以失败终态返回（可用 Async 命令替代）。
+            let session = self.begin(&spec.title, spec.cancellable, TaskKind::Thread);
+            let _ = self.tx.send(TaskEvent::Finished {
+                id: session.id,
+                outcome: TaskOutcome::Failed {
+                    error: "Web 构建不支持后台线程任务（请改用异步命令）".to_string(),
+                },
+            });
+            return session.id;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let session = self.begin(&spec.title, spec.cancellable, TaskKind::Thread);
+            let handle = session.handle.clone();
+            let tx = self.tx.clone();
+            let _ = std::thread::Builder::new()
+                .name(format!("wb-task-{}", session.id.0))
+                .spawn(move || {
+                    let mut ctx = TaskCtx::new(handle, spec.input);
+                    let outcome = match (spec.job)(&mut ctx) {
+                        Ok(commit) => TaskOutcome::Succeeded { note: None, commit },
+                        Err(TaskFailure::Cancelled) => TaskOutcome::Cancelled,
+                        Err(TaskFailure::Error(e)) => TaskOutcome::Failed { error: e },
+                    };
+                    let _ = tx.send(TaskEvent::Finished {
+                        id: session.id,
+                        outcome,
+                    });
+                })
+                .map(|_| ())
+                .map_err(|e| format!("任务线程创建失败: {e}"))
+                .ok();
+            session.id
+        }
     }
 
     /// 请求协作式取消。

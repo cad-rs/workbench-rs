@@ -60,6 +60,11 @@ impl AppRuntime {
         self.registry.command(id).map(|c| c.title.clone())
     }
 
+    /// 命令图标资源路径（未设置返回 None，UI 回退为纯文本）。
+    pub fn command_icon(&self, id: &str) -> Option<String> {
+        self.registry.command(id).and_then(|c| c.icon.clone())
+    }
+
     pub fn command_hotkey_label(&self, id: &str) -> Option<String> {
         self.registry.command(id).and_then(|c| c.hotkey).map(|h| h.to_string())
     }
@@ -240,6 +245,7 @@ impl AppRuntime {
     /// 启动恢复：检测上次异常退出（clean 标记缺失）时，从自动保存目录恢复文档。
     /// 自动保存产物为成对文件：`<标题>.<ext>`（内容）+ `<标题>.json`(元数据)。
     /// 返回恢复的文档标题列表。
+    #[cfg(not(target_arch = "wasm32"))]
     fn recover_autosaves(&mut self) -> Vec<String> {
         let marker = self.autosave_marker_path();
         let mut recovered = Vec::new();
@@ -316,6 +322,7 @@ impl AppRuntime {
     }
 
     /// 会话干净退出标记路径。
+    #[cfg(not(target_arch = "wasm32"))]
     fn autosave_marker_path(&self) -> PathBuf {
         self.autosave_dir.join("session.clean")
     }
@@ -726,6 +733,8 @@ pub struct WorkbenchAppBuilder {
     open_on_start: Vec<(String, bool)>,
     create_default_document: bool,
     smoke_seconds: Option<f32>,
+    /// 产品资源源（SVG 图标等）；None 时只有平台标准资源。
+    assets: Option<std::sync::Arc<dyn api::AssetSource>>,
     /// GUI 后端标签（诊断面板/日志用；产品按构建选定填写）。
     backend_label: String,
 }
@@ -743,8 +752,29 @@ impl WorkbenchAppBuilder {
             open_on_start: Vec::new(),
             create_default_document: false,
             smoke_seconds: None,
+            assets: None,
             backend_label: "unknown".to_string(),
         }
+    }
+
+    /// 设置产品资源源（SVG 图标等静态资源）。查询顺序：产品源 → 平台标准源
+    /// （[`crate::assets::standard_assets`]），产品可用同名路径覆盖标准图标。
+    pub fn with_assets(
+        mut self,
+        source: impl api::AssetSource + 'static,
+    ) -> Self {
+        self.assets = Some(std::sync::Arc::new(source));
+        self
+    }
+
+    /// 生效的资源源：产品源优先，平台标准源兜底。
+    pub fn asset_source(&self) -> std::sync::Arc<dyn api::AssetSource> {
+        let mut sources: Vec<std::sync::Arc<dyn api::AssetSource>> = Vec::new();
+        if let Some(a) = &self.assets {
+            sources.push(a.clone());
+        }
+        sources.push(std::sync::Arc::new(*crate::assets::standard_assets()));
+        std::sync::Arc::new(api::ChainedAssets::new(sources))
     }
 
     /// 标记 GUI 后端（诊断面板/自动化查询用）。
@@ -943,15 +973,19 @@ impl WorkbenchAppBuilder {
         };
         runtime.snapshot = runtime.make_snapshot();
 
-        // 崩溃恢复：上次会话无 clean 标记 → 恢复自动保存文档（阶段 5）
-        let marker = runtime.autosave_marker_path();
-        let crashed = !marker.exists();
-        if crashed {
-            runtime.host.log.warn("[会话] 上次未正常退出，尝试恢复自动保存…");
-            runtime.recover_autosaves();
+        // 崩溃恢复：上次会话无 clean 标记 → 恢复自动保存文档（阶段 5）。
+        // Web（wasm32）无文件系统、无跨会话状态，跳过恢复流程。
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let marker = runtime.autosave_marker_path();
+            let crashed = !marker.exists();
+            if crashed {
+                runtime.host.log.warn("[会话] 上次未正常退出，尝试恢复自动保存…");
+                runtime.recover_autosaves();
+            }
+            // 删除标记：本会话结束时由 Drop 重新写入
+            let _ = std::fs::remove_file(&marker);
         }
-        // 删除标记：本会话结束时由 Drop 重新写入
-        let _ = std::fs::remove_file(&marker);
 
         // 默认文档
         if self.create_default_document {
@@ -978,15 +1012,21 @@ impl WorkbenchAppBuilder {
 }
 
 /// 默认布局目录：Windows 用 %APPDATA%/<product_id>，其他平台 ~/.config/<product_id>。
+/// Web（wasm32）无文件系统：返回占位路径（布局读写按失败处理，布局不落盘）。
 fn default_layout_dir(product_id: &str) -> PathBuf {
-    #[cfg(target_os = "windows")]
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = product_id;
+        PathBuf::from("/wb-web")
+    }
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
     {
         std::env::var_os("APPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
             .join(product_id)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
     {
         std::env::var_os("HOME")
             .map(|h| PathBuf::from(h).join(".config").join(product_id))

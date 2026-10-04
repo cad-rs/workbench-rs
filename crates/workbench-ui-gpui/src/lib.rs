@@ -8,16 +8,36 @@
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    canvas, div, prelude::*, px, quad, relative, rgb_to_hsla, size, App, Bounds,
+    canvas, div, prelude::*, px, quad, relative, rgb_to_hsla, size, svg, App, Bounds,
     Context, Corners, Edges, Hsla, KeyDownEvent, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, SharedString, TextAlign, TextRun,
-    TitlebarOptions, Window, WindowBounds, WindowOptions,
+    TitlebarOptions, TransformationMatrix, Window, WindowBounds, WindowOptions,
 };
-use gpui_component_assets::Assets;
+
 use workbench_api as wb;
 use workbench_core::AppRuntime;
 
 type SharedCore = Arc<Mutex<AppRuntime>>;
+
+/// 组合资源源：产品资源优先，gpui-component 内置图标资源兜底。
+/// （桌面为 RustEmbed 静态表；Web 端按需从同源/CDN 拉取 icons/*.svg）
+struct WbAssets {
+    app: Arc<dyn wb::AssetSource>,
+    component: gpui_component_assets::Assets,
+}
+
+impl gpui::AssetSource for WbAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Some(bytes) = self.app.load(path) {
+            return Ok(Some(bytes));
+        }
+        self.component.load(path)
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+        self.component.list(path)
+    }
+}
 
 // ---- 颜色转换 ----
 
@@ -156,6 +176,19 @@ impl wb::PaintBackend for GpuiPainter<'_> {
             .shape_line(text, px(font_size), &[run], None);
         wb::Size::new(line.width().as_f32(), font_size * 1.3)
     }
+
+    /// 绘制 SVG 图标（等比缩放，绘制区域取 rect 与图标宽高比的较小者）。
+    /// 资源缺失时静默不绘制（与 gpui svg 元素行为一致）。
+    fn draw_icon(&mut self, rect: wb::Rect, path: &str, color: wb::Color) {
+        let _ = self.window.paint_svg(
+            self.bounds_of(rect),
+            path.into(),
+            None,
+            TransformationMatrix::unit(),
+            col(color),
+            self.cx,
+        );
+    }
 }
 
 // ---- 输入事件中转 ----
@@ -235,7 +268,7 @@ enum SlotKey {
 
 struct RootView {
     core: SharedCore,
-    last_render: std::time::Instant,
+    last_render: web_time::Instant,
     events: Arc<Mutex<Vec<InputEv>>>,
     mouse_down: Arc<std::sync::atomic::AtomicBool>,
     drag: Arc<Mutex<Option<Drag>>>,
@@ -245,7 +278,7 @@ impl RootView {
     fn new(core: SharedCore) -> Self {
         Self {
             core,
-            last_render: std::time::Instant::now(),
+            last_render: web_time::Instant::now(),
             events: Arc::new(Mutex::new(Vec::new())),
             mouse_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             drag: Arc::new(Mutex::new(None)),
@@ -335,7 +368,7 @@ impl Render for RootView {
         {
             let mut core = self.core.lock().unwrap_or_else(|p| p.into_inner());
             core.frame_tick(0.016);
-            let now = std::time::Instant::now();
+            let now = web_time::Instant::now();
             let dt_ms = (now - self.last_render).as_secs_f32() * 1000.0;
             self.last_render = now;
             core.record_frame(dt_ms);
@@ -360,7 +393,7 @@ impl Render for RootView {
         struct AreaUi {
             visible: bool,
             size: f32,
-            panels: Vec<(String, String, bool)>, // (id, title, active)
+            panels: Vec<(String, String, bool, Option<String>)>, // (id, title, active, icon)
         }
         let (left, right, bottom, central_tabs, central_active, ribbon_tabs, ribbon_groups, status) = {
             let core = self.core.lock().unwrap_or_else(|p| p.into_inner());
@@ -387,7 +420,7 @@ impl Render for RootView {
                         .iter()
                         .map(|p| {
                             let active = active_id.as_ref() == Some(&p.id);
-                            (p.id.0.clone(), p.title.clone(), active)
+                            (p.id.0.clone(), p.title.clone(), active, p.icon.clone())
                         })
                         .collect(),
                 }
@@ -396,16 +429,23 @@ impl Render for RootView {
             let right = area_of(wb::DockArea::Right);
             let bottom = area_of(wb::DockArea::Bottom);
             let central_active = core.host.ws.active_tab().map(|t| t.instance_id.0);
-            let central_tabs: Vec<(u64, String, bool)> = core
+            let central_tabs: Vec<(u64, String, bool, Option<String>)> = core
                 .host
                 .ws
                 .tabs
                 .iter()
-                .map(|t| (t.instance_id.0, t.title.clone(), Some(t.instance_id.0) == central_active))
+                .map(|t| {
+                    (
+                        t.instance_id.0,
+                        t.title.clone(),
+                        Some(t.instance_id.0) == central_active,
+                        t.icon.clone(),
+                    )
+                })
                 .collect();
             let (ribbon_tabs, ribbon_groups): (
                 Vec<(String, String, bool)>,
-                Vec<(String, Vec<(String, String, bool)>)>,
+                Vec<(String, Vec<(String, String, bool, Option<String>)>)>,
             ) = {
                 let ws = &core.host.ws;
                 let tabs = ws
@@ -437,6 +477,7 @@ impl Render for RootView {
                                             it.command.0.clone(),
                                             it.label.clone().unwrap_or_else(|| title.clone()),
                                             enabled,
+                                            core.command_icon(&it.command.0),
                                         )
                                     })
                                     .collect();
@@ -518,14 +559,31 @@ impl Render for RootView {
                 );
             }
             let mut btns = div().flex().flex_row().items_center().gap_1();
-            for (cmd, label, enabled) in items {
+            for (cmd, label, enabled, icon) in items {
                 let mut btn = div()
                     .id(SharedString::from(format!("tb-{cmd}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
                     .px_2()
                     .py_1()
                     .rounded_sm()
-                    .text_size(px(12.5))
-                    .child(label.clone());
+                    .text_size(px(12.5));
+                if let Some(icon) = icon {
+                    // 左侧 15px 单色 SVG（禁用态灰色，与文本一致）
+                    btn = btn.child(
+                        svg()
+                            .path(icon.clone())
+                            .size(px(15.0))
+                            .text_color(if *enabled {
+                                col(wb::Color::WHITE)
+                            } else {
+                                col(wb::Color::GRAY)
+                            }),
+                    );
+                }
+                btn = btn.child(label.clone());
                 btn = if *enabled {
                     btn.bg(col(wb::Color::rgb(0.27, 0.29, 0.34)))
                         .text_color(col(wb::Color::WHITE))
@@ -592,15 +650,31 @@ impl Render for RootView {
         // ---- 面板列（区域内的标签页 + 活动面板内容） ----
         let panel_column = |area: &AreaUi, key_prefix: &'static str| -> gpui::AnyElement {
             let mut header = div().flex().flex_row().items_center().gap_1();
-            for (pid, title, active) in &area.panels {
+            for (pid, title, active, icon) in &area.panels {
                 let mut tab = div()
                     .id(SharedString::from(format!("{key_prefix}-{pid}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
                     .px_2()
                     .py_0p5()
                     .rounded_sm()
                     .text_size(px(11.5))
-                    .cursor_pointer()
-                    .child(title.clone());
+                    .cursor_pointer();
+                if let Some(icon) = icon {
+                    tab = tab.child(
+                        svg()
+                            .path(icon.clone())
+                            .size(px(13.0))
+                            .text_color(if *active {
+                                col(wb::Color::WHITE)
+                            } else {
+                                col(wb::Color::LIGHT_GRAY)
+                            }),
+                    );
+                }
+                tab = tab.child(title.clone());
                 tab = if *active {
                     tab.bg(col(wb::Color::ACCENT))
                         .text_color(col(wb::Color::WHITE))
@@ -634,10 +708,10 @@ impl Render for RootView {
             let active_panel = area
                 .panels
                 .iter()
-                .find(|(_, _, active)| *active)
+                .find(|(_, _, active, _)| *active)
                 .or_else(|| area.panels.first());
             let content = match active_panel {
-                Some((pid, _, _)) => view_canvas(
+                Some((pid, _, _, _)) => view_canvas(
                     core.clone(),
                     frame.clone(),
                     SlotKey::Panel(pid.clone()),
@@ -666,15 +740,31 @@ impl Render for RootView {
 
         // ---- 中央标签区 ----
         let mut tabbar = div().flex().flex_row().items_center().px_1().gap_1();
-        for (id, title, active) in &central_tabs {
+        for (id, title, active, icon) in &central_tabs {
             let mut tab = div()
                 .id(SharedString::from(format!("tab-{id}")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
                 .px_2()
                 .py_0p5()
                 .rounded_sm()
                 .text_size(px(12.0))
-                .cursor_pointer()
-                .child(title.clone());
+                .cursor_pointer();
+            if let Some(icon) = icon {
+                tab = tab.child(
+                    svg()
+                        .path(icon.clone())
+                        .size(px(13.0))
+                        .text_color(if *active {
+                            col(wb::Color::WHITE)
+                        } else {
+                            col(wb::Color::LIGHT_GRAY)
+                        }),
+                );
+            }
+            tab = tab.child(title.clone());
             tab = if *active {
                 tab.bg(col(wb::Color::rgb(0.30, 0.32, 0.38)))
                     .text_color(col(wb::Color::WHITE))
@@ -1081,13 +1171,66 @@ fn render_status_bar(
 }
 
 /// gpui 入口：构建产品并运行主循环。
+///
+/// 桌面：`Application::run` 阻塞直至退出。Web（wasm32）：`gpui_platform`
+/// 自动切换到 `gpui_web` 的 WebPlatform（WebGPU 渲染），浏览器事件循环驱动；
+/// 先异步取同源 CJK 回退字体再启动（启动前排字，避免排版缓存命中旧字形），
+/// 并用 `run_embedded` 返回的句柄保持应用存活（页面生命周期 = 应用生命周期）。
 pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> Result<(), String> {
     let smoke = builder.smoke_seconds();
     let title: SharedString = window_title.to_string().into();
+    let assets = builder.asset_source();
     let core: SharedCore = Arc::new(Mutex::new(builder.build()?));
 
-    let app = gpui_platform::application().with_assets(Assets);
-    app.run(move |cx: &mut App| {
+    #[cfg(target_arch = "wasm32")]
+    {
+        wasm_bindgen_futures::spawn_local(async move {
+            // 字体在窗口打开前注入：cosmic-text 的回退解析与 gpui 的排版
+            // 缓存都按内容哈希命中，启动后再加字体会一直命中旧字形
+            let mut cjk_font = None;
+            for name in ["cjk.ttf", "cjk.otf"] {
+                if let Some(bytes) = web_fetch_bytes(&format!("assets/fonts/{name}")).await {
+                    cjk_font = Some(bytes);
+                    break;
+                }
+            }
+            let app = gpui_platform::application().with_assets(WbAssets {
+                app: assets,
+                component: gpui_component_assets::Assets::new(""),
+            });
+            let handle = app.run_embedded(launch_app(core, title, smoke, cjk_font));
+            // Web 平台的 run 立即返回，应用状态由句柄保持；
+            // 与页面共存亡，故意泄漏句柄。
+            std::mem::forget(handle);
+        });
+        return Ok(());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // 产品资源源 + gpui-component 内置资源兜底
+        let app = gpui_platform::application().with_assets(WbAssets {
+            app: assets,
+            component: gpui_component_assets::Assets::new(""),
+        });
+        app.run(launch_app(core, title, smoke, None));
+        Ok(())
+    }
+}
+
+/// 构建应用启动闭包：注册组件、打开主窗口、挂任务泵与字体注入。
+fn launch_app(
+    core: SharedCore,
+    title: SharedString,
+    smoke: Option<f32>,
+    cjk_font: Option<Vec<u8>>,
+) -> impl FnOnce(&mut App) {
+    move |cx: &mut App| {
+        if let Some(bytes) = cjk_font {
+            let _ = cx
+                .text_system()
+                .add_fonts(vec![std::borrow::Cow::Owned(bytes)]);
+        }
         gpui_component::init(cx);
         let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
         let options = WindowOptions {
@@ -1140,7 +1283,7 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
         })
         .detach();
 
-        // 冒烟模式：N 秒后自动退出
+        // 冒烟模式：N 秒后自动退出（仅桌面有效；Web 无退出语义）
         if let Some(secs) = smoke {
             if secs > 0.0 {
                 cx.spawn(async move |cx: &mut gpui::AsyncApp| {
@@ -1152,6 +1295,24 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
                 .detach();
             }
         }
-    });
-    Ok(())
+    }
+}
+
+/// fetch 一个同源二进制资源（非 2xx / 不存在 → None）。
+#[cfg(target_arch = "wasm32")]
+async fn web_fetch_bytes(url: &str) -> Option<Vec<u8>> {
+    use wasm_bindgen::JsCast;
+    let window = web_sys::window()?;
+    let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url))
+        .await
+        .ok()?;
+    let response: web_sys::Response = response.dyn_into().ok()?;
+    if !response.ok() {
+        return None;
+    }
+    let buffer =
+        wasm_bindgen_futures::JsFuture::from(response.array_buffer().ok()?).await.ok()?;
+    // ArrayBuffer → Uint8Array：需用构造包装，dyn_into 不跨类型
+    let bytes = js_sys::Uint8Array::new(&buffer.into());
+    Some(bytes.to_vec())
 }

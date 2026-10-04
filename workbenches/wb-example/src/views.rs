@@ -98,8 +98,8 @@ impl wb::ViewInstance for CanvasView {
             gy += step;
         }
 
-        // 视图内联按钮：点击走命令系统（统一入口）
-        let add_btn = Rect::new(rect.pos.x + 10.0, rect.pos.y + 10.0, 84.0, 26.0);
+        // 视图内联按钮：点击走命令系统（统一入口）；演示视图级图标绘制
+        let add_btn = Rect::new(rect.pos.x + 10.0, rect.pos.y + 10.0, 96.0, 26.0);
         let hover = ctx
             .input
             .mouse_pos
@@ -107,7 +107,7 @@ impl wb::ViewInstance for CanvasView {
             .unwrap_or(false);
         let snap = ctx.snapshot();
         let add_enabled = snap.active_document.is_some() && snap.active_view_is(CANVAS_VIEW);
-        PaintHelpers::button(p, add_btn, "+ 添加", 13.0, add_enabled, hover);
+        PaintHelpers::button_with_icon(p, add_btn, "icons/add.svg", "添加", 13.0, add_enabled, hover);
 
         // 图形
         let doc_id = snap.active_document.as_ref().map(|d| d.id);

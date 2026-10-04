@@ -46,7 +46,7 @@ pub struct ServiceHost {
     /// 插件注册表镜像（build 时填充，运行时禁用同步更新）。
     pub plugins: Vec<PluginEntry>,
     /// 平台启动时刻。
-    pub started: std::time::Instant,
+    pub started: web_time::Instant,
     extras: std::collections::HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     task_rx: TaskEventRx,
 }
@@ -65,7 +65,7 @@ impl ServiceHost {
             settings: Settings::in_memory(),
             stats: RuntimeStats::default(),
             plugins: Vec::new(),
-            started: std::time::Instant::now(),
+            started: web_time::Instant::now(),
             extras: std::collections::HashMap::new(),
             task_rx,
         }

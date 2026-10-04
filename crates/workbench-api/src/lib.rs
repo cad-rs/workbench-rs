@@ -14,6 +14,8 @@
 //! | a view/panel author | view::ViewInstance + paint::PaintBackend (GUI-free drawing) |
 //! | a plugin host | the workbench-python crate (Host API v1, layered on this crate) |
 
+pub mod assets;
+pub mod asyncrt;
 pub mod command;
 pub mod documents;
 pub mod geo;
@@ -32,6 +34,8 @@ pub mod workspace;
 /// is managed separately — see workbench-python).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub use assets::{AssetSource, ChainedAssets, StaticAssets};
+pub use asyncrt::sleep;
 pub use command::{
     AsyncJob, AsyncJobFactory, AsyncSpec, AsyncStarter, BackgroundStarter, CommandArgs,
     CommandCtx, CommandDef, CommandExecution, CommandInvocation, CommandKind, CommandResult,

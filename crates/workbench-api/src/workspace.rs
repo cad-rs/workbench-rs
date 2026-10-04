@@ -88,6 +88,9 @@ pub type ViewFactory = Box<dyn Fn() -> Box<dyn ViewInstance> + Send + Sync>;
 pub struct ViewDef {
     pub type_id: ViewTypeId,
     pub title: String,
+    /// 图标资源路径（如 `"icons/canvas.svg"`，由产品的 AssetSource 解析）；
+    /// 中央标签展示用，None 时回退为纯文本。
+    pub icon: Option<String>,
     /// 是否单例：同类型同时只开一个标签。
     pub singleton: bool,
     pub factory: ViewFactory,
@@ -103,9 +106,15 @@ impl ViewDef {
         Self {
             type_id: type_id.into(),
             title: title.into(),
+            icon: None,
             singleton,
             factory: Box::new(factory),
         }
+    }
+    /// 设置图标资源路径（中央标签展示用）。
+    pub fn icon(mut self, path: impl Into<String>) -> Self {
+        self.icon = Some(path.into());
+        self
     }
 }
 
@@ -113,6 +122,9 @@ impl ViewDef {
 pub struct PanelDef {
     pub id: PanelId,
     pub title: String,
+    /// 图标资源路径（如 `"icons/explorer.svg"`，由产品的 AssetSource 解析）；
+    /// 面板头展示用，None 时回退为纯文本。
+    pub icon: Option<String>,
     pub area: DockArea,
     /// 默认尺寸：左右为宽度，上下为高度（逻辑像素）。
     pub default_size: f32,
@@ -132,11 +144,17 @@ impl PanelDef {
         Self {
             id: id.into(),
             title: title.into(),
+            icon: None,
             area,
             default_size,
             order,
             factory: Box::new(factory),
         }
+    }
+    /// 设置图标资源路径（面板头展示用）。
+    pub fn icon(mut self, path: impl Into<String>) -> Self {
+        self.icon = Some(path.into());
+        self
     }
 }
 
@@ -144,6 +162,8 @@ impl PanelDef {
 pub struct PanelSlot {
     pub id: PanelId,
     pub title: String,
+    /// 图标资源路径（注册时从 [`PanelDef`] 复制）。
+    pub icon: Option<String>,
     pub area: DockArea,
     pub order: i32,
     pub size: f32,
@@ -156,6 +176,8 @@ pub struct TabSlot {
     pub instance_id: TabInstanceId,
     pub type_id: ViewTypeId,
     pub title: String,
+    /// 图标资源路径（打开时从 [`ViewDef`] 复制）。
+    pub icon: Option<String>,
     /// 绑定的文档（文档视图）。
     pub document: Option<DocumentId>,
     pub instance: Option<Box<dyn ViewInstance>>,
@@ -285,6 +307,7 @@ impl WorkspaceState {
         let slot = PanelSlot {
             id: def.id.clone(),
             title: def.title.clone(),
+            icon: def.icon.clone(),
             area: def.area,
             order: def.order,
             size: def.default_size,
@@ -404,6 +427,7 @@ impl WorkspaceState {
             instance_id,
             type_id: type_id.clone(),
             title,
+            icon: def.icon.clone(),
             document: bind_document,
             instance,
         });
@@ -580,6 +604,7 @@ impl WorkspaceState {
                         instance_id,
                         type_id: def.type_id.clone(),
                         title: st.title.clone(),
+                        icon: def.icon.clone(),
                         document: None, // 文档不跨会话恢复；需要时由工作台重新绑定
                         instance,
                     });

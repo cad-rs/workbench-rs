@@ -34,46 +34,64 @@ impl wb::Workbench for ExampleWorkbench {
         });
 
         // ---- 中央视图 ----
-        reg.register_view(ViewDef::new("example.welcome", "欢迎", true, || {
-            Box::new(views::WelcomeView)
-        }));
-        reg.register_view(ViewDef::new("example.canvas", "图形画布", true, || {
-            Box::new(views::CanvasView)
-        }));
+        reg.register_view(
+            ViewDef::new("example.welcome", "欢迎", true, || {
+                Box::new(views::WelcomeView)
+            })
+            .icon(icons::WELCOME),
+        );
+        reg.register_view(
+            ViewDef::new("example.canvas", "图形画布", true, || {
+                Box::new(views::CanvasView)
+            })
+            .icon(icons::CANVAS),
+        );
 
         // ---- Dock 面板 ----
-        reg.register_panel(PanelDef::new(
-            "example.panel.explorer",
-            "资源管理器",
-            DockArea::Left,
-            240.0,
-            0,
-            || Box::new(views::ExplorerPanel),
-        ));
-        reg.register_panel(PanelDef::new(
-            "example.panel.tasks",
-            "任务",
-            DockArea::Right,
-            300.0,
-            0,
-            || Box::new(views::TasksPanel),
-        ));
-        reg.register_panel(PanelDef::new(
-            "example.panel.properties",
-            "属性",
-            DockArea::Right,
-            300.0,
-            1,
-            || Box::new(views::PropertiesPanel),
-        ));
-        reg.register_panel(PanelDef::new(
-            "example.panel.output",
-            "输出",
-            DockArea::Bottom,
-            170.0,
-            0,
-            || Box::new(views::OutputPanel),
-        ));
+        reg.register_panel(
+            PanelDef::new(
+                "example.panel.explorer",
+                "资源管理器",
+                DockArea::Left,
+                240.0,
+                0,
+                || Box::new(views::ExplorerPanel),
+            )
+            .icon(icons::EXPLORER),
+        );
+        reg.register_panel(
+            PanelDef::new(
+                "example.panel.tasks",
+                "任务",
+                DockArea::Right,
+                300.0,
+                0,
+                || Box::new(views::TasksPanel),
+            )
+            .icon(icons::TASKS),
+        );
+        reg.register_panel(
+            PanelDef::new(
+                "example.panel.properties",
+                "属性",
+                DockArea::Right,
+                300.0,
+                1,
+                || Box::new(views::PropertiesPanel),
+            )
+            .icon(icons::PROPERTIES),
+        );
+        reg.register_panel(
+            PanelDef::new(
+                "example.panel.output",
+                "输出",
+                DockArea::Bottom,
+                170.0,
+                0,
+                || Box::new(views::OutputPanel),
+            )
+            .icon(icons::OUTPUT),
+        );
 
         // ---- 扩展服务 ----
         reg.add_service(ExampleState::default());
@@ -89,26 +107,72 @@ impl wb::Workbench for ExampleWorkbench {
 
 const CANVAS: &str = "example.canvas";
 
+// ---- 图标资源 ----
+
+/// 平台/视图/面板共享的图标路径（`assets/icons/` 下的静态内嵌表）。
+pub mod icons {
+    pub const ADD: &str = "icons/add.svg";
+    pub const DELETE: &str = "icons/delete.svg";
+    pub const GENERATE: &str = "icons/generate.svg";
+    pub const CANVAS: &str = "icons/canvas.svg";
+    pub const WELCOME: &str = "icons/welcome.svg";
+    pub const MODE: &str = "icons/mode.svg";
+    pub const SCAN: &str = "icons/scan.svg";
+    pub const CLOCK: &str = "icons/clock.svg";
+    pub const WARNING: &str = "icons/warning.svg";
+    pub const EXPLORER: &str = "icons/explorer.svg";
+    pub const TASKS: &str = "icons/tasks.svg";
+    pub const PROPERTIES: &str = "icons/properties.svg";
+    pub const OUTPUT: &str = "icons/output.svg";
+}
+
+/// 示例资源源（`include_bytes!` 内嵌）。产品在装配时挂载：
+/// `builder.with_assets(wb_example::example_assets())`。
+pub fn example_assets() -> impl wb::AssetSource {
+    static ASSETS: wb::StaticAssets = wb::StaticAssets::new(&[
+        (icons::ADD, include_bytes!("../assets/icons/add.svg")),
+        (icons::DELETE, include_bytes!("../assets/icons/delete.svg")),
+        (icons::GENERATE, include_bytes!("../assets/icons/generate.svg")),
+        (icons::CANVAS, include_bytes!("../assets/icons/canvas.svg")),
+        (icons::WELCOME, include_bytes!("../assets/icons/welcome.svg")),
+        (icons::MODE, include_bytes!("../assets/icons/mode.svg")),
+        (icons::SCAN, include_bytes!("../assets/icons/scan.svg")),
+        (icons::CLOCK, include_bytes!("../assets/icons/clock.svg")),
+        (icons::WARNING, include_bytes!("../assets/icons/warning.svg")),
+        (icons::EXPLORER, include_bytes!("../assets/icons/explorer.svg")),
+        (icons::TASKS, include_bytes!("../assets/icons/tasks.svg")),
+        (icons::PROPERTIES, include_bytes!("../assets/icons/properties.svg")),
+        (icons::OUTPUT, include_bytes!("../assets/icons/output.svg")),
+    ]);
+    ASSETS
+}
+
 fn register_commands(reg: &mut Registry) {
     // 打开画布（绑定活动文档）
-    reg.register_command(CommandDef::sync(
-        "example.open_canvas",
-        "打开画布",
-        |ctx: &mut CommandCtx, _a: &CommandArgs| match ctx.open_view(CANVAS, true) {
-            Ok(_) => CommandResult::done(),
-            Err(e) => CommandResult::failed(e),
-        },
-    ));
+    reg.register_command(
+        CommandDef::sync(
+            "example.open_canvas",
+            "打开画布",
+            |ctx: &mut CommandCtx, _a: &CommandArgs| match ctx.open_view(CANVAS, true) {
+                Ok(_) => CommandResult::done(),
+                Err(e) => CommandResult::failed(e),
+            },
+        )
+        .icon(icons::CANVAS),
+    );
 
     // 打开欢迎页
-    reg.register_command(CommandDef::sync(
-        "example.open_welcome",
-        "欢迎页",
-        |ctx: &mut CommandCtx, _a: &CommandArgs| match ctx.open_view("example.welcome", false) {
-            Ok(_) => CommandResult::done(),
-            Err(e) => CommandResult::failed(e),
-        },
-    ));
+    reg.register_command(
+        CommandDef::sync(
+            "example.open_welcome",
+            "欢迎页",
+            |ctx: &mut CommandCtx, _a: &CommandArgs| match ctx.open_view("example.welcome", false) {
+                Ok(_) => CommandResult::done(),
+                Err(e) => CommandResult::failed(e),
+            },
+        )
+        .icon(icons::WELCOME),
+    );
 
     // 添加图形（同步、可撤销；上下文：画布视图 + 活动文档）
     reg.register_command(
@@ -138,6 +202,7 @@ fn register_commands(reg: &mut Registry) {
                 }
             },
         )
+        .icon(icons::ADD)
         .enabled_when(|snap| snap.active_document.is_some() && snap.active_view_is(CANVAS)),
     );
 
@@ -175,6 +240,7 @@ fn register_commands(reg: &mut Registry) {
                 }
             },
         )
+        .icon(icons::DELETE)
         .enabled_when(|snap| {
             snap.active_document.is_some()
                 && snap.active_view_is(CANVAS)
@@ -256,90 +322,103 @@ fn register_commands(reg: &mut Registry) {
                 })
             },
         )
+        .icon(icons::GENERATE)
         .enabled_when(|snap| snap.active_document.is_some()),
     );
 
     // 异步扫描（阶段 2：共享执行器上的轻量异步任务，不独占线程）
-    reg.register_command(CommandDef::async_command(
-        "example.async_scan",
-        "异步扫描（执行器）",
-        |_ctx: &mut CommandCtx| {
-            Ok(wb::AsyncSpec {
-                title: "异步扫描".to_string(),
-                cancellable: true,
-                input: Box::new(()),
-                job: Box::new(|task: wb::TaskCtx| {
-                    Box::pin(async move {
-                        let steps = 12u32;
+    reg.register_command(
+        CommandDef::async_command(
+            "example.async_scan",
+            "异步扫描（执行器）",
+            |_ctx: &mut CommandCtx| {
+                Ok(wb::AsyncSpec {
+                    title: "异步扫描".to_string(),
+                    cancellable: true,
+                    input: Box::new(()),
+                    job: Box::new(|task: wb::TaskCtx| {
+                        Box::pin(async move {
+                            let steps = 12u32;
+                            for step in 0..steps {
+                                task.check_cancelled()?;
+                                task.report(
+                                    Some(step as f32 / steps as f32),
+                                    &format!("扫描片段 {}/{}", step + 1, steps),
+                                );
+                                // 平台无关等待（桌面 async-io 计时器 / Web JS setTimeout）
+                                wb::sleep(std::time::Duration::from_millis(100)).await;
+                            }
+                            task.log("异步扫描完成（共享执行器线程池）");
+                            Ok(None)
+                        })
+                    }),
+                })
+            },
+        )
+        .icon(icons::SCAN),
+    );
+    // 慢任务（后台、可取消、无文档提交）
+    reg.register_command(
+        CommandDef::background(
+            "example.slow_job",
+            "慢任务（演示进度与取消）",
+            |_ctx: &mut CommandCtx| {
+                Ok(wb::TaskSpec {
+                    title: "慢任务".to_string(),
+                    cancellable: true,
+                    input: Box::new(()),
+                    job: Box::new(|task: &mut wb::TaskCtx| {
+                        let steps = 25u32;
                         for step in 0..steps {
                             task.check_cancelled()?;
                             task.report(
                                 Some(step as f32 / steps as f32),
-                                &format!("扫描片段 {}/{}", step + 1, steps),
+                                &format!("步骤 {}/{}", step + 1, steps),
                             );
-                            async_io::Timer::after(std::time::Duration::from_millis(100)).await;
+                            if step == 10 {
+                                task.log("已完成一半，试试取消按钮");
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(120));
                         }
-                        task.log("异步扫描完成（共享执行器线程池）");
                         Ok(None)
-                    })
-                }),
-            })
-        },
-    ));
-
-    // 慢任务（后台、可取消、无文档提交）
-    reg.register_command(CommandDef::background(
-        "example.slow_job",
-        "慢任务（演示进度与取消）",
-        |_ctx: &mut CommandCtx| {
-            Ok(wb::TaskSpec {
-                title: "慢任务".to_string(),
-                cancellable: true,
-                input: Box::new(()),
-                job: Box::new(|task: &mut wb::TaskCtx| {
-                    let steps = 25u32;
-                    for step in 0..steps {
-                        task.check_cancelled()?;
-                        task.report(
-                            Some(step as f32 / steps as f32),
-                            &format!("步骤 {}/{}", step + 1, steps),
-                        );
-                        if step == 10 {
-                            task.log("已完成一半，试试取消按钮");
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(120));
-                    }
-                    Ok(None)
-                }),
-            })
-        },
-    ));
+                    }),
+                })
+            },
+        )
+        .icon(icons::CLOCK),
+    );
 
     // 失败演示
-    reg.register_command(CommandDef::sync(
-        "example.failing_cmd",
-        "失败演示",
-        |_ctx: &mut CommandCtx, _a: &CommandArgs| {
-            CommandResult::failed("演示：命令执行失败（见输出面板与状态栏）")
-        },
-    ));
+    reg.register_command(
+        CommandDef::sync(
+            "example.failing_cmd",
+            "失败演示",
+            |_ctx: &mut CommandCtx, _a: &CommandArgs| {
+                CommandResult::failed("演示：命令执行失败（见输出面板与状态栏）")
+            },
+        )
+        .icon(icons::WARNING),
+    );
 
     // 切换工作模式
-    reg.register_command(CommandDef::sync(
-        "example.toggle_mode",
-        "切换工作模式",
-        |ctx: &mut CommandCtx, _a: &CommandArgs| {
-            let next = if ctx.snapshot().work_mode == "建模" {
-                "草图"
-            } else {
-                "建模"
-            };
-            match ctx.set_work_mode(next) {
-                Ok(_) => CommandResult::done(),
-                Err(e) => CommandResult::failed(e),
-            }
-        },
-    ));
+    reg.register_command(
+        CommandDef::sync(
+            "example.toggle_mode",
+            "切换工作模式",
+            |ctx: &mut CommandCtx, _a: &CommandArgs| {
+                let next = if ctx.snapshot().work_mode == "建模" {
+                    "草图"
+                } else {
+                    "建模"
+                };
+                match ctx.set_work_mode(next) {
+                    Ok(_) => CommandResult::done(),
+                    Err(e) => CommandResult::failed(e),
+                }
+            },
+        )
+        .icon(icons::MODE),
+    );
 }
 
 fn register_toolbar(reg: &mut Registry) {

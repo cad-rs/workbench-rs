@@ -8,6 +8,7 @@
 //! - [`selfcheck`]: headless selfcheck (probe-based; unrelated items SKIP).
 
 pub mod app;
+pub mod assets;
 pub mod cli;
 pub mod dialog;
 pub mod executor;

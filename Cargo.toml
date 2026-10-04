@@ -8,7 +8,9 @@ members = [
     "crates/workbench-ui-gpui",
     "workbenches/wb-example",
     "products/product-egui-demo",
+    "products/product-egui-web",
     "products/product-gpui-demo",
+    "products/product-gpui-web",
 ]
 
 [workspace.package]
@@ -42,6 +44,16 @@ futures-lite = "2"
 pyo3 = { version = "0.29", features = ["auto-initialize"] }
 toml = "0.9"
 
+# Web (wasm32) build support (target-gated; versions align with eframe's tree)
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window"] }
+console_error_panic_hook = "0.1"
+# std::time::Instant/SystemTime 在 wasm32-unknown-unknown 上 panic；web-time 桌面转发
+# std、Web 端走 performance.now/Date（eframe 同款方案）
+web-time = "1"
+
 # egui frontend (glow backend: more conservative presentation path on Windows)
 egui = "0.36"
 eframe = { version = "0.36", default-features = false, features = [
@@ -69,3 +81,8 @@ opt-level = 2
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+# gpui_ce_web 0.1.0 的 crates.io 包漏掉了内嵌字体文件（include_bytes! 找不到路径，
+# 见 vendor/gpui_ce_web/README.md）；vendor 一份并补齐 OFL 字体
+[patch.crates-io]
+gpui_ce_web = { path = "vendor/gpui_ce_web" }

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Workbench Demo - gpui (Web)</title>
+
+    <!-- Copy assets/ (optional: fonts for text fallback) into dist/ -->
+    <link data-trunk rel="copy-dir" href="assets" />
+
+    <style>
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            background: #292b30;
+            overflow: hidden;
+        }
+
+        #loading {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #a0a5af;
+            font-family: "Segoe UI", system-ui, sans-serif;
+            font-size: 14px;
+            /* gpui_web 挂载的 canvas 在 body 末尾、无定位；放在底层，
+               应用首帧绘制后自然被覆盖 */
+            z-index: -1;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- 先于 trunk 注入的 module 脚本执行：捕获 wasm 启动期 console 输出，
+         便于在内嵌/无头环境诊断（gpui_web 的日志走 console） -->
+    <script>
+        window.__logs = [];
+        (function () {
+            var orig = {};
+            ["log", "info", "warn", "error"].forEach(function (level) {
+                orig[level] = console[level].bind(console);
+                console[level] = function () {
+                    try {
+                        var msg = Array.prototype.map.call(arguments, function (a) {
+                            return a && a.stack ? a.stack : String(a);
+                        }).join(" | ");
+                        window.__logs.push(level + ": " + msg);
+                        if (window.__logs.length > 200) window.__logs.shift();
+                    } catch (e) {}
+                    orig[level].apply(null, arguments);
+                };
+            });
+            window.addEventListener("error", function (e) {
+                window.__logs.push("window.onerror: " + (e.message || e.filename));
+            });
+            window.addEventListener("unhandledrejection", function (e) {
+                window.__logs.push("unhandledrejection: " +
+                    ((e.reason && (e.reason.message || String(e.reason))) || ""));
+            });
+        })();
+    </script>
+    <div id="loading">正在加载 Workbench Demo…（gpui web 需要浏览器支持 WebGPU）</div>
+    <!-- gpui_web 会在启动后自行创建并挂载 <canvas> -->
+</body>
+
+</html>

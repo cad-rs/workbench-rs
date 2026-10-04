@@ -4,12 +4,16 @@
 //! This crate is the only place on the GUI side that touches egui; Workbench
 //! modules and the platform core never depend on egui.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use eframe::egui;
-use egui::{Align2, Color32, CornerRadius, FontId, Frame, Sense, Stroke};
+use egui::{vec2, Align2, Color32, CornerRadius, FontId, Frame, Sense, Stroke, Vec2};
 use egui_tiles::{Tile, TileId, Tree, UiResponse};
+use web_time::Instant;
 
+mod icons;
+
+use icons::IconCache;
 use workbench_api as wb;
 use workbench_core::AppRuntime;
 
@@ -24,11 +28,13 @@ enum PaneKind {
 struct EguiPainter<'a> {
     painter: &'a egui::Painter,
     origin: egui::Pos2,
+    /// 图标缓存（来自 EguiHost，经 WbBehavior 传入）。
+    icons: &'a mut IconCache,
 }
 
 impl<'a> EguiPainter<'a> {
-    fn new(painter: &'a egui::Painter, origin: egui::Pos2) -> Self {
-        Self { painter, origin }
+    fn new(painter: &'a egui::Painter, origin: egui::Pos2, icons: &'a mut IconCache) -> Self {
+        Self { painter, origin, icons }
     }
     fn pt(&self, p: wb::Point) -> egui::Pos2 {
         egui::pos2(self.origin.x + p.x, self.origin.y + p.y)
@@ -88,12 +94,30 @@ impl wb::PaintBackend for EguiPainter<'_> {
         let s = galley.size();
         wb::Size::new(s.x, s.y)
     }
+
+    fn draw_icon(&mut self, rect: wb::Rect, path: &str, color: wb::Color) {
+        let area = self.rect(rect);
+        if let Some((tex, size)) = self
+            .icons
+            .texture(self.painter.ctx(), path, area.size(), Self::color(color))
+        {
+            let draw_rect = egui::Rect::from_center_size(area.center(), size);
+            self.painter.image(
+                tex,
+                draw_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+    }
 }
 
 /// 前端宿主。
 struct EguiHost {
     core: AppRuntime,
     tree: Tree<PaneKind>,
+    /// SVG 图标缓存（资源源来自 builder.asset_source()）。
+    icons: IconCache,
     /// 结构签名：变更时重建树并触发保存。
     signature: u64,
     last_save: Instant,
@@ -104,14 +128,15 @@ struct EguiHost {
 }
 
 impl EguiHost {
-    fn new(mut core: AppRuntime) -> Self {
+    fn new(mut core: AppRuntime, icons: IconCache) -> Self {
         let saved_ui = core.load_layout();
         let mut host = Self {
             core,
             tree: Tree::empty("workbench"),
+            icons,
             signature: 0,
-            last_save: Instant::now(),
-            start: Instant::now(),
+            last_save: web_time::Instant::now(),
+            start: web_time::Instant::now(),
             smoke_seconds: None,
             log_cursor: 0,
         };
@@ -312,6 +337,8 @@ fn map_key(key: egui::Key) -> Option<wb::KeyCode> {
 
 struct WbBehavior<'a> {
     core: &'a mut AppRuntime,
+    /// SVG 图标缓存。
+    icons: &'a mut IconCache,
     /// 中央标签点击 → 激活
     activated: Option<u64>,
 }
@@ -322,16 +349,52 @@ enum SlotKey {
     Central(u64),
 }
 
+impl WbBehavior<'_> {
+    /// 面板/中央标签的图标资源路径（None → 纯文本标签）。
+    fn tab_icon_for_pane(core: &AppRuntime, pane: &PaneKind) -> Option<String> {
+        match pane {
+            PaneKind::Panel(id) => core
+                .host
+                .ws
+                .panels
+                .iter()
+                .find(|p| &p.id.0 == id)
+                .and_then(|p| p.icon.clone()),
+            PaneKind::Central(i) => core
+                .host
+                .ws
+                .tabs
+                .iter()
+                .find(|t| t.instance_id.0 == *i)
+                .and_then(|t| t.icon.clone()),
+        }
+    }
+}
+
 impl egui_tiles::Behavior<PaneKind> for WbBehavior<'_> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, _tile_id: TileId, pane: &mut PaneKind) -> UiResponse {
         let rect = ui.available_rect_before_wrap();
         let resp = ui.interact(rect, ui.id().with("pane_body"), Sense::click_and_drag());
         match pane {
             PaneKind::Panel(id) => {
-                paint_view(&mut *self.core, ui.painter(), rect, &resp, SlotKey::Panel(id.clone()));
+                paint_view(
+                    &mut *self.core,
+                    &mut *self.icons,
+                    ui.painter(),
+                    rect,
+                    &resp,
+                    SlotKey::Panel(id.clone()),
+                );
             }
             PaneKind::Central(instance) => {
-                paint_view(&mut *self.core, ui.painter(), rect, &resp, SlotKey::Central(*instance));
+                paint_view(
+                    &mut *self.core,
+                    &mut *self.icons,
+                    ui.painter(),
+                    rect,
+                    &resp,
+                    SlotKey::Central(*instance),
+                );
                 if resp.clicked() {
                     self.activated = Some(*instance);
                 }
@@ -365,6 +428,135 @@ impl egui_tiles::Behavior<PaneKind> for WbBehavior<'_> {
         }
     }
 
+    /// 自定义标签渲染：图标 + 标题 + 关闭钮（默认实现只支持文本）。
+    fn tab_ui(
+        &mut self,
+        tiles: &mut egui_tiles::Tiles<PaneKind>,
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        tile_id: TileId,
+        state: &egui_tiles::TabState,
+    ) -> egui::Response {
+        let text = self.tab_title_for_tile(tiles, tile_id);
+        let icon = match tiles.get(tile_id) {
+            Some(Tile::Pane(pane)) => Self::tab_icon_for_pane(self.core, pane),
+            _ => None,
+        };
+
+        let close_btn_size = Vec2::splat(self.close_button_outer_size());
+        let close_btn_left_padding = 4.0;
+        let icon_px = 14.0;
+        let icon_gap = 4.0;
+        let icon_w = if icon.is_some() { icon_px + icon_gap } else { 0.0 };
+        let font_id = egui::TextStyle::Button.resolve(ui.style());
+        let galley = text.into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, font_id);
+
+        let x_margin = self.tab_title_spacing(ui.visuals());
+        let button_width = galley.size().x
+            + icon_w
+            + 2.0 * x_margin
+            + f32::from(state.closable) * (close_btn_left_padding + close_btn_size.x);
+        let (_, tab_rect) = ui.allocate_space(vec2(button_width, ui.available_height()));
+
+        let draggable = self.is_tile_draggable(tiles, tile_id);
+        let sense = if draggable {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let tab_response = ui.interact(tab_rect, id, sense);
+        let tab_response = if draggable {
+            tab_response.on_hover_cursor(self.tab_hover_cursor_icon())
+        } else {
+            tab_response
+        };
+        tab_response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                ui.is_enabled(),
+                state.active,
+                galley.text(),
+            )
+        });
+
+        if ui.is_rect_visible(tab_rect) && !state.is_being_dragged {
+            let bg_color = self.tab_bg_color(ui.visuals(), tiles, tile_id, state);
+            let stroke = self.tab_outline_stroke(ui.visuals(), tiles, tile_id, state);
+            ui.painter().rect(
+                tab_rect.shrink(0.5),
+                0.0,
+                bg_color,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            if state.active {
+                ui.painter().hline(
+                    tab_rect.x_range(),
+                    tab_rect.bottom(),
+                    Stroke::new(stroke.width + 1.0, bg_color),
+                );
+            }
+
+            let text_color = self.tab_text_color(ui.visuals(), tiles, tile_id, state);
+            let inner = tab_rect.shrink(x_margin);
+            let text_rect = egui::Rect::from_min_max(
+                egui::pos2(inner.left() + icon_w, inner.top()),
+                egui::pos2(inner.right(), inner.bottom()),
+            );
+            let text_pos = Align2::LEFT_CENTER.align_size_within_rect(galley.size(), text_rect).min;
+            if let Some(path) = &icon {
+                let icon_rect = egui::Rect::from_center_size(
+                    egui::pos2(inner.left() + icon_px * 0.5, tab_rect.center().y),
+                    Vec2::splat(icon_px),
+                );
+                if let Some((tex, size)) = self
+                    .icons
+                    .texture(ui.ctx(), path, Vec2::splat(icon_px), text_color)
+                {
+                    let draw_rect = egui::Rect::from_center_size(icon_rect.center(), size);
+                    ui.painter().image(
+                        tex,
+                        draw_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+            }
+            ui.painter().galley(text_pos, galley, text_color);
+
+            // 关闭钮（与默认实现一致）
+            if state.closable {
+                let close_btn_rect = Align2::RIGHT_CENTER
+                    .align_size_within_rect(close_btn_size, tab_rect.shrink(x_margin));
+                let close_btn_id = ui.auto_id_with("tab_close_btn");
+                let close_btn_response = ui
+                    .interact(close_btn_rect, close_btn_id, Sense::click_and_drag())
+                    .on_hover_cursor(egui::CursorIcon::Default);
+                close_btn_response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Close")
+                });
+                let visuals = ui.style().interact(&close_btn_response);
+                let rect = close_btn_rect
+                    .shrink(self.close_button_inner_margin())
+                    .expand(visuals.expansion);
+                let stroke = visuals.fg_stroke;
+                ui.painter()
+                    .line_segment([rect.left_top(), rect.right_bottom()], stroke);
+                ui.painter()
+                    .line_segment([rect.right_top(), rect.left_bottom()], stroke);
+                if close_btn_response.clicked()
+                    || tab_response.clicked_by(egui::PointerButton::Middle)
+                {
+                    if self.on_tab_close(tiles, tile_id) {
+                        tiles.remove(tile_id);
+                    }
+                }
+            }
+        }
+
+        self.on_tab_button(tiles, tile_id, tab_response)
+    }
+
     fn is_tab_closable(&self, _tiles: &egui_tiles::Tiles<PaneKind>, _tile_id: TileId) -> bool {
         true
     }
@@ -387,6 +579,7 @@ impl egui_tiles::Behavior<PaneKind> for WbBehavior<'_> {
 /// 实例存放在核心状态内，而绘制需要 &mut 核心——先换出、绘制、再放回。
 fn paint_view(
     core: &mut AppRuntime,
+    icons: &mut IconCache,
     painter: &egui::Painter,
     rect: egui::Rect,
     resp: &egui::Response,
@@ -419,7 +612,7 @@ fn paint_view(
     };
     {
         let Some(inst) = instance.as_mut() else { return };
-        let mut painter_impl = EguiPainter::new(painter, rect.min);
+        let mut painter_impl = EguiPainter::new(painter, rect.min, icons);
         let mut ctx = wb::ViewCtx::new(&mut *core as &mut dyn wb::AppServices, input);
         inst.paint(&mut painter_impl, area, &mut ctx);
     }
@@ -486,7 +679,7 @@ impl eframe::App for EguiHost {
 
         // 布局节流保存
         if self.last_save.elapsed() > Duration::from_secs(3) {
-            self.last_save = Instant::now();
+            self.last_save = web_time::Instant::now();
             self.save_layout_now();
         }
 
@@ -516,7 +709,7 @@ impl eframe::App for EguiHost {
                 // 快照：Tab 列表 + 活动 Tab 的组与命令状态
                 struct GroupUi {
                     title: String,
-                    items: Vec<(String, Option<String>, String, bool, Option<String>)>,
+                    items: Vec<(String, Option<String>, String, bool, Option<String>, Option<String>)>,
                 }
                 struct TabUi {
                     id: String,
@@ -553,12 +746,14 @@ impl eframe::App for EguiHost {
                                             let enabled = self.core.is_enabled(&it.command.0);
                                             let hotkey =
                                                 self.core.command_hotkey_label(&it.command.0);
+                                            let icon = self.core.command_icon(&it.command.0);
                                             (
                                                 it.command.0.clone(),
                                                 it.label.clone(),
                                                 title,
                                                 enabled,
                                                 hotkey,
+                                                icon,
                                             )
                                         })
                                         .collect(),
@@ -605,20 +800,39 @@ impl eframe::App for EguiHost {
                             ui.vertical(|ui| {
                                 ui.add_space(2.0);
                                 ui.horizontal(|ui| {
-                                    for (cmd, label, title, enabled, hotkey) in &group.items {
+                                    for (cmd, label, title, enabled, hotkey, icon) in &group.items {
                                         let text =
                                             label.clone().unwrap_or_else(|| title.clone());
                                         let tip = match hotkey {
                                             Some(hk) => format!("{title}（{hk}）"),
                                             None => title.clone(),
                                         };
+                                        let mut button = egui::Button::new(
+                                            egui::RichText::new(&text).size(13.0),
+                                        );
+                                        if let Some(path) = icon {
+                                            // 有图标：左侧渲染 16px 单色 SVG（禁用态灰色）
+                                            let color = if *enabled {
+                                                Color32::WHITE
+                                            } else {
+                                                Color32::GRAY
+                                            };
+                                            if let Some((tex, size)) = self.icons.texture(
+                                                ui.ctx(),
+                                                path,
+                                                Vec2::splat(16.0),
+                                                color,
+                                            ) {
+                                                button = egui::Button::image_and_text(
+                                                    egui::Image::from_texture(
+                                                        egui::load::SizedTexture::new(tex, size),
+                                                    ),
+                                                    egui::RichText::new(&text).size(13.0),
+                                                );
+                                            }
+                                        }
                                         let resp = ui
-                                            .add_enabled(
-                                                *enabled,
-                                                egui::Button::new(
-                                                    egui::RichText::new(text).size(13.0),
-                                                ),
-                                            )
+                                            .add_enabled(*enabled, button)
                                             .on_hover_text(tip);
                                         if resp.clicked() && *enabled {
                                             let _ = self.core.execute_command(
@@ -712,8 +926,10 @@ impl eframe::App for EguiHost {
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let core = &mut self.core;
             let tree = &mut self.tree;
+            let icons = &mut self.icons;
             let mut behavior = WbBehavior {
                 core,
+                icons,
                 activated: None,
             };
             tree.ui(&mut behavior, ui);
@@ -730,6 +946,7 @@ impl eframe::App for EguiHost {
 
 /// 安装中文字体：egui 内置字体缺 CJK 字形，加载系统字体（Microsoft YaHei 等）
 /// 作为回退。在候选路径中取第一个存在的文件。
+#[cfg(not(target_arch = "wasm32"))]
 fn install_cjk_fonts(ctx: &egui::Context) {
     const CANDIDATES: &[&str] = &[
         r"C:\Windows\Fonts\msyh.ttc",
@@ -744,6 +961,11 @@ fn install_cjk_fonts(ctx: &egui::Context) {
         return;
     };
     let Ok(data) = std::fs::read(path) else { return };
+    apply_cjk_font(ctx, data);
+}
+
+/// 注册 CJK 回退字体（桌面文件加载与 Web fetch 共用的尾部）。
+fn apply_cjk_font(ctx: &egui::Context, data: Vec<u8>) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "cjk".into(),
@@ -759,12 +981,14 @@ fn install_cjk_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// egui 入口：构建产品并运行主循环。
+/// egui 桌面入口：构建产品并运行主循环。
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run(
     builder: workbench_core::WorkbenchAppBuilder,
     window_title: &str,
 ) -> Result<(), eframe::Error> {
     let smoke = builder.smoke_seconds();
+    let assets = builder.asset_source();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
@@ -777,9 +1001,99 @@ pub fn run(
         Box::new(move |cc| {
             install_cjk_fonts(&cc.egui_ctx);
             let core = builder.build().expect("产品装配失败");
-            let mut host = EguiHost::new(core);
+            let mut host = EguiHost::new(core, IconCache::new(assets));
             host.smoke_seconds = smoke;
             Ok(Box::new(host))
         }),
     )
+}
+
+/// egui Web（wasm32）入口：在浏览器中运行产品（trunk serve / trunk build）。
+///
+/// `canvas_id` 是 index.html 中承载 UI 的 `<canvas>` 元素 ID。
+/// 与桌面入口的差异：布局不落盘、`--smoke` 无效、本地文件对话框不可用、
+/// 后台线程任务以失败终态返回；异步命令在主线程事件循环上驱动。
+#[cfg(target_arch = "wasm32")]
+pub async fn run_web(
+    builder: workbench_core::WorkbenchAppBuilder,
+    canvas_id: &str,
+) -> Result<(), wasm_bindgen::JsValue> {
+    use wasm_bindgen::JsCast;
+
+    web_stage("run_web:entered");
+    let assets = builder.asset_source();
+    let canvas = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id(canvas_id))
+        .ok_or_else(|| {
+            wasm_bindgen::JsValue::from_str(&format!("canvas #{canvas_id} not found"))
+        })?
+        .dyn_into::<web_sys::HtmlCanvasElement>()?;
+    web_stage("run_web:canvas-found");
+
+    let result = eframe::WebRunner::new()
+        .start(
+            canvas,
+            eframe::WebOptions::default(),
+            Box::new(move |cc| {
+                web_stage("run_web:creator-called");
+                install_web_fonts(&cc.egui_ctx);
+                let core = builder.build().expect("产品装配失败");
+                web_stage("run_web:core-built");
+                Ok(Box::new(EguiHost::new(core, IconCache::new(assets))))
+            }),
+        )
+        .await;
+    web_stage(if result.is_ok() {
+        "run_web:start-ok"
+    } else {
+        "run_web:start-err"
+    });
+    result
+}
+
+/// 诊断标记：把启动阶段写入 `window.__wbStage`（浏览器端可读）。
+#[cfg(target_arch = "wasm32")]
+fn web_stage(mark: &str) {
+    let global = js_sys::global();
+    let _ = js_sys::Reflect::set(
+        &global,
+        &wasm_bindgen::JsValue::from_str("__wbStage"),
+        &wasm_bindgen::JsValue::from_str(mark),
+    );
+}
+
+/// Web 端 CJK 回退字体：异步从同源 `assets/fonts/` 加载（见
+/// scripts/web-copy-font.ps1）；不存在时保持 egui 内置字体。
+#[cfg(target_arch = "wasm32")]
+fn install_web_fonts(ctx: &egui::Context) {
+    let ctx = ctx.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        for name in ["cjk.ttf", "cjk.otf"] {
+            let url = format!("assets/fonts/{name}");
+            if let Some(data) = fetch_bytes(&url).await {
+                apply_cjk_font(&ctx, data);
+                return;
+            }
+        }
+    });
+}
+
+/// fetch 一个同源二进制资源（非 2xx / 不存在 → None）。
+#[cfg(target_arch = "wasm32")]
+async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
+    use wasm_bindgen::JsCast;
+    let window = web_sys::window()?;
+    let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url))
+        .await
+        .ok()?;
+    let response: web_sys::Response = response.dyn_into().ok()?;
+    if !response.ok() {
+        return None;
+    }
+    let buffer =
+        wasm_bindgen_futures::JsFuture::from(response.array_buffer().ok()?).await.ok()?;
+    // ArrayBuffer → Uint8Array：需用构造包装，dyn_into 不跨类型
+    let bytes = js_sys::Uint8Array::new(&buffer.into());
+    Some(bytes.to_vec())
 }

@@ -17,6 +17,7 @@ fn main() {
     )
     .with_backend_label("egui")
     .with_workbench(wb_example::ExampleWorkbench)
+    .with_assets(wb_example::example_assets())
     .with_plugin_stage(workbench_python::plugin_stage(
         workbench_core::cli::default_plugin_dirs("com.example.workbench-egui"),
     ))

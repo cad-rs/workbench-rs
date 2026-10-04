@@ -242,6 +242,9 @@ pub struct CommandDef {
     /// 启用条件（None 表示总是可用）。依据 CtxSnapshot 求值。
     pub enabled: Option<Box<dyn Fn(&CtxSnapshot) -> bool + Send + Sync>>,
     pub kind: CommandKind,
+    /// 图标资源路径（如 `"icons/save.svg"`，由产品的 AssetSource 解析）；
+    /// None 时 UI 回退为纯文本。
+    pub icon: Option<String>,
     /// 贡献来源（Workbench ID 或插件 ID）；诊断与插件卸载清理用。
     pub source: Option<String>,
 }
@@ -264,6 +267,7 @@ impl CommandDef {
             hotkey: None,
             enabled: None,
             kind: CommandKind::Sync(Box::new(handler)),
+            icon: None,
             source: None,
         }
     }
@@ -278,6 +282,7 @@ impl CommandDef {
             hotkey: None,
             enabled: None,
             kind: CommandKind::Background(Box::new(starter)),
+            icon: None,
             source: None,
         }
     }
@@ -292,11 +297,18 @@ impl CommandDef {
             hotkey: None,
             enabled: None,
             kind: CommandKind::Async(Box::new(starter)),
+            icon: None,
             source: None,
         }
     }
     pub fn hotkey(mut self, hk: Hotkey) -> Self {
         self.hotkey = Some(hk);
+        self
+    }
+    /// 设置图标资源路径（如 `"icons/save.svg"`，由产品的 AssetSource 解析）。
+    /// 未设置或解析失败时 UI 回退为纯文本。
+    pub fn icon(mut self, path: impl Into<String>) -> Self {
+        self.icon = Some(path.into());
         self
     }
     pub fn enabled_when(

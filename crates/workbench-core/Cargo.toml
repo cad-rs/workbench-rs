@@ -13,8 +13,15 @@ readme = "../../README.md"
 workbench-api = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# 桌面专属：本地文件对话框（Web 为 stub）、async-io 计时器驱动共享执行器
+# （async-io 2.6 的 rustix/errno 链不支持 wasm32-unknown-unknown）
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = { workspace = true }
-env_logger = { workspace = true }
-async-executor = { workspace = true }
 async-io = { workspace = true }
+async-executor = { workspace = true }
 futures-lite = { workspace = true }
+
+# Web (wasm32): async executor drives futures on the main thread
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = { workspace = true }

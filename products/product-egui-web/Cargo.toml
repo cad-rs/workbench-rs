@@ -1,0 +1,21 @@
+[package]
+name = "product-egui-web"
+description = "Example product for workbench-rs running the egui frontend in the browser (trunk + wasm32)"
+keywords = ["egui", "wasm", "web", "workbench"]
+categories = ["gui", "wasm"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+workbench-api = { workspace = true }
+workbench-core = { workspace = true }
+workbench-ui-egui = { workspace = true }
+workbench-example = { workspace = true }
+eframe = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }

@@ -401,3 +401,114 @@ Implements design.md §18 phase 5. Landed 5 items trimmed by real product need,
 - leftovers cleaned: selfcheck `_path_use` dead code, `Check::skip` redundant allow;
 - `.cargo/config.toml` `PYO3_PYTHON` gains cross-platform probing notes
   (machine-specific value; each machine adjusts after open-sourcing).
+
+## 12. SVG icon system record (done)
+
+UI elements gain optional monochrome SVG icons (design.md §9.2.1):
+
+- **Contract (workbench-api)**: `assets.rs` defines `AssetSource`
+  (`load(path) -> Option<Cow<'static, [u8]>>`), `ChainedAssets` (product
+  source first, platform fallback), and `StaticAssets` (zero-cost
+  `include_bytes!` tables). `CommandDef.icon`, `ViewDef.icon`,
+  `PanelDef.icon` (+ builder methods) declare icon paths; registration copies
+  them into `TabSlot`/`PanelSlot` like titles. Layout persistence is
+  unaffected (icons are re-derived from definitions on restore).
+  `PaintBackend::draw_icon(rect, path, color)` is a default-method (no-op) so
+  third-party implementors keep compiling.
+- **Assembly (workbench-core)**: `WorkbenchAppBuilder::with_assets(...)` +
+  `asset_source()` (product source → platform standard source);
+  `assets.rs` embeds five standard icons (new/open/save/undo/redo, 24×24
+  line style, `wb-std/` prefix) and `platform_cmds` wires them onto the
+  built-in commands; `command_icon()` exposes lookup to frontends.
+- **egui frontend**: `icons.rs` renders SVG bytes via usvg/resvg 0.48 (same
+  version gpui-ce already pulls in; no duplicate build) at device-pixel
+  resolution, tints from the alpha mask (premultiplied RGBA), and caches
+  textures keyed by (path, physical size, color). Ribbon buttons use
+  `Button::image_and_text`; `WbBehavior::tab_ui` is overridden to draw
+  icon + title + close button for central tabs and panel headers
+  (`tab_title_for_pane` alone cannot render images).
+- **gpui frontend**: `WbAssets` chains the product source over
+  `gpui-component-assets`; Ribbon buttons, panel headers and central tabs
+  embed the native `svg()` element (tint via `text_color`);
+  `GpuiPainter::draw_icon` uses the public `window.paint_svg`.
+- **Example**: `wb-example` ships 13 hand-drawn 24×24 line icons as a static
+  asset table (`example_assets()`), wires icons onto commands/views/panels,
+  and the canvas inline button uses `PaintHelpers::button_with_icon` to
+  demonstrate view-level icon drawing.
+- **Fallback**: missing/unparseable icon paths degrade to text-only UI (egui
+  prints a one-time diagnostic per path); disabled commands render gray.
+- **Deferred**: Python plugin icon registration (needs plugin-directory
+  asset resolution), full-color icons, Ribbon tab-row icons, and a built-in
+  icon set beyond the five standard ones.
+
+Verification: workspace check + tests pass; both products' `--selfcheck`
+18/18; screenshots confirm icons render in both frontends with correct
+disabled-state tinting.
+
+## 13. Web (wasm32) slice record (done, experimental)
+
+`product-egui-web` compiles the egui frontend to `wasm32-unknown-unknown` and
+serves it with trunk (`trunk serve`, dev build ~12 MB wasm; `--release` for
+production). Verified by headless-browser screenshot: Ribbon/panels/tabs all
+render with icons, CJK text works via the runtime-fetched fallback font.
+
+- **Entry (workbench-ui-egui)**: `run_web(builder, canvas_id)` drives
+  `eframe::WebRunner` (glow/WebGL2); `run()` is desktop-only now. The host
+  struct is shared; `logic`/`ui` are called by the web backend as on native.
+  CJK fallback font is fetched from same-origin `assets/fonts/cjk.ttf|otf`
+  at startup (copy one in with `scripts/web-copy-font.ps1`; not committed).
+- **Product glue**: trunk needs `#[wasm_bindgen(start)]` to run `main`
+  (the generated loader only calls `init()`); panics and entry errors are
+  mirrored into the DOM for diagnosis in embedded/headless environments.
+- **Platform adaptations (target-gated)**:
+  - `std::time::Instant/SystemTime` panic on wasm → replaced with `web-time`
+    at runtime-relevant call sites (log, services, PaintHelpers::progress,
+    egui host); desktop behavior unchanged (web-time forwards to std).
+  - `std::env::temp_dir()` (and other path APIs) panic on wasm → the layout
+    directory falls back to a `/wb-web` placeholder; layout/settings/autosave
+    I/O fails silently as designed, crash recovery is skipped.
+  - Shared async executor: no worker threads on web; futures are driven via
+    `wasm-bindgen-futures::spawn_local` on the main thread. Background
+    (thread) tasks report a terminal failure immediately; async commands use
+    the new `wb::sleep` (async-io on desktop, performance.now + setTimeout
+    wake on web, `Send`-safe).
+  - `rfd` sync file dialogs panic on web → `dialog.rs` returns `None`
+    (open/save commands report "cancelled").
+  - `workbench-core` desktop-only deps (rfd/async-io/async-executor/
+    futures-lite) are target-gated; async-io's rustix/errno chain does not
+    compile on wasm32-unknown-unknown.
+- **Known limits**: `gpui` has no wasm path (desktop-only); async command
+  bodies must not block (main thread); interaction verified by rendering —
+  mouse/keyboard input goes through standard eframe web event handling.
+
+## 14. gpui web slice record (done, experimental)
+
+`product-gpui-web` compiles the gpui frontend to wasm32 using gpui-ce's own
+`gpui_web` platform backend (WebGPU rendering, browser event loop). Verified
+by CDP screenshot: full UI renders with icons and Chinese text on
+WebGPU-capable browsers (Chrome/Edge 113+).
+
+- **gpui_ce_web 0.1.0 packaging bug**: the crates.io package is missing the
+  bundled font files referenced by `include_bytes!` (`assets/fonts/...` of
+  the upstream repo). Fixed by vendoring the crate under `vendor/gpui_ce_web`
+  with the 8 OFL fonts (IBM Plex Sans, Lilex) fetched from the upstream repo
+  plus a `[patch.crates-io]` entry. Remove the patch once a fixed version is
+  published.
+- **App lifetime on web**: `Platform::run` returns immediately (the run loop
+  belongs to the browser), so `Application::run` releases the app state as
+  soon as the launch closure returns ("app was released" in the logs, window
+  destroyed). The web path uses `Application::run_embedded` and intentionally
+  leaks the returned `ApplicationHandle` (page lifetime = app lifetime).
+- **CJK fonts before first frame**: cosmic-text resolves script fallbacks and
+  gpui caches shaped lines by content hash; adding a font after startup keeps
+  hitting stale (tofu) layouts. The web path therefore fetches
+  `assets/fonts/cjk.ttf|otf` (same-origin, via `scripts/web-copy-font.ps1`)
+  BEFORE `run_embedded`, injecting through `TextSystem::add_fonts`.
+- **Entry**: `#[wasm_bindgen(start)]` runs main at instantiation; the web
+  product calls the same `workbench_ui_gpui::run` — `gpui_platform::application()`
+  selects WebPlatform automatically. `web_init()` installs panic hook + console
+  logging; the product page captures console output into `window.__logs` before
+  the module script for diagnosability.
+- **WbAssets**: `gpui-component-assets`'s web `Assets` is a CDN downloader
+  (constructed with `Assets::new(endpoint)`), chained after the product asset
+  source as on desktop.

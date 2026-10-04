@@ -433,6 +433,28 @@ update, and drawing errors.
 Ordinary views never implement GPU initialization, device access, or render
 lifecycle callbacks.
 
+### 9.2.1 SVG icon system
+
+UI elements (commands on the Ribbon, central tabs, dock panel headers, and
+in-view buttons) may carry a monochrome SVG icon declared as a stable resource
+path string (e.g. `icons/save.svg`). The path is a logical key, not a file
+path: the product provides an `AssetSource` (via
+`WorkbenchAppBuilder::with_assets`) that resolves paths to bytes — most
+commonly a static `include_bytes!` table. Lookup order is product assets
+first, then the platform standard assets (the five built-in document/undo
+command icons under the `wb-std/` prefix), so products can override standard
+icons by reusing their paths. Missing or unparseable icons fall back to the
+text-only presentation and never break the UI.
+
+Icon semantics match the gpui native SVG element: the SVG is rendered as an
+alpha mask and tinted with the widget foreground color (white when enabled,
+gray when disabled), so single-color line icons follow the UI style. The
+egui frontend rasterizes SVGs with usvg/resvg at device-pixel resolution and
+caches textures by (path, size, color); the gpui frontend uses its built-in
+`svg()` element. GUI-free views draw icons through
+`PaintBackend::draw_icon(rect, path, color)`; the platform guarantees no
+plugin or Workbench code touches the rasterization stack directly.
+
 ### 9.3 Rendering capabilities
 
 Rendering capability is declared per view and provided by the platform or the

@@ -17,3 +17,12 @@ gpui-platform = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
 serde_json = { workspace = true }
+# std::time 在 wasm 上不可用；web-time 桌面转发 std、Web 走 performance.now
+web-time = { workspace = true }
+
+# Web (wasm32)：运行时 fetch 同源 CJK 回退字体
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = ["Response"] }

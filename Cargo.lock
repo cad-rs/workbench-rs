@@ -3242,8 +3242,6 @@ dependencies = [
 [[package]]
 name = "gpui_ce_web"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac03c593fc6ee1957a7a55594b506ff6218662ea4a20523407252c2b5d570c01"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -5872,6 +5870,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "product-egui-web"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "workbench-api",
+ "workbench-core",
+ "workbench-example",
+ "workbench-ui-egui",
+]
+
+[[package]]
 name = "product-gpui-demo"
 version = "0.1.0"
 dependencies = [
@@ -5880,6 +5891,19 @@ dependencies = [
  "workbench-core",
  "workbench-example",
  "workbench-python",
+ "workbench-ui-gpui",
+]
+
+[[package]]
+name = "product-gpui-web"
+version = "0.1.0"
+dependencies = [
+ "gpui_ce_platform",
+ "wasm-bindgen",
+ "web-sys",
+ "workbench-api",
+ "workbench-core",
+ "workbench-example",
  "workbench-ui-gpui",
 ]
 
@@ -8291,6 +8315,7 @@ checksum = "977d0a4abdef933f424a99fe09f95576e089b90aebc6f016a3bc813762493e91"
 dependencies = [
  "base64 0.23.1",
  "data-url",
+ "flate2",
  "fontdb 0.24.0",
  "harfrust 0.12.0",
  "imagesize 0.15.0",
@@ -9642,8 +9667,14 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "workbench-api"
 version = "0.1.0"
 dependencies = [
+ "async-io",
+ "js-sys",
  "serde",
  "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]
@@ -9652,11 +9683,11 @@ version = "0.1.0"
 dependencies = [
  "async-executor",
  "async-io",
- "env_logger",
  "futures-lite",
  "rfd",
  "serde",
  "serde_json",
+ "wasm-bindgen-futures",
  "workbench-api",
 ]
 
@@ -9664,7 +9695,6 @@ dependencies = [
 name = "workbench-example"
 version = "0.1.0"
 dependencies = [
- "async-io",
  "serde",
  "serde_json",
  "workbench-api",
@@ -9688,8 +9718,14 @@ dependencies = [
  "eframe",
  "egui",
  "egui_tiles",
+ "js-sys",
+ "resvg 0.48.1",
  "serde",
  "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
  "workbench-api",
  "workbench-core",
 ]
@@ -9702,7 +9738,12 @@ dependencies = [
  "gpui_ce_components",
  "gpui_ce_components_assets",
  "gpui_ce_platform",
+ "js-sys",
  "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
  "workbench-api",
  "workbench-core",
 ]

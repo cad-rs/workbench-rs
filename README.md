@@ -45,6 +45,33 @@ cargo test --workspace                  # full test suite
 powershell -File scripts/verify.ps1     # one-shot verification (check + tests + selfcheck + smoke)
 ```
 
+### Running in the browser (wasm32 + trunk)
+
+Both frontends have web products served by [trunk](https://trunkrs.dev):
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install trunk
+
+cd products/product-egui-web    # egui frontend (WebGL2 via glow)
+trunk serve                     # http://127.0.0.1:8123
+
+cd ../product-gpui-web          # gpui frontend (WebGPU via gpui_web)
+trunk serve                     # http://127.0.0.1:8124 — needs a WebGPU browser
+```
+
+Optional: the frontends' bundled fonts have no CJK glyphs; run
+`powershell -File scripts/web-copy-font.ps1` once to copy a local system font
+(not committed) into each product's `assets/fonts/`, which the apps fetch at
+startup (before first frame) for Chinese text.
+
+Web-slice differences vs the desktop products: no Python plugin stage (pyo3
+does not target wasm), no local file dialogs, no background thread tasks
+(they fail with a terminal state; async commands run on the main-thread
+event loop), and layout/autosave persistence is memory-only. The gpui web
+build vendors `gpui_ce_web 0.1.0` (the crates.io package is missing its
+bundled fonts — see `vendor/gpui_ce_web/README.md`).
+
 ## Integration guide
 
 ### 1) Product developers: assemble a standalone application
@@ -95,8 +122,9 @@ impl wb::Workbench for CadWorkbench {
     fn id(&self) -> wb::WorkbenchId { wb::WorkbenchId::new("cad") }
     fn init(&self, reg: &mut wb::Registry) {
         // Commands (single entry point: Ribbon, hotkeys, scripts, plugins all run them)
+        // .icon(...) attaches a monochrome SVG icon (see "SVG icons" below)
         reg.register_command(
-            wb::CommandDef::sync("cad.add_box", "Add Box", |ctx, _args| {
+            wb::CommandDef::sync("cad.extrude", "Extrude", |ctx, _args| {
                 let doc = ctx.active_document().ok_or("no active document")?;
                 ctx.host().edit_document(...)?;
                 wb::CommandResult::done()
@@ -119,14 +147,26 @@ impl wb::Workbench for CadWorkbench {
 
 Key points:
 
-- Views draw through `PaintBackend` (six primitives: fill/stroke/line/circle/text)
-  and never touch GUI types;
+- Views draw through `PaintBackend` (six primitives + `draw_icon`) and never
+  touch GUI types;
 - Commands have three execution tiers: `Sync` (UI thread) / `Async` (shared
   executor) / `Background` (dedicated thread task with progress + cancellation);
 - Document edits go through `DocumentService::edit/commit`; background results
   come back as `DocCommit` (version-checked) — undo/redo work automatically;
 - `init` may panic — the failure is caught and isolated during assembly,
   without taking the product down.
+
+#### SVG icons
+
+Commands, central tabs, dock panels, and in-view buttons can carry a
+monochrome SVG icon: declare a path (`.icon("icons/extrude.svg")`) and mount
+an asset source on the product
+(`builder.with_assets(wb_example::example_assets())` — typically a static
+`include_bytes!` table via `wb::StaticAssets`). Lookup falls back to the
+platform standard icons (new/open/save/undo/redo under `wb-std/`), and a
+product can override those by reusing their paths. Icons render as an alpha
+mask tinted with the widget foreground color (gray when disabled) on both
+frontends; a missing or unparseable icon degrades to text-only UI.
 
 ### 3) Plugin developers: Python extensions
 
@@ -164,6 +204,7 @@ interpreter used at build time is configured via `PYO3_PYTHON` in
 - **Phase 3 (Python plugin loop)**: manifest & discovery, API version check, Host API v1, error isolation, runtime disable, demo plugin.
 - **RibbonBar**: three-level model `RibbonTab -> Group -> Command` (stable IDs, controlled merging, active-Tab persistence), rendering verified on both frontends via GPU readback screenshots.
 - **Phase 5 (production hardening, first batch)**: settings service, autosave + crash recovery, plugin management panel, diagnostics panel with frame statistics, performance regression tests + one-shot verification script.
+- **SVG icons**: GUI-agnostic icon contract (`AssetSource` + icon fields on commands/views/panels + `PaintBackend::draw_icon`), platform standard icon set, both frontends rendering with alpha-mask tinting and texture caching (design.md §9.2.1).
 - TODO: wgpu render service (optional capability), process isolation for untrusted plugins (design sketch in plan.md section 10.6), multi-platform packaging.
 
 ## Publishing (crates.io)
