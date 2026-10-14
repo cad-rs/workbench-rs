@@ -247,6 +247,32 @@ struct DragSnapshot {
     last: (f32, f32),
 }
 
+/// 分隔条拖动的目标映射（纯函数，便于单测）：面板位移 = 指针位移按目标取符号。
+fn splitter_delta(target: DragTarget, dx: f32, dy: f32) -> (wb::DockArea, f32) {
+    match target {
+        DragTarget::Left => (wb::DockArea::Left, dx),
+        DragTarget::Right => (wb::DockArea::Right, -dx),
+        DragTarget::Bottom => (wb::DockArea::Bottom, -dy),
+    }
+}
+
+/// 把分隔条拖动位移应用到对应区域的激活面板（下限 120px）。
+///
+/// 必须由**窗口级**鼠标处理器调用，而不是分隔条元素自己：gpui 的鼠标
+/// 事件按命中测试派发，指针一旦离开 6px 宽的分隔条，条带元素就再也收不到
+/// 移动事件——拖动会卡在起点附近"不跟手"。挂在窗口根上后，指针在窗口内
+/// 任何位置都继续跟随；松开同理（窗口任意位置松开都必须结束拖动）。
+fn apply_splitter_drag(core: &SharedCore, target: DragTarget, dx: f32, dy: f32) {
+    let (area, delta) = splitter_delta(target, dx, dy);
+    let mut core = core.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(active) = core.host.ws.area_active.get(&area).cloned() else {
+        return;
+    };
+    if let Some(slot) = core.host.ws.panels.iter_mut().find(|p| p.id == active) {
+        slot.size = (slot.size + delta).max(120.0);
+    }
+}
+
 /// 渲染期共享给绘制闭包的输入快照。
 #[derive(Clone)]
 struct FrameInput {
@@ -1048,6 +1074,8 @@ impl Render for RootView {
                     {
                         let drag_cell = drag_cell.clone();
                         move |ev: &MouseDownEvent, _w: &mut Window, _cx: &mut App| {
+                            // 只置位拖动状态（无视觉变化，无需重绘）；位移由
+                            // 窗口级 on_mouse_move 消费并驱动下一帧。
                             *drag_cell.lock().unwrap_or_else(|p| p.into_inner()) = Some(Drag {
                                 target,
                                 last: (ev.position.x.as_f32(), ev.position.y.as_f32()),
@@ -1055,53 +1083,6 @@ impl Render for RootView {
                         }
                     },
                 )
-                .on_mouse_up(
-                    gpui::MouseButton::Left,
-                    {
-                        let drag_cell = drag_cell.clone();
-                        move |_ev: &MouseUpEvent, _w: &mut Window, _cx: &mut App| {
-                            *drag_cell.lock().unwrap_or_else(|p| p.into_inner()) = None;
-                        }
-                    },
-                )
-                .on_mouse_move({
-                    let core_m = core.clone();
-                    let drag_cell = drag_cell.clone();
-                    move |ev: &MouseMoveEvent, _w: &mut Window, _cx: &mut App| {
-                        let d_snapshot = {
-                            let guard = drag_cell.lock().unwrap_or_else(|p| p.into_inner());
-                            guard.as_ref().map(|d| DragSnapshot {
-                                target: d.target,
-                                last: d.last,
-                            })
-                        };
-                        let Some(d) = d_snapshot else {
-                            return;
-                        };
-                        let (x, y) = (ev.position.x.as_f32(), ev.position.y.as_f32());
-                        let dx = x - d.last.0;
-                        let dy = y - d.last.1;
-                        if let Some(d) = drag_cell.lock().unwrap_or_else(|p| p.into_inner()).as_mut()
-                        {
-                            d.last = (x, y);
-                        }
-                        let mut core = core_m.lock().unwrap_or_else(|p| p.into_inner());
-                        let mut adjust = |area: wb::DockArea, delta: f32| {
-                            let Some(active) = core.host.ws.area_active.get(&area).cloned() else {
-                                return;
-                            };
-                            if let Some(slot) = core.host.ws.panels.iter_mut().find(|p| p.id == active)
-                            {
-                                slot.size = (slot.size + delta).max(120.0);
-                            }
-                        };
-                        match d.target {
-                            DragTarget::Left => adjust(wb::DockArea::Left, dx),
-                            DragTarget::Right => adjust(wb::DockArea::Right, -dx),
-                            DragTarget::Bottom => adjust(wb::DockArea::Bottom, -dy),
-                        }
-                    }
-                })
                 .into_any_element()
         };
 
@@ -1181,6 +1162,7 @@ impl Render for RootView {
                     let ev_cell = self.events.clone();
                     let down_flag = self.mouse_down.clone();
                     let weak_u = weak.clone();
+                    let drag_cell = self.drag.clone();
                     move |ev: &MouseUpEvent, _w: &mut Window, cx: &mut App| {
                         down_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                         push_input(
@@ -1189,6 +1171,12 @@ impl Render for RootView {
                             ev.modifiers.shift,
                             EvKind::Up,
                         );
+                        // 窗口任意位置松开都结束分隔条拖动（分隔条自身的
+                        // on_mouse_up 只在指针停在 6px 条带上时才会触发）。
+                        drag_cell
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .take();
                         notify(&weak_u, cx);
                     }
                 },
@@ -1196,6 +1184,8 @@ impl Render for RootView {
             .on_mouse_move({
                 let ev_cell = self.events.clone();
                 let weak_m = weak.clone();
+                let drag_cell = self.drag.clone();
+                let core_m = core.clone();
                 move |ev: &MouseMoveEvent, _w: &mut Window, cx: &mut App| {
                     push_input(
                         &ev_cell,
@@ -1203,6 +1193,36 @@ impl Render for RootView {
                         ev.modifiers.shift,
                         EvKind::Move,
                     );
+                    // 分隔条拖动在窗口级消费：指针离开 6px 条带后条带元素
+                    // 收不到移动事件，挂在元素上会"不跟手"（见
+                    // apply_splitter_drag 注释）。
+                    let (x, y) = (ev.position.x.as_f32(), ev.position.y.as_f32());
+                    if ev.pressed_button.is_none() {
+                        // 无按键的移动 = 拖动已结束（可能在窗口外松开，
+                        // on_mouse_up 收不到）：清掉残留状态，避免松手后
+                        // 面板仍"粘"着鼠标。
+                        drag_cell
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .take();
+                    } else {
+                        let d_snapshot = {
+                            let guard = drag_cell.lock().unwrap_or_else(|p| p.into_inner());
+                            guard.as_ref().map(|d| DragSnapshot {
+                                target: d.target,
+                                last: d.last,
+                            })
+                        };
+                        if let Some(d) = d_snapshot {
+                            let (dx, dy) = (x - d.last.0, y - d.last.1);
+                            if let Some(drag) =
+                                drag_cell.lock().unwrap_or_else(|p| p.into_inner()).as_mut()
+                            {
+                                drag.last = (x, y);
+                            }
+                            apply_splitter_drag(&core_m, d.target, dx, dy);
+                        }
+                    }
                     notify(&weak_m, cx);
                 }
             })
@@ -1512,6 +1532,75 @@ fn launch_app(
                 .detach();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 拖动位移 → (区域, 面板位移) 的符号映射：左条右移 = 左面板变宽，
+    /// 右条右移 = 右面板变窄，下条下移 = 下面板变矮（指针位移与面板尺寸
+    /// 反向）。映射错了表现为"跟手但反向"，与"完全不跟"是两类回归。
+    #[test]
+    fn splitter_drag_maps_pointer_motion_to_panel_growth() {
+        assert_eq!(
+            splitter_delta(DragTarget::Left, 30.0, 7.0),
+            (wb::DockArea::Left, 30.0)
+        );
+        assert_eq!(
+            splitter_delta(DragTarget::Right, 30.0, 7.0),
+            (wb::DockArea::Right, -30.0)
+        );
+        assert_eq!(
+            splitter_delta(DragTarget::Bottom, 30.0, 7.0),
+            (wb::DockArea::Bottom, -7.0)
+        );
+    }
+
+    /// 三条区域的面板都真的能调整（含 `area_active` 查找路径），并守住 120px 下限。
+    #[test]
+    fn splitter_drag_adjusts_every_area_and_clamps() {
+        let runtime = workbench_core::WorkbenchAppBuilder::new("test.splitter", "Splitter test")
+            .with_workbench(wb_example::ExampleWorkbench)
+            .build()
+            .expect("runtime builds");
+        let core: SharedCore = std::rc::Rc::new(Mutex::new(runtime));
+
+        let area_size = |area: wb::DockArea| -> Option<f32> {
+            let core = core.lock().unwrap_or_else(|p| p.into_inner());
+            let active = core.host.ws.area_active.get(&area)?;
+            core.host
+                .ws
+                .panels
+                .iter()
+                .find(|p| p.id == *active)
+                .map(|p| p.size)
+        };
+
+        // 每个区域都有一个活动面板（示例 workbench 注册了 资源管理器/任务/输出）。
+        for area in [wb::DockArea::Left, wb::DockArea::Right, wb::DockArea::Bottom] {
+            assert!(area_size(area).is_some(), "{area:?} has an active panel");
+        }
+
+        // 左条向右拖 +40：左面板变宽 40。
+        let before = area_size(wb::DockArea::Left).expect("left panel");
+        apply_splitter_drag(&core, DragTarget::Left, 40.0, 0.0);
+        assert_eq!(area_size(wb::DockArea::Left), Some(before + 40.0));
+
+        // 右条向右拖 +40：右面板变窄 40。
+        let before = area_size(wb::DockArea::Right).expect("right panel");
+        apply_splitter_drag(&core, DragTarget::Right, 40.0, 0.0);
+        assert_eq!(area_size(wb::DockArea::Right), Some(before - 40.0));
+
+        // 下条向下拖 +25：下面板变矮 25。
+        let before = area_size(wb::DockArea::Bottom).expect("bottom panel");
+        apply_splitter_drag(&core, DragTarget::Bottom, 0.0, 25.0);
+        assert_eq!(area_size(wb::DockArea::Bottom), Some(before - 25.0));
+
+        // 大幅反向拖动被 120px 下限挡住。
+        apply_splitter_drag(&core, DragTarget::Left, -100_000.0, 0.0);
+        assert_eq!(area_size(wb::DockArea::Left), Some(120.0));
     }
 }
 

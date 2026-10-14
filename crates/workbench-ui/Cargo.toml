@@ -43,3 +43,7 @@ gpui-wgpu = { workspace = true }
 image = { workspace = true }
 pollster = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+# 分隔条拖动的单测需要真实 Runtime（面板注册 + area_active 查找路径）
+workbench-example = { workspace = true }
