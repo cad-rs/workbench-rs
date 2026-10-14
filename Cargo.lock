@@ -8255,6 +8255,7 @@ dependencies = [
  "wgpu",
  "workbench-api",
  "workbench-core",
+ "workbench-example",
 ]
 
 [[package]]
