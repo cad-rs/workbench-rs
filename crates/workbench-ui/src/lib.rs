@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use gpui::{
     canvas, div, prelude::*, px, quad, relative, rgb_to_hsla, size, svg, App, Bounds,
-    Context, Corners, Edges, Hsla, KeyDownEvent, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollDelta, ScrollWheelEvent,
+    Context, Corners, DragMoveEvent, Edges, Empty, Hsla, KeyDownEvent, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
     SharedString, TextAlign, TextRun, TitlebarOptions, TransformationMatrix, Window,
     WindowBounds, WindowOptions,
 };
@@ -229,7 +229,7 @@ fn push_input(events: &Arc<Mutex<Vec<InputEv>>>, pos: (f32, f32), shift: bool, k
         .push(InputEv { pos, shift, kind });
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DragTarget {
     Left,
     Right,
@@ -239,12 +239,33 @@ enum DragTarget {
 struct Drag {
     target: DragTarget,
     last: (f32, f32),
+    /// 框架是否真的启动了拖拽（越过 DRAG_THRESHOLD）。
+    /// 未启动 = 视作点击：松开时不做残余结算（否则点击会带来 ≤2px 的抖动）。
+    started: bool,
 }
 
 #[derive(Clone, Copy)]
 struct DragSnapshot {
     target: DragTarget,
     last: (f32, f32),
+}
+
+/// 分隔条拖动的载荷类型。
+///
+/// 走 gpui 的拖拽系统（`on_drag` + `on_drag_move`），与 gpui-component 的
+/// dock 调整把手同形（`dock/tiles.rs` 的 `DragResizing`）：`on_drag_move`
+/// 在**捕获阶段**按"活动拖拽的类型"派发、**不查命中**，因此指针离开 6px
+/// 条带后位移依旧持续送达；框架还统一维护 `active_drag` 生命周期并在每次
+/// move 强制 refresh()。裸 `on_mouse_move` 是命中门控的，拖出元素即失效
+/// ——分隔条最初的"不跟手"就是这个原因。
+#[derive(Clone)]
+struct SplitterDrag(DragTarget);
+
+impl Render for SplitterDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // resize 交互不需要跟手的"拖影"（dock 的 DragResizing 同为空渲染）。
+        Empty
+    }
 }
 
 /// 分隔条拖动的目标映射（纯函数，便于单测）：面板位移 = 指针位移按目标取符号。
@@ -257,11 +278,6 @@ fn splitter_delta(target: DragTarget, dx: f32, dy: f32) -> (wb::DockArea, f32) {
 }
 
 /// 把分隔条拖动位移应用到对应区域的激活面板（下限 120px）。
-///
-/// 必须由**窗口级**鼠标处理器调用，而不是分隔条元素自己：gpui 的鼠标
-/// 事件按命中测试派发，指针一旦离开 6px 宽的分隔条，条带元素就再也收不到
-/// 移动事件——拖动会卡在起点附近"不跟手"。挂在窗口根上后，指针在窗口内
-/// 任何位置都继续跟随；松开同理（窗口任意位置松开都必须结束拖动）。
 fn apply_splitter_drag(core: &SharedCore, target: DragTarget, dx: f32, dy: f32) {
     let (area, delta) = splitter_delta(target, dx, dy);
     let mut core = core.lock().unwrap_or_else(|p| p.into_inner());
@@ -1074,15 +1090,70 @@ impl Render for RootView {
                     {
                         let drag_cell = drag_cell.clone();
                         move |ev: &MouseDownEvent, _w: &mut Window, _cx: &mut App| {
-                            // 只置位拖动状态（无视觉变化，无需重绘）；位移由
-                            // 窗口级 on_mouse_move 消费并驱动下一帧。
+                            // 记录起点（拖动阈值与首段位移都以此为基准）；
+                            // 真正"开始拖动"由框架在越过 DRAG_THRESHOLD 时触发。
                             *drag_cell.lock().unwrap_or_else(|p| p.into_inner()) = Some(Drag {
                                 target,
                                 last: (ev.position.x.as_f32(), ev.position.y.as_f32()),
+                                started: false,
                             });
                         }
                     },
                 )
+                .on_drag(SplitterDrag(target), {
+                    let drag_cell = drag_cell.clone();
+                    move |drag: &SplitterDrag, _, _, cx| {
+                        // 框架在这里宣告拖拽真正开始（首个越过阈值的移动）。
+                        if let Some(d) = drag_cell
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .as_mut()
+                        {
+                            if d.target == drag.0 {
+                                d.started = true;
+                            }
+                        }
+                        cx.new(|_| drag.clone())
+                    }
+                })
+                .on_drag_move::<SplitterDrag>({
+                    let drag_cell = drag_cell.clone();
+                    let core_m = core.clone();
+                    move |event: &DragMoveEvent<SplitterDrag>, _w: &mut Window, cx: &mut App| {
+                        // 同一时刻只有一个活动拖拽；这里再按目标过滤，多块
+                        // 分隔条各自登记、互不串台（dock 同款写法）。
+                        if event.drag(cx).0 != target {
+                            return;
+                        }
+                        if event.event.pressed_button.is_none() {
+                            // 无按键的移动 = 拖动已结束（可能在窗口外松开，
+                            // 框架的 active_drag 未清）：清掉本地状态，不再推进。
+                            drag_cell.lock().unwrap_or_else(|p| p.into_inner()).take();
+                            return;
+                        }
+                        let (x, y) = (
+                            event.event.position.x.as_f32(),
+                            event.event.position.y.as_f32(),
+                        );
+                        let d_snapshot = {
+                            let guard = drag_cell.lock().unwrap_or_else(|p| p.into_inner());
+                            guard.as_ref().map(|d| DragSnapshot {
+                                target: d.target,
+                                last: d.last,
+                            })
+                        };
+                        let Some(d) = d_snapshot else {
+                            return;
+                        };
+                        let (dx, dy) = (x - d.last.0, y - d.last.1);
+                        if let Some(drag) =
+                            drag_cell.lock().unwrap_or_else(|p| p.into_inner()).as_mut()
+                        {
+                            drag.last = (x, y);
+                        }
+                        apply_splitter_drag(&core_m, d.target, dx, dy);
+                    }
+                })
                 .into_any_element()
         };
 
@@ -1163,6 +1234,7 @@ impl Render for RootView {
                     let down_flag = self.mouse_down.clone();
                     let weak_u = weak.clone();
                     let drag_cell = self.drag.clone();
+                    let core_u = core.clone();
                     move |ev: &MouseUpEvent, _w: &mut Window, cx: &mut App| {
                         down_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                         push_input(
@@ -1171,12 +1243,20 @@ impl Render for RootView {
                             ev.modifiers.shift,
                             EvKind::Up,
                         );
-                        // 窗口任意位置松开都结束分隔条拖动（分隔条自身的
-                        // on_mouse_up 只在指针停在 6px 条带上时才会触发）。
-                        drag_cell
+                        // 窗口任意位置松开都结束分隔条拖动；已启动的拖拽在此
+                        // 结算"残余位移"——最后一次 move 可能被合并/未送达，
+                        // 按松开位置补齐，保证面板最终落在指针处（dock 的
+                        // end_resize 同义）。未越过阈值的点击不结算。
+                        let finished = drag_cell
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
                             .take();
+                        if let Some(d) = finished {
+                            if d.started {
+                                let (x, y) = (ev.position.x.as_f32(), ev.position.y.as_f32());
+                                apply_splitter_drag(&core_u, d.target, x - d.last.0, y - d.last.1);
+                            }
+                        }
                         notify(&weak_u, cx);
                     }
                 },
@@ -1193,36 +1273,9 @@ impl Render for RootView {
                         ev.modifiers.shift,
                         EvKind::Move,
                     );
-                    // 分隔条拖动在窗口级消费：指针离开 6px 条带后条带元素
-                    // 收不到移动事件，挂在元素上会"不跟手"（见
-                    // apply_splitter_drag 注释）。
-                    let (x, y) = (ev.position.x.as_f32(), ev.position.y.as_f32());
-                    if ev.pressed_button.is_none() {
-                        // 无按键的移动 = 拖动已结束（可能在窗口外松开，
-                        // on_mouse_up 收不到）：清掉残留状态，避免松手后
-                        // 面板仍"粘"着鼠标。
-                        drag_cell
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .take();
-                    } else {
-                        let d_snapshot = {
-                            let guard = drag_cell.lock().unwrap_or_else(|p| p.into_inner());
-                            guard.as_ref().map(|d| DragSnapshot {
-                                target: d.target,
-                                last: d.last,
-                            })
-                        };
-                        if let Some(d) = d_snapshot {
-                            let (dx, dy) = (x - d.last.0, y - d.last.1);
-                            if let Some(drag) =
-                                drag_cell.lock().unwrap_or_else(|p| p.into_inner()).as_mut()
-                            {
-                                drag.last = (x, y);
-                            }
-                            apply_splitter_drag(&core_m, d.target, dx, dy);
-                        }
-                    }
+                    // 分隔条拖动由 gpui 拖拽系统在元素侧消费（on_drag_move，
+                    // 捕获阶段、类型门控、不查命中）；窗口级只负责驱动视口
+                    // 输入管线与重绘。
                     notify(&weak_m, cx);
                 }
             })
