@@ -6,21 +6,21 @@
 //! `script` path are instead mounted as gpui-rhai script views (UiNode trees
 //! authored in Rhai).
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
     canvas, div, prelude::*, px, quad, relative, rgb_to_hsla, size, svg, App, Bounds,
-    Context, Corners, DragMoveEvent, Edges, Empty, Hsla, KeyDownEvent, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
-    SharedString, TextAlign, TextRun, TitlebarOptions, TransformationMatrix, Window,
-    WindowBounds, WindowOptions,
+    Context, Corners, Edges, Hsla, KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, TextAlign, TextRun,
+    TitlebarOptions, TransformationMatrix, Window, WindowBounds, WindowOptions,
 };
 
 use workbench_api as wb;
 use workbench_core::AppRuntime;
 
 pub mod gpu_view;
+
+pub(crate) mod dock_panel;
 
 /// 平台运行时句柄：全部使用都在 UI 主线程（gpui 前台执行器），故用 `Rc`。
 type SharedCore = std::rc::Rc<Mutex<AppRuntime>>;
@@ -61,9 +61,7 @@ fn black() -> Hsla {
 }
 
 const COL_BG: wb::Color = wb::Color::rgb(0.16, 0.17, 0.20);
-const COL_SPLITTER: wb::Color = wb::Color::rgb(0.10, 0.10, 0.12);
 const COL_TOOLBAR: wb::Color = wb::Color::rgb(0.20, 0.21, 0.25);
-const COL_TABBAR: wb::Color = wb::Color::rgb(0.14, 0.15, 0.18);
 
 fn ui_font() -> gpui::Font {
     gpui::Font {
@@ -229,66 +227,6 @@ fn push_input(events: &Arc<Mutex<Vec<InputEv>>>, pos: (f32, f32), shift: bool, k
         .push(InputEv { pos, shift, kind });
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DragTarget {
-    Left,
-    Right,
-    Bottom,
-}
-
-struct Drag {
-    target: DragTarget,
-    last: (f32, f32),
-    /// 框架是否真的启动了拖拽（越过 DRAG_THRESHOLD）。
-    /// 未启动 = 视作点击：松开时不做残余结算（否则点击会带来 ≤2px 的抖动）。
-    started: bool,
-}
-
-#[derive(Clone, Copy)]
-struct DragSnapshot {
-    target: DragTarget,
-    last: (f32, f32),
-}
-
-/// 分隔条拖动的载荷类型。
-///
-/// 走 gpui 的拖拽系统（`on_drag` + `on_drag_move`），与 gpui-component 的
-/// dock 调整把手同形（`dock/tiles.rs` 的 `DragResizing`）：`on_drag_move`
-/// 在**捕获阶段**按"活动拖拽的类型"派发、**不查命中**，因此指针离开 6px
-/// 条带后位移依旧持续送达；框架还统一维护 `active_drag` 生命周期并在每次
-/// move 强制 refresh()。裸 `on_mouse_move` 是命中门控的，拖出元素即失效
-/// ——分隔条最初的"不跟手"就是这个原因。
-#[derive(Clone)]
-struct SplitterDrag(DragTarget);
-
-impl Render for SplitterDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        // resize 交互不需要跟手的"拖影"（dock 的 DragResizing 同为空渲染）。
-        Empty
-    }
-}
-
-/// 分隔条拖动的目标映射（纯函数，便于单测）：面板位移 = 指针位移按目标取符号。
-fn splitter_delta(target: DragTarget, dx: f32, dy: f32) -> (wb::DockArea, f32) {
-    match target {
-        DragTarget::Left => (wb::DockArea::Left, dx),
-        DragTarget::Right => (wb::DockArea::Right, -dx),
-        DragTarget::Bottom => (wb::DockArea::Bottom, -dy),
-    }
-}
-
-/// 把分隔条拖动位移应用到对应区域的激活面板（下限 120px）。
-fn apply_splitter_drag(core: &SharedCore, target: DragTarget, dx: f32, dy: f32) {
-    let (area, delta) = splitter_delta(target, dx, dy);
-    let mut core = core.lock().unwrap_or_else(|p| p.into_inner());
-    let Some(active) = core.host.ws.area_active.get(&area).cloned() else {
-        return;
-    };
-    if let Some(slot) = core.host.ws.panels.iter_mut().find(|p| p.id == active) {
-        slot.size = (slot.size + delta).max(120.0);
-    }
-}
-
 /// 渲染期共享给绘制闭包的输入快照。
 #[derive(Clone)]
 struct FrameInput {
@@ -350,13 +288,16 @@ struct RootView {
     last_render: web_time::Instant,
     events: Arc<Mutex<Vec<InputEv>>>,
     mouse_down: Arc<std::sync::atomic::AtomicBool>,
-    drag: Arc<Mutex<Option<Drag>>>,
-    /// gpui-rhai 脚本视图域（每窗口一个；首个脚本面板挂载时创建）。
-    script_host: Option<gpui_rhai::ScriptViewHost>,
-    /// 已挂载的脚本面板（面板 id → 句柄）。
-    script_views: HashMap<String, gpui_rhai::ScriptViewHandle>,
-    /// 脚本面板挂载失败原因（面板 id → 诊断；失败不重试）。
-    script_errors: HashMap<String, String>,
+    /// The dock area and its mirror of the model (built on the first frame:
+    /// `RootView::new` has no window to build it with).
+    dock: Option<dock_panel::DockShell>,
+    /// Per-frame input for the paint closures, shared with the dock panels.
+    frame: dock_panel::SharedFrame,
+    /// gpui-rhai script view domain (per window; created at the first script
+    /// panel mount, shared with the panels that draw them).
+    scripts: dock_panel::SharedScripts,
+    /// What the dock is showing, as last mirrored into the model.
+    mirror: dock_panel::SharedMirror,
 }
 
 impl RootView {
@@ -366,17 +307,42 @@ impl RootView {
             last_render: web_time::Instant::now(),
             events: Arc::new(Mutex::new(Vec::new())),
             mouse_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            drag: Arc::new(Mutex::new(None)),
-            script_host: None,
-            script_views: HashMap::new(),
-            script_errors: HashMap::new(),
+            dock: None,
+            frame: std::rc::Rc::new(std::cell::RefCell::new(FrameInput {
+                events: Arc::new(Mutex::new(Vec::new())),
+                mouse_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            })),
+            scripts: std::rc::Rc::new(std::cell::RefCell::new(
+                dock_panel::ScriptRuntime::default(),
+            )),
+            mirror: std::rc::Rc::new(std::cell::RefCell::new(
+                dock_panel::DockMirror::default(),
+            )),
         }
     }
 }
 
+/// 请求重绘：根视图 + 全部 dock 面板。
+///
+/// 面板现在是独立实体，而 dock 用 gpui 的**缓存视图**通路绘制面板内容
+/// （面板实体被 notify 时其子树才重新渲染）。旧布局把面板画在根视图的子树
+/// 里，notify 根视图就够；这层镜像保持"任何输入都驱动每个视口重绘"的语义。
 fn notify(weak: &gpui::WeakEntity<RootView>, cx: &mut App) {
-    if let Some(entity) = weak.upgrade() {
-        entity.update(cx, |_, cx| cx.notify());
+    let Some(entity) = weak.upgrade() else {
+        return;
+    };
+    // Clone the panel handles out first: `cx` is borrowed by `read`.
+    let panels = entity
+        .read(cx)
+        .dock
+        .as_ref()
+        .map(|dock| dock.panel_weaks())
+        .unwrap_or_default();
+    entity.update(cx, |_, cx| cx.notify());
+    for panel in panels {
+        if let Some(panel) = panel.upgrade() {
+            panel.update(cx, |_, cx| cx.notify());
+        }
     }
 }
 
@@ -487,7 +453,10 @@ impl Render for RootView {
             }
             Arc::new(Mutex::new(std::mem::take(&mut *cell)))
         };
-        let frame = FrameInput {
+        // Publish the frame's input to the dock panels: they are separate
+        // entities now, so this shared cell is how a panel's paint closure
+        // sees the events the root view just collected.
+        *self.frame.borrow_mut() = FrameInput {
             events: events_snapshot,
             mouse_down: self.mouse_down.clone(),
         };
@@ -496,26 +465,6 @@ impl Render for RootView {
         let core = self.core.clone();
 
         // ---- 核心状态读取（一次性） ----
-        /// 渲染期快照：面板区域内的一个面板标签。
-        struct PanelUi {
-            id: String,
-            title: String,
-            active: bool,
-            icon: Option<String>,
-            /// 脚本面板的 Rhai 文件路径（None = PaintBackend 视图）
-            script: Option<String>,
-        }
-        struct AreaUi {
-            visible: bool,
-            size: f32,
-            panels: Vec<PanelUi>,
-        }
-        struct CentralTabUi {
-            id: u64,
-            title: String,
-            active: bool,
-            icon: Option<String>,
-        }
         struct RibbonItemUi {
             cmd: String,
             label: String,
@@ -531,9 +480,9 @@ impl Render for RootView {
             title: String,
             active: bool,
         }
-        let (left, right, bottom, central_tabs, central_active, ribbon_tabs, ribbon_groups, status) = {
+        let (shell_snap, ribbon_tabs, ribbon_groups, status) = {
             let core = self.core.lock().unwrap_or_else(|p| p.into_inner());
-            let area_of = |a: wb::DockArea| {
+            let area_of = |a: wb::DockArea| -> dock_panel::AreaSnapshot {
                 let slots: Vec<&wb::PanelSlot> = core
                     .host
                     .ws
@@ -542,44 +491,38 @@ impl Render for RootView {
                     .filter(|p| p.visible)
                     .collect();
                 let active_id = core.host.ws.area_active.get(&a).cloned();
-                let visible = !slots.is_empty();
-                let size = slots
-                    .iter()
-                    .find(|p| Some(&p.id) == active_id.as_ref())
-                    .or_else(|| slots.first())
-                    .map(|p| p.size)
-                    .unwrap_or(0.0);
-                AreaUi {
-                    visible,
-                    size,
+                dock_panel::AreaSnapshot {
+                    // The dock's size seeds from the panel it displays; the
+                    // pre-dock front end sized the column the same way.
+                    size: slots
+                        .iter()
+                        .find(|p| Some(&p.id) == active_id.as_ref())
+                        .or_else(|| slots.first())
+                        .map(|p| p.size)
+                        .unwrap_or(0.0),
+                    active: active_id.map(|id| id.0),
                     panels: slots
                         .iter()
-                        .map(|p| PanelUi {
+                        .map(|p| dock_panel::PanelSnapshot {
                             id: p.id.0.clone(),
-                            title: p.title.clone(),
-                            active: active_id.as_ref() == Some(&p.id),
-                            icon: p.icon.clone(),
                             script: p.script.clone(),
                         })
                         .collect(),
                 }
             };
-            let left = area_of(wb::DockArea::Left);
-            let right = area_of(wb::DockArea::Right);
-            let bottom = area_of(wb::DockArea::Bottom);
-            let central_active = core.host.ws.active_tab().map(|t| t.instance_id.0);
-            let central_tabs: Vec<CentralTabUi> = core
-                .host
-                .ws
-                .tabs
-                .iter()
-                .map(|t| CentralTabUi {
-                    id: t.instance_id.0,
-                    title: t.title.clone(),
-                    active: Some(t.instance_id.0) == central_active,
-                    icon: t.icon.clone(),
-                })
-                .collect();
+            let shell_snap = dock_panel::ShellSnapshot {
+                left: area_of(wb::DockArea::Left),
+                right: area_of(wb::DockArea::Right),
+                bottom: area_of(wb::DockArea::Bottom),
+                tabs: core
+                    .host
+                    .ws
+                    .tabs
+                    .iter()
+                    .map(|t| t.instance_id.0)
+                    .collect(),
+                active_tab: core.host.ws.active_tab().map(|t| t.instance_id.0),
+            };
             let (ribbon_tabs, ribbon_groups): (Vec<RibbonTabUi>, Vec<RibbonGroupUi>) = {
                 let ws = &core.host.ws;
                 let tabs = ws
@@ -646,59 +589,29 @@ impl Render for RootView {
                     .last()
                     .map(|e| (e.level, format!("{} {}", e.time, e.message))),
             };
-            (left, right, bottom, central_tabs, central_active, ribbon_tabs, ribbon_groups, status)
+            (shell_snap, ribbon_tabs, ribbon_groups, status)
         };
 
-        // ---- 脚本面板挂载（每个活动脚本面板一次；需要 window/cx）----
-        for area_ui in [&left, &right, &bottom] {
-            if !area_ui.visible {
-                continue;
-            }
-            let Some(panel) = area_ui.panels.iter().find(|p| p.active) else {
-                continue;
-            };
-            let Some(script) = &panel.script else { continue };
-            if self.script_views.contains_key(&panel.id)
-                || self.script_errors.contains_key(&panel.id)
-            {
-                continue;
-            }
-            if self.script_host.is_none() {
-                match gpui_rhai::ScriptViewHost::new("wb-main", cx) {
-                    Ok(host) => self.script_host = Some(host),
-                    Err(e) => {
-                        self.script_errors
-                            .insert(panel.id.clone(), format!("ScriptViewHost: {e}"));
-                        continue;
-                    }
-                }
-            }
-            let host = self.script_host.as_ref().expect("刚已创建").clone();
-            // gpui-rhai 的 view_id 只允许 ASCII 字母数字;面板 id 可能含 . /
-            let view_id: String = panel
-                .id
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                .collect();
-            let mounted = gpui_rhai::FileScriptView::new(std::path::PathBuf::from(script))
-                .prepare()
-                .and_then(|prepared| {
-                    prepared.mount(
-                        gpui_rhai::ScriptViewConfig::new(view_id),
-                        host,
-                        window,
-                        cx,
-                    )
-                });
-            match mounted {
-                Ok(handle) => {
-                    self.script_views.insert(panel.id.clone(), handle);
-                }
-                Err(e) => {
-                    self.script_errors.insert(panel.id.clone(), e.to_string());
-                }
-            }
+        // ---- Dock 同步（模型 → dock；结构变化才重建） ----
+        if self.dock.is_none() {
+            self.dock = Some(dock_panel::DockShell::new(
+                self.core.clone(),
+                self.frame.clone(),
+                self.scripts.clone(),
+                self.mirror.clone(),
+                window,
+                cx,
+            ));
         }
+        {
+            let dock = self.dock.as_mut().expect("built above");
+            dock.sync(&shell_snap, window, cx);
+        }
+        let dock_element = div()
+            .flex_1()
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+            .child(self.dock.as_ref().expect("built above").area());
 
         // ---- RibbonBar（design.md §7）：Tab 行 + 活动 Tab 的 Group 行 ----
         let mut tab_row = div().flex().flex_row().items_end().px_2().gap_1();
@@ -832,355 +745,7 @@ impl Render for RootView {
             )
             .child(groups_row);
 
-        // ---- 面板列（区域内的标签页 + 活动面板内容） ----
-        let script_views = &self.script_views;
-        let script_errors = &self.script_errors;
-        let script_host = &self.script_host;
-        let panel_column = |area: &AreaUi, key_prefix: &'static str| -> gpui::AnyElement {
-            let mut header = div().flex().flex_row().items_center().gap_1();
-            for panel in &area.panels {
-                let mut tab = div()
-                    .id(SharedString::from(format!("{key_prefix}-{}", panel.id)))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_sm()
-                    .text_size(px(11.5))
-                    .cursor_pointer();
-                if let Some(icon) = &panel.icon {
-                    tab = tab.child(
-                        svg()
-                            .path(icon.clone())
-                            .size(px(13.0))
-                            .text_color(if panel.active {
-                                col(wb::Color::WHITE)
-                            } else {
-                                col(wb::Color::LIGHT_GRAY)
-                            }),
-                    );
-                }
-                tab = tab.child(panel.title.clone());
-                tab = if panel.active {
-                    tab.bg(col(wb::Color::ACCENT))
-                        .text_color(col(wb::Color::WHITE))
-                } else {
-                    tab.text_color(col(wb::Color::LIGHT_GRAY))
-                        .hover(|s| s.bg(col(wb::Color::rgb(0.26, 0.27, 0.32))))
-                };
-                let core_c = core.clone();
-                let pid_c = panel.id.clone();
-                let weak_c = weak.clone();
-                tab = tab.on_click(move |_ev: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
-                    let mut core = core_c.lock().unwrap_or_else(|p| p.into_inner());
-                    let area_kind = core
-                        .host
-                        .ws
-                        .panels
-                        .iter()
-                        .find(|p| p.id.0 == pid_c)
-                        .map(|p| p.area);
-                    if let Some(a) = area_kind {
-                        core.host
-                            .ws
-                            .area_active
-                            .insert(a, wb::PanelId::new(pid_c.clone()));
-                    }
-                    drop(core);
-                    notify(&weak_c, cx);
-                });
-                header = header.child(tab);
-            }
-            let active_panel = area.panels.iter().find(|p| p.active).or_else(|| {
-                area.panels.first()
-            });
-            let content: gpui::AnyElement = match active_panel {
-                // 脚本面板：gpui-rhai 挂载的 UiNode 树（宿主 container 提供
-                // overlay/focus 域；错误以面板内诊断呈现）
-                Some(panel) if panel.script.is_some() => {
-                    let pid = &panel.id;
-                    if let Some(err) = script_errors.get(pid) {
-                        div()
-                            .size_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .px_3()
-                            .text_color(col(wb::Color::GRAY))
-                            .text_size(px(12.0))
-                            .child(format!("脚本面板加载失败：{err}"))
-                            .into_any_element()
-                    } else {
-                        match script_views.get(pid) {
-                            Some(handle) => match handle.flex_item() {
-                                Ok(item) => match script_host.as_ref() {
-                                    Some(host) => host.container(item),
-                                    None => item,
-                                },
-                                Err(e) => div()
-                                    .size_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(col(wb::Color::GRAY))
-                                    .text_size(px(12.0))
-                                    .child(format!("脚本视图错误：{e}"))
-                                    .into_any_element(),
-                            },
-                            None => div().into_any_element(),
-                        }
-                    }
-                }
-                Some(panel) => view_canvas(
-                    core.clone(),
-                    frame.clone(),
-                    SlotKey::Panel(panel.id.clone()),
-                )
-                .into_any_element(),
-                None => div().into_any_element(),
-            };
-            div()
-                .flex()
-                .flex_col()
-                .size_full()
-                .bg(col(COL_BG))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .px_1()
-                        .h(px(24.0))
-                        .bg(col(COL_TABBAR))
-                        .child(header),
-                )
-                .child(div().flex_1().min_h(px(0.0)).child(content))
-                .into_any_element()
-        };
-
-        // ---- 中央标签区 ----
-        let mut tabbar = div().flex().flex_row().items_center().px_1().gap_1();
-        for tab_ui in &central_tabs {
-            let mut tab = div()
-                .id(SharedString::from(format!("tab-{}", tab_ui.id)))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_0p5()
-                .rounded_sm()
-                .text_size(px(12.0))
-                .cursor_pointer();
-            if let Some(icon) = &tab_ui.icon {
-                tab = tab.child(
-                    svg()
-                        .path(icon.clone())
-                        .size(px(13.0))
-                        .text_color(if tab_ui.active {
-                            col(wb::Color::WHITE)
-                        } else {
-                            col(wb::Color::LIGHT_GRAY)
-                        }),
-                );
-            }
-            tab = tab.child(tab_ui.title.clone());
-            tab = if tab_ui.active {
-                tab.bg(col(wb::Color::rgb(0.30, 0.32, 0.38)))
-                    .text_color(col(wb::Color::WHITE))
-            } else {
-                tab.text_color(col(wb::Color::LIGHT_GRAY))
-                    .hover(|s| s.bg(col(wb::Color::rgb(0.24, 0.25, 0.30))))
-            };
-            let core_c = core.clone();
-            let id_c = tab_ui.id;
-            let weak_c = weak.clone();
-            tab = tab.on_click(move |_ev: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
-                core_c
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .host
-                    .ws
-                    .activate_tab_by_instance(wb::TabInstanceId(id_c));
-                notify(&weak_c, cx);
-            });
-            tabbar = tabbar.child(tab);
-
-            let close = div()
-                .id(SharedString::from(format!("tab-close-{}", tab_ui.id)))
-                .px_1()
-                .rounded_sm()
-                .text_size(px(11.0))
-                .text_color(col(wb::Color::GRAY))
-                .cursor_pointer()
-                .hover(|s| s.bg(col(wb::Color::rgb(0.4, 0.2, 0.2))))
-                .child("×");
-            let core_c = core.clone();
-            let id_c = tab_ui.id;
-            let weak_c = weak.clone();
-            let close = close.on_click(
-                move |_ev: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
-                    core_c
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .host
-                        .ws
-                        .close_tab_by_instance(wb::TabInstanceId(id_c));
-                    notify(&weak_c, cx);
-                },
-            );
-            tabbar = tabbar.child(close);
-        }
-        let central_content = match central_active {
-            Some(id) => view_canvas(core.clone(), frame.clone(), SlotKey::Central(id))
-                .into_any_element(),
-            None => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(col(wb::Color::GRAY))
-                .child("没有打开的视图")
-                .into_any_element(),
-        };
-        let central_area = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w(px(0.0))
-            .bg(col(COL_BG))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .h(px(26.0))
-                    .px_1()
-                    .bg(col(COL_TABBAR))
-                    .child(tabbar),
-            )
-            .child(div().flex_1().min_h(px(0.0)).child(central_content));
-
-        // ---- 分隔条（拖拽调整区域尺寸） ----
-        let mk_splitter = |target: DragTarget, vertical: bool| -> gpui::AnyElement {
-            let drag_cell = self.drag.clone();
-            let base = if vertical {
-                div()
-                    .id(match target {
-                        DragTarget::Left => "split-left",
-                        DragTarget::Right => "split-right",
-                        DragTarget::Bottom => "split-bottom-v",
-                    })
-                    .w(px(6.0))
-                    .h_full()
-                    .cursor_col_resize()
-            } else {
-                div()
-                    .id("split-bottom")
-                    .h(px(6.0))
-                    .w_full()
-                    .cursor_row_resize()
-            };
-            base.bg(col(COL_SPLITTER))
-                .hover(|s| s.bg(col(wb::Color::ACCENT)))
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    {
-                        let drag_cell = drag_cell.clone();
-                        move |ev: &MouseDownEvent, _w: &mut Window, _cx: &mut App| {
-                            // 记录起点（拖动阈值与首段位移都以此为基准）；
-                            // 真正"开始拖动"由框架在越过 DRAG_THRESHOLD 时触发。
-                            *drag_cell.lock().unwrap_or_else(|p| p.into_inner()) = Some(Drag {
-                                target,
-                                last: (ev.position.x.as_f32(), ev.position.y.as_f32()),
-                                started: false,
-                            });
-                        }
-                    },
-                )
-                .on_drag(SplitterDrag(target), {
-                    let drag_cell = drag_cell.clone();
-                    move |drag: &SplitterDrag, _, _, cx| {
-                        // 框架在这里宣告拖拽真正开始（首个越过阈值的移动）。
-                        if let Some(d) = drag_cell
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .as_mut()
-                        {
-                            if d.target == drag.0 {
-                                d.started = true;
-                            }
-                        }
-                        cx.new(|_| drag.clone())
-                    }
-                })
-                .on_drag_move::<SplitterDrag>({
-                    let drag_cell = drag_cell.clone();
-                    let core_m = core.clone();
-                    move |event: &DragMoveEvent<SplitterDrag>, _w: &mut Window, cx: &mut App| {
-                        // 同一时刻只有一个活动拖拽；这里再按目标过滤，多块
-                        // 分隔条各自登记、互不串台（dock 同款写法）。
-                        if event.drag(cx).0 != target {
-                            return;
-                        }
-                        if event.event.pressed_button.is_none() {
-                            // 无按键的移动 = 拖动已结束（可能在窗口外松开，
-                            // 框架的 active_drag 未清）：清掉本地状态，不再推进。
-                            drag_cell.lock().unwrap_or_else(|p| p.into_inner()).take();
-                            return;
-                        }
-                        let (x, y) = (
-                            event.event.position.x.as_f32(),
-                            event.event.position.y.as_f32(),
-                        );
-                        let d_snapshot = {
-                            let guard = drag_cell.lock().unwrap_or_else(|p| p.into_inner());
-                            guard.as_ref().map(|d| DragSnapshot {
-                                target: d.target,
-                                last: d.last,
-                            })
-                        };
-                        let Some(d) = d_snapshot else {
-                            return;
-                        };
-                        let (dx, dy) = (x - d.last.0, y - d.last.1);
-                        if let Some(drag) =
-                            drag_cell.lock().unwrap_or_else(|p| p.into_inner()).as_mut()
-                        {
-                            drag.last = (x, y);
-                        }
-                        apply_splitter_drag(&core_m, d.target, dx, dy);
-                    }
-                })
-                .into_any_element()
-        };
-
         // ---- 组装 ----
-        let mut main_row = div().flex().flex_row().flex_1().min_h(px(0.0));
-        if left.visible {
-            main_row = main_row
-                .child(
-                    div()
-                        .w(px(left.size))
-                        .min_w(px(120.0))
-                        .child(panel_column(&left, "pl")),
-                )
-                .child(mk_splitter(DragTarget::Left, true));
-        }
-        main_row = main_row.child(central_area);
-        if right.visible {
-            main_row = main_row
-                .child(mk_splitter(DragTarget::Right, true))
-                .child(
-                    div()
-                        .w(px(right.size))
-                        .min_w(px(120.0))
-                        .child(panel_column(&right, "pr")),
-                );
-        }
-
         let mut root_col = div()
             .flex()
             .flex_col()
@@ -1188,23 +753,13 @@ impl Render for RootView {
             .font_family("Segoe UI")
             .bg(col(COL_BG))
             .text_color(col(wb::Color::LIGHT_GRAY))
-.child(ribbon)
-            .child(main_row);
-        if bottom.visible {
-            root_col = root_col
-                .child(mk_splitter(DragTarget::Bottom, false))
-                .child(
-                    div()
-                        .h(px(bottom.size))
-                        .min_h(px(80.0))
-                        .child(panel_column(&bottom, "pb")),
-                );
-        }
+            .child(ribbon)
+            .child(dock_element);
 
         root_col = root_col.child(render_status_bar(&status, core.clone(), weak.clone()));
 
-        // 窗口级输入监听
-        // 窗口级输入监听。
+        // 窗口级输入监听（分隔条/标签拖拽已是 dock 自身的交互，这里只驱动
+        // 视口输入管线与重绘）。
         // 每次输入都请求重绘：gpui 按需渲染，而视口拖拽/缩放的状态变化发生
         // 在绘制期（视图实例内），事件侧必须显式 notify 才能驱动下一帧，
         // 否则拖拽只在其他状态变化时零星刷新（滞后的手感）。
@@ -1233,8 +788,6 @@ impl Render for RootView {
                     let ev_cell = self.events.clone();
                     let down_flag = self.mouse_down.clone();
                     let weak_u = weak.clone();
-                    let drag_cell = self.drag.clone();
-                    let core_u = core.clone();
                     move |ev: &MouseUpEvent, _w: &mut Window, cx: &mut App| {
                         down_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                         push_input(
@@ -1243,20 +796,6 @@ impl Render for RootView {
                             ev.modifiers.shift,
                             EvKind::Up,
                         );
-                        // 窗口任意位置松开都结束分隔条拖动；已启动的拖拽在此
-                        // 结算"残余位移"——最后一次 move 可能被合并/未送达，
-                        // 按松开位置补齐，保证面板最终落在指针处（dock 的
-                        // end_resize 同义）。未越过阈值的点击不结算。
-                        let finished = drag_cell
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .take();
-                        if let Some(d) = finished {
-                            if d.started {
-                                let (x, y) = (ev.position.x.as_f32(), ev.position.y.as_f32());
-                                apply_splitter_drag(&core_u, d.target, x - d.last.0, y - d.last.1);
-                            }
-                        }
                         notify(&weak_u, cx);
                     }
                 },
@@ -1264,8 +803,6 @@ impl Render for RootView {
             .on_mouse_move({
                 let ev_cell = self.events.clone();
                 let weak_m = weak.clone();
-                let drag_cell = self.drag.clone();
-                let core_m = core.clone();
                 move |ev: &MouseMoveEvent, _w: &mut Window, cx: &mut App| {
                     push_input(
                         &ev_cell,
@@ -1273,9 +810,6 @@ impl Render for RootView {
                         ev.modifiers.shift,
                         EvKind::Move,
                     );
-                    // 分隔条拖动由 gpui 拖拽系统在元素侧消费（on_drag_move，
-                    // 捕获阶段、类型门控、不查命中）；窗口级只负责驱动视口
-                    // 输入管线与重绘。
                     notify(&weak_m, cx);
                 }
             })
@@ -1592,68 +1126,86 @@ fn launch_app(
 mod tests {
     use super::*;
 
-    /// 拖动位移 → (区域, 面板位移) 的符号映射：左条右移 = 左面板变宽，
-    /// 右条右移 = 右面板变窄，下条下移 = 下面板变矮（指针位移与面板尺寸
-    /// 反向）。映射错了表现为"跟手但反向"，与"完全不跟"是两类回归。
+    /// The model snapshot the dock mirrors is built from the live workspace:
+    /// all three side areas and the central tabs reach it, and each area
+    /// carries its visible panels, active panel and size. This is the
+    /// regression the retired splitter tests stood for — "every region is
+    /// really wired" — now stated against the dock's input instead of the
+    /// hand-written layout.
     #[test]
-    fn splitter_drag_maps_pointer_motion_to_panel_growth() {
-        assert_eq!(
-            splitter_delta(DragTarget::Left, 30.0, 7.0),
-            (wb::DockArea::Left, 30.0)
-        );
-        assert_eq!(
-            splitter_delta(DragTarget::Right, 30.0, 7.0),
-            (wb::DockArea::Right, -30.0)
-        );
-        assert_eq!(
-            splitter_delta(DragTarget::Bottom, 30.0, 7.0),
-            (wb::DockArea::Bottom, -7.0)
-        );
-    }
-
-    /// 三条区域的面板都真的能调整（含 `area_active` 查找路径），并守住 120px 下限。
-    #[test]
-    fn splitter_drag_adjusts_every_area_and_clamps() {
-        let runtime = workbench_core::WorkbenchAppBuilder::new("test.splitter", "Splitter test")
+    fn the_shell_snapshot_covers_every_region() {
+        let runtime = workbench_core::WorkbenchAppBuilder::new("test.dock", "Dock snapshot")
             .with_workbench(wb_example::ExampleWorkbench)
+            .open_on_start("example.welcome", false)
             .build()
             .expect("runtime builds");
         let core: SharedCore = std::rc::Rc::new(Mutex::new(runtime));
 
-        let area_size = |area: wb::DockArea| -> Option<f32> {
+        let snap = {
             let core = core.lock().unwrap_or_else(|p| p.into_inner());
-            let active = core.host.ws.area_active.get(&area)?;
-            core.host
-                .ws
-                .panels
-                .iter()
-                .find(|p| p.id == *active)
-                .map(|p| p.size)
+            let area_of = |a: wb::DockArea| -> dock_panel::AreaSnapshot {
+                let slots: Vec<&wb::PanelSlot> = core
+                    .host
+                    .ws
+                    .panels_in_area(a)
+                    .into_iter()
+                    .filter(|p| p.visible)
+                    .collect();
+                let active_id = core.host.ws.area_active.get(&a).cloned();
+                dock_panel::AreaSnapshot {
+                    size: slots
+                        .iter()
+                        .find(|p| Some(&p.id) == active_id.as_ref())
+                        .or_else(|| slots.first())
+                        .map(|p| p.size)
+                        .unwrap_or(0.0),
+                    active: active_id.map(|id| id.0),
+                    panels: slots
+                        .iter()
+                        .map(|p| dock_panel::PanelSnapshot {
+                            id: p.id.0.clone(),
+                            script: p.script.clone(),
+                        })
+                        .collect(),
+                }
+            };
+            dock_panel::ShellSnapshot {
+                left: area_of(wb::DockArea::Left),
+                right: area_of(wb::DockArea::Right),
+                bottom: area_of(wb::DockArea::Bottom),
+                tabs: core
+                    .host
+                    .ws
+                    .tabs
+                    .iter()
+                    .map(|t| t.instance_id.0)
+                    .collect(),
+                active_tab: core.host.ws.active_tab().map(|t| t.instance_id.0),
+            }
         };
 
-        // 每个区域都有一个活动面板（示例 workbench 注册了 资源管理器/任务/输出）。
-        for area in [wb::DockArea::Left, wb::DockArea::Right, wb::DockArea::Bottom] {
-            assert!(area_size(area).is_some(), "{area:?} has an active panel");
-        }
+        // 每条区域都带上了模型里的面板（示例 workbench 注册了 资源管理器/任务/属性/输出，
+        // 平台另有 诊断/插件 落在右区）。
+        assert_eq!(snap.left.panels[0].id, "example.panel.explorer");
+        assert_eq!(snap.left.active.as_deref(), Some("example.panel.explorer"));
+        assert_eq!(snap.left.size, 240.0);
+        let right: Vec<&str> = snap.right.panels.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            right,
+            vec![
+                "example.panel.tasks",
+                "example.panel.properties",
+                "app.panel.diagnostics",
+                "app.panel.plugins"
+            ]
+        );
+        assert_eq!(snap.right.active.as_deref(), Some("example.panel.tasks"));
+        assert_eq!(snap.bottom.panels[0].id, "example.panel.output");
+        assert_eq!(snap.bottom.size, 170.0);
 
-        // 左条向右拖 +40：左面板变宽 40。
-        let before = area_size(wb::DockArea::Left).expect("left panel");
-        apply_splitter_drag(&core, DragTarget::Left, 40.0, 0.0);
-        assert_eq!(area_size(wb::DockArea::Left), Some(before + 40.0));
-
-        // 右条向右拖 +40：右面板变窄 40。
-        let before = area_size(wb::DockArea::Right).expect("right panel");
-        apply_splitter_drag(&core, DragTarget::Right, 40.0, 0.0);
-        assert_eq!(area_size(wb::DockArea::Right), Some(before - 40.0));
-
-        // 下条向下拖 +25：下面板变矮 25。
-        let before = area_size(wb::DockArea::Bottom).expect("bottom panel");
-        apply_splitter_drag(&core, DragTarget::Bottom, 0.0, 25.0);
-        assert_eq!(area_size(wb::DockArea::Bottom), Some(before - 25.0));
-
-        // 大幅反向拖动被 120px 下限挡住。
-        apply_splitter_drag(&core, DragTarget::Left, -100_000.0, 0.0);
-        assert_eq!(area_size(wb::DockArea::Left), Some(120.0));
+        // 中央标签与活动标签。
+        assert_eq!(snap.tabs.len(), 1, "the welcome tab is open");
+        assert_eq!(snap.active_tab, Some(snap.tabs[0]));
     }
 }
 
