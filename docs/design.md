@@ -1,5 +1,14 @@
 # workbench-rs: Requirements & Design for a Generic Engineering Desktop Application Framework
 
+> **Implementation status note (2026-10).** This document is the original
+> design baseline. Decisions taken during implementation supersede parts of
+> it: the GUI converged on **GPUI only** (the egui candidate was removed;
+> `workbench-ui-gpui` is now `workbench-ui`), and the plugin language is
+> **Rhai via gpui-rhai** (the Python host was replaced by
+> `workbench-rhai`; script panels render gpui-rhai UiNode trees). The gpui
+> base temporarily tracks a git fork carrying wgpu fixes
+> (docs/plan.md §15 has the full record and the switch-back condition).
+
 - **Project name:** `workbench-rs`
 - **Document status:** initial design baseline
 - **Target language:** Rust

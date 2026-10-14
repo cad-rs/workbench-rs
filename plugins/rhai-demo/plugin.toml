@@ -1,0 +1,16 @@
+# Rhai 脚本插件演示：命令（同步/后台）、工具栏贡献与脚本自定义 UI 面板。
+[plugin]
+id = "com.example.demo"
+name = "Rhai Demo Plugin"
+version = "0.1.0"
+api_version = "1"
+entry_point = "plugin.rhai"
+
+[compatibility]
+products = ["*"]
+
+[permissions]
+document_read = false
+document_write = false
+filesystem_read = false
+network = false

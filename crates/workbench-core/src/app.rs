@@ -788,7 +788,7 @@ impl WorkbenchAppBuilder {
         self
     }
 
-    /// 追加一个插件装载阶段（如 `workbench_python::plugin_stage(dirs)`）。
+    /// 追加一个插件装载阶段（如 `workbench_rhai::plugin_stage(dirs)`）。
     pub fn with_plugin_stage(mut self, stage: PluginStage) -> Self {
         self.plugin_stages.push(stage);
         self
@@ -850,7 +850,7 @@ impl WorkbenchAppBuilder {
             }
         }
 
-        // 插件装载阶段（Python 插件等）：与 Workbench 同样的隔离策略（验收 #19）
+        // 插件装载阶段（Rhai 脚本插件等）：与 Workbench 同样的隔离策略（验收 #19）
         for stage in self.plugin_stages {
             let result = catch_unwind(AssertUnwindSafe(|| stage(&mut registry)));
             if let Err(panic) = result {

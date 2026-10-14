@@ -1,8 +1,0 @@
-# trunk 配置：wasm32 产品（egui 前端）。
-# 用法：trunk serve（开发） / trunk serve --release / trunk build --release
-[build]
-target = "index.html"
-dist = "dist"
-
-# cargo 本身就在 workspace 根 target 目录下构建（crate 是成员），
-# wasm 产物落在 target/wasm32-unknown-unknown/，与桌面构建互不干扰。

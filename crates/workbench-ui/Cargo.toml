@@ -1,0 +1,27 @@
+[package]
+name = "workbench-ui"
+description = "gpui frontend for workbench-rs (gpui-ce + gpui component library + gpui-rhai script views)"
+keywords = ["gpui", "gui", "workbench", "desktop"]
+categories = ["gui"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+workbench-api = { workspace = true }
+workbench-core = { workspace = true }
+gpui = { workspace = true }
+gpui-platform = { workspace = true }
+gpui-component = { workspace = true }
+gpui-component-assets = { workspace = true }
+gpui-rhai = { version = "=0.1.5", default-features = false }
+serde_json = { workspace = true }
+# std::time 在 wasm 上不可用；web-time 桌面转发 std、Web 走 performance.now
+web-time = { workspace = true }
+
+# Web (wasm32)：异步驱动（字体预取经 wb::asyncrt::fetch_bytes）
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }

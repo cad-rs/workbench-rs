@@ -12,7 +12,7 @@
 //! | a product developer | workbench-core's WorkbenchAppBuilder and the cli module |
 //! | a Workbench developer | workbench::Workbench + registry::Registry + command::CommandDef |
 //! | a view/panel author | view::ViewInstance + paint::PaintBackend (GUI-free drawing) |
-//! | a plugin host | the workbench-python crate (Host API v1, layered on this crate) |
+//! | a plugin host | the workbench-rhai crate (Host API v1, layered on this crate) |
 
 pub mod assets;
 pub mod asyncrt;
@@ -31,7 +31,7 @@ pub mod workbench;
 pub mod workspace;
 
 /// Platform contract version (bumped per release; the plugin Host API version
-/// is managed separately — see workbench-python).
+/// is managed separately — see workbench-rhai)..
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use assets::{AssetSource, ChainedAssets, StaticAssets};

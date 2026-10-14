@@ -1,0 +1,18 @@
+[package]
+name = "product-web"
+description = "Example product for workbench-rs running in the browser (trunk + wasm32, WebGPU rendering)"
+keywords = ["gpui", "wasm", "web", "workbench"]
+categories = ["gui", "wasm"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+workbench-core = { workspace = true }
+workbench-ui = { workspace = true }
+workbench-example = { workspace = true }
+gpui-platform = { workspace = true }
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true, features = ["console"] }

@@ -19,7 +19,7 @@ if (-not $fontPath -or -not (Test-Path $fontPath)) {
     exit 1
 }
 
-$products = @("product-egui-web", "product-gpui-web")
+$products = @("product-web")
 foreach ($product in $products) {
     $destDir = Join-Path $PSScriptRoot "..\products\$product\assets\fonts"
     New-Item -ItemType Directory -Force -Path $destDir | Out-Null

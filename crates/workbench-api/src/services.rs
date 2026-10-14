@@ -113,7 +113,7 @@ impl ServiceHost {
     }
 }
 
-/// 工作台（Workbench 模块、Python 插件宿主、视图）可见的平台能力。
+/// 工作台（Workbench 模块、脚本插件宿主、视图）可见的平台能力。
 ///
 /// 由核心的 AppRuntime 实现；CommandCtx / ViewCtx 经由该 trait 访问平台，
 /// 以保证命令与视图代码只面对稳定 API（design.md §15）。

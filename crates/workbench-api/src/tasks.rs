@@ -176,7 +176,7 @@ impl TaskCtx {
     pub fn new(handle: ProgressHandle, input: Box<dyn std::any::Any + Send>) -> Self {
         Self { handle, input }
     }
-    /// 进度/取消句柄克隆（供语言绑定包装，如 Python 插件的 task 对象）。
+    /// 进度/取消句柄克隆（供脚本绑定包装，如 Rhai 插件的 task 对象）。
     pub fn progress_handle(&self) -> ProgressHandle {
         self.handle.clone()
     }

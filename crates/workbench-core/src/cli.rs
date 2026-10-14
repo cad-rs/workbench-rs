@@ -14,9 +14,9 @@
 //! fn main() {
 //!     let cli = workbench_core::cli::from_env();
 //!     let builder = workbench_core::WorkbenchAppBuilder::new("com.example.prod", "My Product")
-//!         .with_backend_label("egui")
+//!         .with_backend_label("gpui")
 //!         .with_workbench(my_workbench)
-//!         .with_plugin_stage(workbench_python::plugin_stage(
+//!         .with_plugin_stage(workbench_rhai::plugin_stage(
 //!             workbench_core::cli::default_plugin_dirs("com.example.prod")))
 //!         .create_default_document(true);
 //!     let builder = cli.apply(builder);

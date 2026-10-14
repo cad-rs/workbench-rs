@@ -512,3 +512,53 @@ WebGPU-capable browsers (Chrome/Edge 113+).
 - **WbAssets**: `gpui-component-assets`'s web `Assets` is a CDN downloader
   (constructed with `Assets::new(endpoint)`), chained after the product asset
   source as on desktop.
+
+## 15. Single frontend + Rhai scripting + forked gpui base (2026-10, done)
+
+Project decision: converge on **one UI framework and one scripting language**.
+
+### Decision record
+
+- **Single frontend**: the egui frontend is removed (crates/workbench-ui-egui,
+  products/product-egui-demo, products/product-egui-web). gpui is the only
+  GUI. Renames: `workbench-ui-gpui` → `workbench-ui`,
+  `product-gpui-demo` → `product-demo`, `product-gpui-web` → `product-web`
+  (product ids `com.example.workbench` / `com.example.workbench-web`).
+  `PaintBackend` stays: it is the GUI-agnostic drawing contract used by the
+  gpui painter and platform panels.
+- **Scripting = Rhai via gpui-rhai**: `workbench-python` (pyo3) is removed
+  together with the Python demo plugin and the PYO3_PYTHON config. The new
+  `workbench-rhai` crate mirrors the Python host's shape (manifest →
+  discover → register() with host-injected globals → Collected → Registry),
+  so Host API v1 keeps the same surface: sync/background commands, toolbar
+  contributions, runtime disable. The manifest format is unchanged except
+  `entry_point` now points at a `.rhai` file.
+- **Script UI panels**: `PanelDef.script(path)` registers a panel whose
+  content is a gpui-rhai view (a Rhai script returning a declarative UiNode
+  tree composed of registry components). The gpui frontend mounts it via
+  `FileScriptView::prepare().mount(...)` through a per-window
+  `ScriptViewHost`; script panels carry no Rust instance.
+- **gpui base = git fork (temporary)**: the workspace pins
+  `javagg/gpui-ce` through `[patch.crates-io]` for all four platform crates
+  (gpui-ce, gpui_ce_platform, gpui_ce_web, gpui_ce_wgpu) because the fork
+  carries wgpu rendering fixes not yet merged upstream. **Remove the patch
+  section in the root Cargo.toml to switch back to crates.io once the fixes
+  are merged.** The vendored `gpui_ce_web` (missing-fonts packaging bug) is
+  gone — the fork's `gpui_web` ships no embedded fonts at all, so
+  `workbench-ui` embeds a Latin base font (IBM Plex Sans, OFL) and the web
+  product fetches a CJK font at startup, both before the first frame.
+- **gpui-rhai version pin = 0.1.5**: the newest release compiled against
+  `gpui-ce 0.2.2` (exact). 0.1.6+ moved to the `gpui-pre 0.3.7` pre-release
+  line and cannot be mixed into this workspace. Upgrade path: once the
+  upstream base moves to gpui-pre 0.3.x, revisit gpui-rhai 0.2.x.
+- **crates.io publishing is on hold**: a release published now would not
+  build from the registry alone (git-fork base). Revisit after switching
+  back; the future publishable set is api/core/rhai/ui/example.
+
+### Verification
+
+Both targets compile warning-free (desktop + wasm32 for product-web);
+`cargo test --workspace` passes including the ported plugin tests (manifest
+validation, load & registration, sync note, background progress/cancel,
+runtime disable); headless-browser screenshots confirm product-web renders
+on the fork base; product-demo selfcheck covers the Rhai plugin probes.

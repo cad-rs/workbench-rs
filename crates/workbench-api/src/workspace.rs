@@ -125,6 +125,9 @@ pub struct PanelDef {
     /// 图标资源路径（如 `"icons/explorer.svg"`，由产品的 AssetSource 解析）；
     /// 面板头展示用，None 时回退为纯文本。
     pub icon: Option<String>,
+    /// 脚本面板：gpui-rhai 脚本文件路径（由 gpui 前端挂载渲染）。
+    /// 设置后面板内容完全由脚本定义，`factory` 不再被调用。
+    pub script: Option<String>,
     pub area: DockArea,
     /// 默认尺寸：左右为宽度，上下为高度（逻辑像素）。
     pub default_size: f32,
@@ -145,6 +148,7 @@ impl PanelDef {
             id: id.into(),
             title: title.into(),
             icon: None,
+            script: None,
             area,
             default_size,
             order,
@@ -156,6 +160,12 @@ impl PanelDef {
         self.icon = Some(path.into());
         self
     }
+    /// 脚本面板：内容由 gpui-rhai 脚本（返回 UiNode 树）定义。
+    /// `path` 是脚本文件路径；`factory` 不会被调用（传一个占位即可）。
+    pub fn script(mut self, path: impl Into<String>) -> Self {
+        self.script = Some(path.into());
+        self
+    }
 }
 
 /// 面板运行槽位：定义 + 布局状态 + 实例。
@@ -164,6 +174,8 @@ pub struct PanelSlot {
     pub title: String,
     /// 图标资源路径（注册时从 [`PanelDef`] 复制）。
     pub icon: Option<String>,
+    /// 脚本面板路径（注册时从 [`PanelDef`] 复制）；Some 时不创建 instance。
+    pub script: Option<String>,
     pub area: DockArea,
     pub order: i32,
     pub size: f32,
@@ -308,11 +320,17 @@ impl WorkspaceState {
             id: def.id.clone(),
             title: def.title.clone(),
             icon: def.icon.clone(),
+            script: def.script.clone(),
             area: def.area,
             order: def.order,
             size: def.default_size,
             visible: visible_by_default,
-            instance: Some((def.factory)()),
+            // 脚本面板内容由前端按 script 路径挂载，不创建实例
+            instance: if def.script.is_some() {
+                None
+            } else {
+                Some((def.factory)())
+            },
         };
         self.panel_defs.insert(def.id.0.clone(), def);
         if !self.area_active.contains_key(&slot.area) {

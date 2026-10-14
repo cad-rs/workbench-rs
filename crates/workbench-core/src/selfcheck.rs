@@ -348,50 +348,56 @@ pub fn run(app: &mut AppRuntime) -> i32 {
         checks.push(Check::skip("阶段2: 文档修订号查询 API", "没有活动文档"));
     }
 
-    // 13.（阶段 3）Python 插件：发现、命令注册与 Ribbon 贡献
-    //    （前置：插件面板标签在 egui_tiles 树中可见——探测 demo 插件命令存在）
+    // 13.（阶段 3）Rhai 脚本插件：发现、命令注册与 Ribbon 贡献
+    //    （前置：探测 rhai demo 插件命令存在）
     if has_plugin(app, "com.example.demo") {
-        let plugin_cmd = app.command_title("demo.hello");
+        let plugin_cmd = app.command_title("rhai.hello");
         let toolbar_contrib = app.host.ws.ribbon.iter().any(|t| {
             t.groups
                 .iter()
-                .any(|g| g.id.0 == "plugin.demo" && g.items.len() >= 2)
+                .any(|g| g.id.0 == "plugin.rhai" && g.items.len() >= 2)
         });
-        let plugin_ok = plugin_cmd.is_some() && toolbar_contrib;
+        let script_panel = app
+            .host
+            .ws
+            .panels
+            .iter()
+            .any(|p| p.id.0 == "rhai.panel" && p.script.is_some());
+        let plugin_ok = plugin_cmd.is_some() && toolbar_contrib && script_panel;
         checks.push(Check::new(
-            "阶段3: Python 插件发现/注册/工具栏贡献",
+            "阶段3: Rhai 脚本插件发现/注册/工具栏/脚本面板",
             plugin_ok,
             format!(
-                "demo.hello={plugin_cmd:?} toolbar={toolbar_contrib} loaded={:?}",
+                "rhai.hello={plugin_cmd:?} toolbar={toolbar_contrib} script_panel={script_panel} loaded={:?}",
                 app.plugins_loaded()
             ),
         ));
     } else {
-        checks.push(Check::skip("阶段3: Python 插件发现/注册/工具栏贡献", "未装载 demo 插件"));
+        checks.push(Check::skip("阶段3: Rhai 脚本插件发现/注册/工具栏/脚本面板", "未装载 rhai demo 插件"));
     }
 
-    // 14.（阶段 3）插件命令执行：同步返回备注 + 后台 Python 任务完成
-    if has_cmd(app, "demo.hello") {
+    // 14.（阶段 3）插件命令执行：同步返回备注 + 后台 Rhai 任务完成
+    if has_cmd(app, "rhai.hello") {
         let inv = app.execute_command_tracked(
-            "demo.hello",
+            "rhai.hello",
             &api::CommandArgs::new().with("name", "自检"),
         );
         let hello_ok = match &inv.result {
             api::CommandResult::Done { note } => note.as_deref().map(|n| n.contains("问候")).unwrap_or(false),
             _ => false,
         };
-        let r = app.execute_command("demo.python_progress", &api::CommandArgs::default());
+        let r = app.execute_command("rhai.progress", &api::CommandArgs::default());
         let bg_done = pump_until_idle(app, Duration::from_secs(20));
-        let py_task_ok = app.host.tasks.all().any(|t| {
-            t.title.contains("Python") && t.status == api::TaskStatus::Succeeded
+        let rhai_task_ok = app.host.tasks.all().any(|t| {
+            t.title.contains("Rhai") && t.status == api::TaskStatus::Succeeded
         });
         checks.push(Check::new(
             "阶段3: 插件命令执行（同步备注 + 后台进度任务）",
-            hello_ok && r.is_ok() && bg_done && py_task_ok,
-            format!("hello_ok={hello_ok} bg_done={bg_done} py_task_ok={py_task_ok}"),
+            hello_ok && r.is_ok() && bg_done && rhai_task_ok,
+            format!("hello_ok={hello_ok} bg_done={bg_done} rhai_task_ok={rhai_task_ok}"),
         ));
     } else {
-        checks.push(Check::skip("阶段3: 插件命令执行", "未装载 demo 插件"));
+        checks.push(Check::skip("阶段3: 插件命令执行", "未装载 rhai demo 插件"));
     }
 
     // 15.（Ribbon）Tab 模型（前置：wb.example.tools —— 示例产品的 Tab 组织）
@@ -465,17 +471,17 @@ pub fn run(app: &mut AppRuntime) -> i32 {
     }
 
     // 18.（阶段 5）插件运行时禁用：命令移除 + Ribbon 清理 + 状态镜像
-    // 注意：必须最后执行（禁用后 demo 插件命令不再可用）
+    // 注意：必须最后执行（禁用后 rhai demo 插件命令不再可用）
     if has_plugin(app, "com.example.demo") {
         let disable_ok = {
-            let before = app.command_title("demo.hello").is_some();
+            let before = app.command_title("rhai.hello").is_some();
             let r = app.execute_command(
                 "app.plugins.disable",
                 &api::CommandArgs::new().with("id", "com.example.demo"),
             );
-            let after_gone = app.command_title("demo.hello").is_none();
+            let after_gone = app.command_title("rhai.hello").is_none();
             let ribbon_clean = !app.host.ws.ribbon.iter().any(|t| {
-                t.groups.iter().any(|g| g.id.0 == "plugin.demo")
+                t.groups.iter().any(|g| g.id.0 == "plugin.rhai")
             });
             let mirrored = app
                 .host

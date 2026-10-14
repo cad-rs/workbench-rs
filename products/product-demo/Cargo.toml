@@ -1,0 +1,19 @@
+[package]
+name = "product-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Demo product built on workbench-rs (not published)"
+publish = false
+
+[[bin]]
+name = "product-demo"
+path = "src/main.rs"
+
+[dependencies]
+workbench-api = { workspace = true }
+workbench-core = { workspace = true }
+workbench-ui = { workspace = true }
+workbench-rhai = { workspace = true }
+workbench-example = { workspace = true }
+env_logger = { workspace = true }

@@ -1,0 +1,1 @@
+fn register( { broken syntax

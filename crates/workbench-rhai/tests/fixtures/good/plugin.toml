@@ -1,0 +1,6 @@
+[plugin]
+id = "com.test.good"
+name = "Good Test Plugin"
+version = "0.1.0"
+api_version = "1"
+entry_point = "plugin.rhai"
