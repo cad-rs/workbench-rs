@@ -25,8 +25,6 @@ web-time = { workspace = true }
 wgpu = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
-# scene::Target 的回读 Result（cfg(not(wasm)) 编译，Windows 上虽不使用但需编译）
-anyhow = { workspace = true }
 
 # Web (wasm32)：异步驱动（字体预取经 wb::asyncrt::fetch_bytes）
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -44,3 +42,4 @@ gpui-wgpu = { workspace = true }
 [target.'cfg(not(any(target_family = "wasm", target_os = "windows")))'.dependencies]
 image = { workspace = true }
 pollster = { workspace = true }
+anyhow = { workspace = true }

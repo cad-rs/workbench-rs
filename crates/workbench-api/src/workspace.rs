@@ -333,9 +333,9 @@ impl WorkspaceState {
             },
         };
         self.panel_defs.insert(def.id.0.clone(), def);
-        if !self.area_active.contains_key(&slot.area) {
-            self.area_active.insert(slot.area, slot.id.clone());
-        }
+        self.area_active
+            .entry(slot.area)
+            .or_insert_with(|| slot.id.clone());
         self.panels.push(slot);
         self.panels.sort_by_key(|p| p.order);
         Ok(())

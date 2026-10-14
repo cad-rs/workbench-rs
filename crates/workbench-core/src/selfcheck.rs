@@ -80,9 +80,7 @@ fn crash_probe_check() -> (bool, String) {
     let dir = std::env::temp_dir().join("workbench-rs-crash-test");
     let _ = std::fs::remove_dir_all(&dir);
     let mut ok = false;
-    #[allow(unused_assignments)]
-    let mut detail = String::new();
-    if let Some(exe) = std::env::current_exe().ok() {
+    let detail = if let Ok(exe) = std::env::current_exe() {
         match Command::new(exe)
             .arg("--selfcheck-crash")
             .env("WB_CRASH_DIR", &dir)
@@ -92,21 +90,19 @@ fn crash_probe_check() -> (bool, String) {
                 let result = std::fs::read_to_string(dir.join("result.json")).unwrap_or_default();
                 let recovered: Vec<String> = serde_json::from_str(&result).unwrap_or_default();
                 ok = recovered.iter().any(|t| t.contains("[恢复]"));
-                detail = format!("recovered={recovered:?}");
+                format!("recovered={recovered:?}")
             }
-            Ok(o) => {
-                detail = format!(
-                    "子进程失败 status={:?} stdout={} stderr={}",
-                    o.status,
-                    String::from_utf8_lossy(&o.stdout),
-                    String::from_utf8_lossy(&o.stderr)
-                );
-            }
-            Err(e) => detail = format!("无法启动子进程: {e}"),
+            Ok(o) => format!(
+                "子进程失败 status={:?} stdout={} stderr={}",
+                o.status,
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(e) => format!("无法启动子进程: {e}"),
         }
     } else {
-        detail = "无法定位当前 exe".to_string();
-    }
+        "无法定位当前 exe".to_string()
+    };
     (ok, detail)
 }
 
@@ -298,19 +294,12 @@ pub fn run(app: &mut AppRuntime) -> i32 {
     }
 
     // 11.（阶段 2）统一命令调用结果：同步立即终态；未注册命令可查询失败记录
-    let any_cmd = app
-        .snapshot()
-        .active_view_type
-        .as_ref()
-        .map(|_| ())
-        .and_then(|_| None::<String>)
-        .or_else(|| None);
     let known_cmd = if has_cmd(app, "example.open_welcome") {
         Some("example.open_welcome".to_string())
     } else {
         None
     };
-    if let Some(known) = known_cmd.or(any_cmd) {
+    if let Some(known) = known_cmd {
         let inv = app.execute_command_tracked(&known, &api::CommandArgs::default());
         let sync_ok = inv.is_ok()
             && inv.record.status == api::InvocationStatus::Succeeded

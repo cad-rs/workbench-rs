@@ -199,13 +199,13 @@ impl AppRuntime {
             host.docs
                 .docs()
                 .filter(|d| d.dirty)
-                .filter_map(|d| {
+                .map(|d| {
                     let ext = host
                         .docs
                         .type_of(&d.type_id)
                         .and_then(|t| t.extensions.first().cloned())
                         .unwrap_or_else(|| "dat".to_string());
-                    Some((d.id, d.title.clone(), ext))
+                    (d.id, d.title.clone(), ext)
                 })
                 .collect()
         };

@@ -41,7 +41,7 @@ impl ShapeDoc {
             y,
             w: 46.0 + ((n * 29) % 60) as f32,
             h: 34.0 + ((n * 53) % 50) as f32,
-            round: n % 3 == 0,
+            round: n.is_multiple_of(3),
             hue,
         });
         self.shapes.len() - 1

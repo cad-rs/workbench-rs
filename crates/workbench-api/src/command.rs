@@ -234,13 +234,16 @@ pub enum CommandExecution {
     Background,
 }
 
+/// 命令启用条件（依据 CtxSnapshot 求值；None 表示总是可用）。
+pub type EnabledWhen = Box<dyn Fn(&CtxSnapshot) -> bool + Send + Sync>;
+
 /// 命令定义。
 pub struct CommandDef {
     pub id: CommandId,
     pub title: String,
     pub hotkey: Option<Hotkey>,
     /// 启用条件（None 表示总是可用）。依据 CtxSnapshot 求值。
-    pub enabled: Option<Box<dyn Fn(&CtxSnapshot) -> bool + Send + Sync>>,
+    pub enabled: Option<EnabledWhen>,
     pub kind: CommandKind,
     /// 图标资源路径（如 `"icons/save.svg"`，由产品的 AssetSource 解析）；
     /// None 时 UI 回退为纯文本。

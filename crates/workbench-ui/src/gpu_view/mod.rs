@@ -21,8 +21,8 @@ use gpui::{Bounds, Pixels, Window};
 use scene::{Pipelines, Scene, Uniforms, ViewState};
 use workbench_api as wb;
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum ViewKind {
+#[derive(Clone, Copy)]
+enum ViewKind {
     /// 3D 轨道视图：左键拖拽旋转，Shift+左键平移，滚轮缩放
     Orbit3d,
     /// 俯视正交视图：左键拖拽平移，滚轮缩放
@@ -31,15 +31,15 @@ pub enum ViewKind {
 
 /// 所有 GPU 视口共享的 GPU 资源（device/queue/scene/pipelines）。
 /// Windows / Web 在首帧渲染器就绪后从窗口惰性获取；其余桌面自建设备。
-pub struct ViewportCommon {
-    pub gpu: Rc<Gpu>,
-    pub scene: Rc<Scene>,
-    pub pipes: Rc<Pipelines>,
+struct ViewportCommon {
+    gpu: Rc<Gpu>,
+    scene: Rc<Scene>,
+    pipes: Rc<Pipelines>,
 }
 
 impl ViewportCommon {
     #[cfg(any(target_family = "wasm", target_os = "windows"))]
-    pub fn from_window(window: &Window) -> Option<Self> {
+    fn from_window(window: &Window) -> Option<Self> {
         let gpu = Rc::new(Gpu::from_window(window)?);
         let scene = Rc::new(Scene::new(&gpu.device));
         let pipes = Rc::new(Pipelines::new(&gpu.device, gpu.target_format));
@@ -47,7 +47,7 @@ impl ViewportCommon {
     }
 
     #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
-    pub fn standalone() -> anyhow::Result<Self> {
+    fn standalone() -> anyhow::Result<Self> {
         let gpu = Rc::new(Gpu::new()?);
         let scene = Rc::new(Scene::new(&gpu.device));
         let pipes = Rc::new(Pipelines::new(&gpu.device, gpu.target_format));
@@ -100,7 +100,7 @@ impl DepthTarget {
 }
 
 /// 一个 GPU 视口视图实例（中央标签内容）。
-pub struct GpuViewportView {
+struct GpuViewportView {
     kind: ViewKind,
     type_id: &'static str,
     title: &'static str,
@@ -122,11 +122,11 @@ pub struct GpuViewportView {
 }
 
 impl GpuViewportView {
-    pub fn new3d() -> Self {
+    fn new3d() -> Self {
         Self::new(ViewKind::Orbit3d, "example.gpu3d", "三维视图 (wgpu)")
     }
 
-    pub fn new_top() -> Self {
+    fn new_top() -> Self {
         Self::new(ViewKind::Top2d, "example.gpu_top", "俯视图 (wgpu)")
     }
 
@@ -354,34 +354,31 @@ impl GpuViewportView {
 
     /// 在视图区域绘制一帧（惰性获取共享 GPU 资源；未就绪时画占位背景）。
     fn paint_into(&mut self, window: &mut Window, bounds: Bounds<Pixels>) {
-        let scale = window.scale_factor() as f32;
+        let scale = window.scale_factor();
         let (w, h) = device_size(&bounds, scale);
 
         SHARED.with(|cell| {
+            let mut slot = cell.borrow_mut();
             // 惰性初始化共享 GPU 资源
-            {
-                let mut slot = cell.borrow_mut();
-                if matches!(&*slot, SharedSlot::NotTried) {
-                    #[cfg(any(target_family = "wasm", target_os = "windows"))]
-                    {
-                        // 首帧渲染器可能未就绪：保持 NotTried，下一帧重试
-                        if let Some(common) = ViewportCommon::from_window(window) {
-                            *slot = SharedSlot::Ready(Rc::new(common));
-                        }
+            if matches!(&*slot, SharedSlot::NotTried) {
+                #[cfg(any(target_family = "wasm", target_os = "windows"))]
+                {
+                    // 首帧渲染器可能未就绪：保持 NotTried，下一帧重试
+                    if let Some(common) = ViewportCommon::from_window(window) {
+                        *slot = SharedSlot::Ready(Rc::new(common));
                     }
-                    #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
-                    {
-                        match ViewportCommon::standalone() {
-                            Ok(common) => *slot = SharedSlot::Ready(Rc::new(common)),
-                            Err(err) => {
-                                eprintln!("gpu viewport: failed to init wgpu device: {err}");
-                                *slot = SharedSlot::Failed;
-                            }
+                }
+                #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
+                {
+                    match ViewportCommon::standalone() {
+                        Ok(common) => *slot = SharedSlot::Ready(Rc::new(common)),
+                        Err(err) => {
+                            eprintln!("gpu viewport: failed to init wgpu device: {err}");
+                            *slot = SharedSlot::Failed;
                         }
                     }
                 }
             }
-            let mut slot = cell.borrow_mut();
             match &mut *slot {
                 SharedSlot::Ready(common) => {
                     #[cfg(any(target_family = "wasm", target_os = "windows"))]
@@ -451,7 +448,7 @@ impl wb::ViewInstance for GpuViewportView {
 
 /// 原生视图绘制入口：识别 [`GpuViewportView`] 并以 GPU 通道绘制。
 /// 返回 true 表示已消费（前端不应再走 2D `paint` 通道）。
-pub fn paint_native_view(
+pub(crate) fn paint_native_view(
     inst: &mut dyn wb::ViewInstance,
     window: &mut Window,
     bounds: Bounds<Pixels>,

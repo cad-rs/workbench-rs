@@ -22,7 +22,8 @@ use workbench_core::AppRuntime;
 
 pub mod gpu_view;
 
-type SharedCore = Arc<Mutex<AppRuntime>>;
+/// 平台运行时句柄：全部使用都在 UI 主线程（gpui 前台执行器），故用 `Rc`。
+type SharedCore = std::rc::Rc<Mutex<AppRuntime>>;
 
 /// 拉丁基础字体（IBM Plex Sans，OFL 许可，随 license.txt 一并提交）。
 /// fork 的 gpui_web 是空字体库，Web 端必须在首帧前显式注入。
@@ -218,6 +219,14 @@ enum EvKind {
     Move,
     /// 滚轮（像素增量，向下为正）
     Scroll(f32),
+}
+
+/// 追加一条窗口级输入事件（四个输入处理器共享）。
+fn push_input(events: &Arc<Mutex<Vec<InputEv>>>, pos: (f32, f32), shift: bool, kind: EvKind) {
+    events
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(InputEv { pos, shift, kind });
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -445,11 +454,40 @@ impl Render for RootView {
         let core = self.core.clone();
 
         // ---- 核心状态读取（一次性） ----
+        /// 渲染期快照：面板区域内的一个面板标签。
+        struct PanelUi {
+            id: String,
+            title: String,
+            active: bool,
+            icon: Option<String>,
+            /// 脚本面板的 Rhai 文件路径（None = PaintBackend 视图）
+            script: Option<String>,
+        }
         struct AreaUi {
             visible: bool,
             size: f32,
-            // (id, title, active, icon, script)
-            panels: Vec<(String, String, bool, Option<String>, Option<String>)>,
+            panels: Vec<PanelUi>,
+        }
+        struct CentralTabUi {
+            id: u64,
+            title: String,
+            active: bool,
+            icon: Option<String>,
+        }
+        struct RibbonItemUi {
+            cmd: String,
+            label: String,
+            enabled: bool,
+            icon: Option<String>,
+        }
+        struct RibbonGroupUi {
+            title: String,
+            items: Vec<RibbonItemUi>,
+        }
+        struct RibbonTabUi {
+            id: String,
+            title: String,
+            active: bool,
         }
         let (left, right, bottom, central_tabs, central_active, ribbon_tabs, ribbon_groups, status) = {
             let core = self.core.lock().unwrap_or_else(|p| p.into_inner());
@@ -474,15 +512,12 @@ impl Render for RootView {
                     size,
                     panels: slots
                         .iter()
-                        .map(|p| {
-                            let active = active_id.as_ref() == Some(&p.id);
-                            (
-                                p.id.0.clone(),
-                                p.title.clone(),
-                                active,
-                                p.icon.clone(),
-                                p.script.clone(),
-                            )
+                        .map(|p| PanelUi {
+                            id: p.id.0.clone(),
+                            title: p.title.clone(),
+                            active: active_id.as_ref() == Some(&p.id),
+                            icon: p.icon.clone(),
+                            script: p.script.clone(),
                         })
                         .collect(),
                 }
@@ -491,34 +526,27 @@ impl Render for RootView {
             let right = area_of(wb::DockArea::Right);
             let bottom = area_of(wb::DockArea::Bottom);
             let central_active = core.host.ws.active_tab().map(|t| t.instance_id.0);
-            let central_tabs: Vec<(u64, String, bool, Option<String>)> = core
+            let central_tabs: Vec<CentralTabUi> = core
                 .host
                 .ws
                 .tabs
                 .iter()
-                .map(|t| {
-                    (
-                        t.instance_id.0,
-                        t.title.clone(),
-                        Some(t.instance_id.0) == central_active,
-                        t.icon.clone(),
-                    )
+                .map(|t| CentralTabUi {
+                    id: t.instance_id.0,
+                    title: t.title.clone(),
+                    active: Some(t.instance_id.0) == central_active,
+                    icon: t.icon.clone(),
                 })
                 .collect();
-            let (ribbon_tabs, ribbon_groups): (
-                Vec<(String, String, bool)>,
-                Vec<(String, Vec<(String, String, bool, Option<String>)>)>,
-            ) = {
+            let (ribbon_tabs, ribbon_groups): (Vec<RibbonTabUi>, Vec<RibbonGroupUi>) = {
                 let ws = &core.host.ws;
                 let tabs = ws
                     .ribbon
                     .iter()
-                    .map(|t| {
-                        (
-                            t.id.0.clone(),
-                            t.title.clone(),
-                            t.id.0 == ws.active_ribbon_tab,
-                        )
+                    .map(|t| RibbonTabUi {
+                        id: t.id.0.clone(),
+                        title: t.title.clone(),
+                        active: t.id.0 == ws.active_ribbon_tab,
                     })
                     .collect();
                 let groups = ws
@@ -534,16 +562,18 @@ impl Render for RootView {
                                         let title = core
                                             .command_title(&it.command.0)
                                             .unwrap_or_else(|| it.command.0.clone());
-                                        let enabled = core.is_enabled(&it.command.0);
-                                        (
-                                            it.command.0.clone(),
-                                            it.label.clone().unwrap_or_else(|| title.clone()),
-                                            enabled,
-                                            core.command_icon(&it.command.0),
-                                        )
+                                        RibbonItemUi {
+                                            cmd: it.command.0.clone(),
+                                            label: it.label.clone().unwrap_or(title),
+                                            enabled: core.is_enabled(&it.command.0),
+                                            icon: core.command_icon(&it.command.0),
+                                        }
                                     })
                                     .collect();
-                                (g.title.clone(), items)
+                                RibbonGroupUi {
+                                    title: g.title.clone(),
+                                    items,
+                                }
                             })
                             .collect()
                     })
@@ -582,13 +612,13 @@ impl Render for RootView {
             if !area_ui.visible {
                 continue;
             }
-            let Some((pid, _, _, _, script)) =
-                area_ui.panels.iter().find(|(_, _, active, _, _)| *active)
-            else {
+            let Some(panel) = area_ui.panels.iter().find(|p| p.active) else {
                 continue;
             };
-            let Some(script) = script else { continue };
-            if self.script_views.contains_key(pid) || self.script_errors.contains_key(pid) {
+            let Some(script) = &panel.script else { continue };
+            if self.script_views.contains_key(&panel.id)
+                || self.script_errors.contains_key(&panel.id)
+            {
                 continue;
             }
             if self.script_host.is_none() {
@@ -596,14 +626,15 @@ impl Render for RootView {
                     Ok(host) => self.script_host = Some(host),
                     Err(e) => {
                         self.script_errors
-                            .insert(pid.clone(), format!("ScriptViewHost: {e}"));
+                            .insert(panel.id.clone(), format!("ScriptViewHost: {e}"));
                         continue;
                     }
                 }
             }
             let host = self.script_host.as_ref().expect("刚已创建").clone();
             // gpui-rhai 的 view_id 只允许 ASCII 字母数字;面板 id 可能含 . /
-            let view_id: String = pid
+            let view_id: String = panel
+                .id
                 .chars()
                 .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
                 .collect();
@@ -619,28 +650,28 @@ impl Render for RootView {
                 });
             match mounted {
                 Ok(handle) => {
-                    self.script_views.insert(pid.clone(), handle);
+                    self.script_views.insert(panel.id.clone(), handle);
                 }
                 Err(e) => {
-                    self.script_errors.insert(pid.clone(), e.to_string());
+                    self.script_errors.insert(panel.id.clone(), e.to_string());
                 }
             }
         }
 
         // ---- RibbonBar（design.md §7）：Tab 行 + 活动 Tab 的 Group 行 ----
         let mut tab_row = div().flex().flex_row().items_end().px_2().gap_1();
-        for (id, title, active) in &ribbon_tabs {
+        for tab_def in &ribbon_tabs {
             let core_c = core.clone();
             let weak_c = weak.clone();
-            let id_c = id.clone();
+            let id_c = tab_def.id.clone();
             let mut tab = div()
-                .id(SharedString::from(format!("rtab-{id}")))
+                .id(SharedString::from(format!("rtab-{}", tab_def.id)))
                 .px_2()
                 .py_1()
                 .text_size(px(12.5))
                 .cursor_pointer()
-                .child(title.clone());
-            tab = if *active {
+                .child(tab_def.title.clone());
+            tab = if tab_def.active {
                 tab.text_color(col(wb::Color::WHITE))
                     .border_b_2()
                     .border_color(col(wb::Color::ACCENT))
@@ -662,7 +693,7 @@ impl Render for RootView {
         }
 
         let mut groups_row = div().flex().flex_row().items_stretch().px_2().gap_2();
-        for (gi, (gtitle, items)) in ribbon_groups.iter().enumerate() {
+        for (gi, group) in ribbon_groups.iter().enumerate() {
             if gi > 0 {
                 groups_row = groups_row.child(
                     div()
@@ -671,9 +702,9 @@ impl Render for RootView {
                 );
             }
             let mut btns = div().flex().flex_row().items_center().gap_1();
-            for (cmd, label, enabled, icon) in items {
+            for item in &group.items {
                 let mut btn = div()
-                    .id(SharedString::from(format!("tb-{cmd}")))
+                    .id(SharedString::from(format!("tb-{}", item.cmd)))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -682,21 +713,21 @@ impl Render for RootView {
                     .py_1()
                     .rounded_sm()
                     .text_size(px(12.5));
-                if let Some(icon) = icon {
+                if let Some(icon) = &item.icon {
                     // 左侧 15px 单色 SVG（禁用态灰色，与文本一致）
                     btn = btn.child(
                         svg()
                             .path(icon.clone())
                             .size(px(15.0))
-                            .text_color(if *enabled {
+                            .text_color(if item.enabled {
                                 col(wb::Color::WHITE)
                             } else {
                                 col(wb::Color::GRAY)
                             }),
                     );
                 }
-                btn = btn.child(label.clone());
-                btn = if *enabled {
+                btn = btn.child(item.label.clone());
+                btn = if item.enabled {
                     btn.bg(col(wb::Color::rgb(0.27, 0.29, 0.34)))
                         .text_color(col(wb::Color::WHITE))
                         .cursor_pointer()
@@ -704,7 +735,7 @@ impl Render for RootView {
                         .on_click({
                             let core_c = core.clone();
                             let weak_c = weak.clone();
-                            let cmd_c = cmd.clone();
+                            let cmd_c = item.cmd.clone();
                             move |_: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
                                 let r = core_c
                                     .lock()
@@ -740,7 +771,7 @@ impl Render for RootView {
                         div()
                             .text_size(px(10.0))
                             .text_color(col(wb::Color::GRAY))
-                            .child(gtitle.clone()),
+                            .child(group.title.clone()),
                     ),
             );
         }
@@ -765,9 +796,9 @@ impl Render for RootView {
         let script_host = &self.script_host;
         let panel_column = |area: &AreaUi, key_prefix: &'static str| -> gpui::AnyElement {
             let mut header = div().flex().flex_row().items_center().gap_1();
-            for (pid, title, active, icon, _) in &area.panels {
+            for panel in &area.panels {
                 let mut tab = div()
-                    .id(SharedString::from(format!("{key_prefix}-{pid}")))
+                    .id(SharedString::from(format!("{key_prefix}-{}", panel.id)))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -777,20 +808,20 @@ impl Render for RootView {
                     .rounded_sm()
                     .text_size(px(11.5))
                     .cursor_pointer();
-                if let Some(icon) = icon {
+                if let Some(icon) = &panel.icon {
                     tab = tab.child(
                         svg()
                             .path(icon.clone())
                             .size(px(13.0))
-                            .text_color(if *active {
+                            .text_color(if panel.active {
                                 col(wb::Color::WHITE)
                             } else {
                                 col(wb::Color::LIGHT_GRAY)
                             }),
                     );
                 }
-                tab = tab.child(title.clone());
-                tab = if *active {
+                tab = tab.child(panel.title.clone());
+                tab = if panel.active {
                     tab.bg(col(wb::Color::ACCENT))
                         .text_color(col(wb::Color::WHITE))
                 } else {
@@ -798,7 +829,7 @@ impl Render for RootView {
                         .hover(|s| s.bg(col(wb::Color::rgb(0.26, 0.27, 0.32))))
                 };
                 let core_c = core.clone();
-                let pid_c = pid.clone();
+                let pid_c = panel.id.clone();
                 let weak_c = weak.clone();
                 tab = tab.on_click(move |_ev: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
                     let mut core = core_c.lock().unwrap_or_else(|p| p.into_inner());
@@ -820,15 +851,14 @@ impl Render for RootView {
                 });
                 header = header.child(tab);
             }
-            let active_panel = area
-                .panels
-                .iter()
-                .find(|(_, _, active, _, _)| *active)
-                .or_else(|| area.panels.first());
+            let active_panel = area.panels.iter().find(|p| p.active).or_else(|| {
+                area.panels.first()
+            });
             let content: gpui::AnyElement = match active_panel {
                 // 脚本面板：gpui-rhai 挂载的 UiNode 树（宿主 container 提供
                 // overlay/focus 域；错误以面板内诊断呈现）
-                Some((pid, _, _, _, Some(_))) => {
+                Some(panel) if panel.script.is_some() => {
+                    let pid = &panel.id;
                     if let Some(err) = script_errors.get(pid) {
                         div()
                             .size_full()
@@ -861,10 +891,10 @@ impl Render for RootView {
                         }
                     }
                 }
-                Some((pid, _, _, _, None)) => view_canvas(
+                Some(panel) => view_canvas(
                     core.clone(),
                     frame.clone(),
-                    SlotKey::Panel(pid.clone()),
+                    SlotKey::Panel(panel.id.clone()),
                 )
                 .into_any_element(),
                 None => div().into_any_element(),
@@ -890,9 +920,9 @@ impl Render for RootView {
 
         // ---- 中央标签区 ----
         let mut tabbar = div().flex().flex_row().items_center().px_1().gap_1();
-        for (id, title, active, icon) in &central_tabs {
+        for tab_ui in &central_tabs {
             let mut tab = div()
-                .id(SharedString::from(format!("tab-{id}")))
+                .id(SharedString::from(format!("tab-{}", tab_ui.id)))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -902,20 +932,20 @@ impl Render for RootView {
                 .rounded_sm()
                 .text_size(px(12.0))
                 .cursor_pointer();
-            if let Some(icon) = icon {
+            if let Some(icon) = &tab_ui.icon {
                 tab = tab.child(
                     svg()
                         .path(icon.clone())
                         .size(px(13.0))
-                        .text_color(if *active {
+                        .text_color(if tab_ui.active {
                             col(wb::Color::WHITE)
                         } else {
                             col(wb::Color::LIGHT_GRAY)
                         }),
                 );
             }
-            tab = tab.child(title.clone());
-            tab = if *active {
+            tab = tab.child(tab_ui.title.clone());
+            tab = if tab_ui.active {
                 tab.bg(col(wb::Color::rgb(0.30, 0.32, 0.38)))
                     .text_color(col(wb::Color::WHITE))
             } else {
@@ -923,7 +953,7 @@ impl Render for RootView {
                     .hover(|s| s.bg(col(wb::Color::rgb(0.24, 0.25, 0.30))))
             };
             let core_c = core.clone();
-            let id_c = *id;
+            let id_c = tab_ui.id;
             let weak_c = weak.clone();
             tab = tab.on_click(move |_ev: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
                 core_c
@@ -937,7 +967,7 @@ impl Render for RootView {
             tabbar = tabbar.child(tab);
 
             let close = div()
-                .id(SharedString::from(format!("tab-close-{id}")))
+                .id(SharedString::from(format!("tab-close-{}", tab_ui.id)))
                 .px_1()
                 .rounded_sm()
                 .text_size(px(11.0))
@@ -946,7 +976,7 @@ impl Render for RootView {
                 .hover(|s| s.bg(col(wb::Color::rgb(0.4, 0.2, 0.2))))
                 .child("×");
             let core_c = core.clone();
-            let id_c = *id;
+            let id_c = tab_ui.id;
             let weak_c = weak.clone();
             let close = close.on_click(
                 move |_ev: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
@@ -1135,14 +1165,12 @@ impl Render for RootView {
                     let weak_d = weak.clone();
                     move |ev: &MouseDownEvent, _w: &mut Window, cx: &mut App| {
                         down_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                        ev_cell
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .push(InputEv {
-                                pos: (ev.position.x.as_f32(), ev.position.y.as_f32()),
-                                shift: ev.modifiers.shift,
-                                kind: EvKind::Down,
-                            });
+                        push_input(
+                            &ev_cell,
+                            (ev.position.x.as_f32(), ev.position.y.as_f32()),
+                            ev.modifiers.shift,
+                            EvKind::Down,
+                        );
                         notify(&weak_d, cx);
                     }
                 },
@@ -1155,14 +1183,12 @@ impl Render for RootView {
                     let weak_u = weak.clone();
                     move |ev: &MouseUpEvent, _w: &mut Window, cx: &mut App| {
                         down_flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                        ev_cell
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .push(InputEv {
-                                pos: (ev.position.x.as_f32(), ev.position.y.as_f32()),
-                                shift: ev.modifiers.shift,
-                                kind: EvKind::Up,
-                            });
+                        push_input(
+                            &ev_cell,
+                            (ev.position.x.as_f32(), ev.position.y.as_f32()),
+                            ev.modifiers.shift,
+                            EvKind::Up,
+                        );
                         notify(&weak_u, cx);
                     }
                 },
@@ -1171,14 +1197,12 @@ impl Render for RootView {
                 let ev_cell = self.events.clone();
                 let weak_m = weak.clone();
                 move |ev: &MouseMoveEvent, _w: &mut Window, cx: &mut App| {
-                    ev_cell
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .push(InputEv {
-                            pos: (ev.position.x.as_f32(), ev.position.y.as_f32()),
-                            shift: ev.modifiers.shift,
-                            kind: EvKind::Move,
-                        });
+                    push_input(
+                        &ev_cell,
+                        (ev.position.x.as_f32(), ev.position.y.as_f32()),
+                        ev.modifiers.shift,
+                        EvKind::Move,
+                    );
                     notify(&weak_m, cx);
                 }
             })
@@ -1190,14 +1214,12 @@ impl Render for RootView {
                         ScrollDelta::Pixels(p) => p.y.as_f32(),
                         ScrollDelta::Lines(l) => l.y * 40.0,
                     };
-                    ev_cell
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .push(InputEv {
-                            pos: (ev.position.x.as_f32(), ev.position.y.as_f32()),
-                            shift: ev.modifiers.shift,
-                            kind: EvKind::Scroll(dy),
-                        });
+                    push_input(
+                        &ev_cell,
+                        (ev.position.x.as_f32(), ev.position.y.as_f32()),
+                        ev.modifiers.shift,
+                        EvKind::Scroll(dy),
+                    );
                     notify(&weak_s, cx);
                 }
             })
@@ -1363,7 +1385,7 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
     let smoke = builder.smoke_seconds();
     let title: SharedString = window_title.to_string().into();
     let assets = builder.asset_source();
-    let core: SharedCore = Arc::new(Mutex::new(builder.build()?));
+    let core: SharedCore = std::rc::Rc::new(Mutex::new(builder.build()?));
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -1463,7 +1485,7 @@ fn launch_app(
                 .0;
             if running > 0 {
                 if let Some(weak) = weak_root.clone() {
-                    let _ = cx.update(|cx| notify(&weak, cx));
+                    cx.update(|cx| notify(&weak, cx));
                 }
             }
         })
@@ -1476,7 +1498,7 @@ fn launch_app(
                     cx.background_executor()
                         .timer(std::time::Duration::from_secs_f32(secs))
                         .await;
-                    let _ = cx.update(|cx| cx.quit());
+                    cx.update(|cx| cx.quit());
                 })
                 .detach();
             }

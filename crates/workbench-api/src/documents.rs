@@ -30,6 +30,11 @@ where
     }
 }
 
+/// 文档序列化函数（由领域模块提供；失败返回用户可读错误）。
+pub type DocumentSerializeFn = fn(&dyn DocumentContent) -> Result<Vec<u8>, String>;
+/// 文档反序列化函数（由领域模块提供）。
+pub type DocumentDeserializeFn = fn(&[u8]) -> Result<Box<dyn DocumentContent>, String>;
+
 /// 文档类型注册信息：编解码由领域模块提供，平台不定义领域 schema。
 pub struct DocumentTypeDef {
     pub id: DocumentTypeId,
@@ -37,8 +42,8 @@ pub struct DocumentTypeDef {
     /// 关联扩展名（小写、不带点），按此匹配打开文件时的类型。
     pub extensions: Vec<String>,
     pub create_default: fn() -> Box<dyn DocumentContent>,
-    pub serialize: fn(&dyn DocumentContent) -> Result<Vec<u8>, String>,
-    pub deserialize: fn(&[u8]) -> Result<Box<dyn DocumentContent>, String>,
+    pub serialize: DocumentSerializeFn,
+    pub deserialize: DocumentDeserializeFn,
     /// 新建/打开文档时建议打开的中央视图类型（可选）。
     pub open_view: Option<crate::ids::ViewTypeId>,
 }
@@ -118,7 +123,7 @@ impl DocumentService {
 
     pub fn find_type_by_extension(&self, ext: &str) -> Option<&DocumentTypeDef> {
         let ext = ext.to_ascii_lowercase();
-        self.types.iter().find(|t| t.extensions.iter().any(|e| *e == ext))
+        self.types.iter().find(|t| t.extensions.contains(&ext))
     }
 
     // ---- 查询 ----

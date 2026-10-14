@@ -13,9 +13,6 @@ use anyhow::{Context as _, Result};
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    /// 适配器信息，例如 "NVIDIA GeForce RTX 4070 / Vulkan"
-    #[cfg_attr(any(target_family = "wasm", target_os = "windows"), allow(dead_code))]
-    pub adapter_info: String,
     /// 目标纹理格式（所有离屏视口统一使用）
     pub target_format: wgpu::TextureFormat,
     /// 保持 GPUI 的 wgpu 上下文存活（Windows / web 共享设备路径）
@@ -35,17 +32,15 @@ impl Gpu {
     #[cfg(target_os = "windows")]
     pub fn from_window(window: &gpui::Window) -> Option<Self> {
         let handle = gpui_wgpu::WgpuContextHandle::from_window(window)?;
-        // WebGPU/DX12 的设备错误是异步派发的，不挂回调就完全静默
+        // DX12 的设备错误是异步派发的，不挂回调就完全静默
         handle
             .device()
             .on_uncaptured_error(std::sync::Arc::new(|error| {
                 eprintln!("wgpu uncaptured error: {error}");
             }));
-        let adapter_info = format!("{} / {:?}", handle.adapter_info().name, handle.backend());
         Some(Self {
             device: handle.device().clone(),
             queue: handle.queue().clone(),
-            adapter_info,
             target_format: handle.texture_format(),
             _handle: handle,
         })
@@ -55,11 +50,9 @@ impl Gpu {
     #[cfg(target_family = "wasm")]
     pub fn from_window(window: &gpui::Window) -> Option<Self> {
         let handle = gpui_wgpu::WgpuContextHandle::from_window(window)?;
-        let adapter_info = format!("{} / {:?}", handle.adapter_info().name, handle.backend());
         Some(Self {
             device: handle.device().clone(),
             queue: handle.queue().clone(),
-            adapter_info,
             target_format: handle.texture_format(),
             _handle: handle,
         })
@@ -86,13 +79,9 @@ impl Gpu {
         }))
         .context("failed to open wgpu device")?;
 
-        let info = adapter.get_info();
-        let adapter_info = format!("{} / {:?}", info.name, info.backend);
-
         Ok(Self {
             device,
             queue,
-            adapter_info,
             target_format: wgpu::TextureFormat::Bgra8Unorm,
         })
     }

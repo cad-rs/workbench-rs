@@ -2,7 +2,7 @@
 //! 以及 CAD 里常用的"特征边"提取（相邻面夹角超过阈值的多边形边）。
 //! 移植自 gpui-wgpu 参考实现（javagg/gpui-demo）。
 
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 use std::collections::HashMap;
 
 #[repr(C)]
@@ -92,21 +92,6 @@ impl Mesh {
         m
     }
 
-    #[allow(dead_code)]
-    pub fn transform(&mut self, m: Mat4) {
-        let normal_mat = glam::Mat3::from_cols(
-            m.x_axis.truncate(),
-            m.y_axis.truncate(),
-            m.z_axis.truncate(),
-        );
-        for v in &mut self.verts {
-            let p = Vec3::from(v.pos);
-            let n = Vec3::from(v.normal);
-            v.pos = m.transform_point3(p).to_array();
-            v.normal = (normal_mat * n.normalize_or_zero()).to_array();
-        }
-    }
-
     /// 拼接另一个网格
     pub fn merge(&mut self, other: &Mesh) {
         self.verts.extend_from_slice(&other.verts);
@@ -136,7 +121,7 @@ pub fn feature_edges(mesh: &Mesh, cos_threshold: f32) -> Vec<LineVertex> {
     }
     let mut edges: HashMap<([i64; 3], [i64; 3]), EdgeInfo> = HashMap::new();
 
-    for tri in mesh.verts.chunks_exact(3) {
+    for tri in mesh.verts.as_chunks::<3>().0 {
         let pts = [
             Vec3::from(tri[0].pos),
             Vec3::from(tri[1].pos),

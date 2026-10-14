@@ -2,14 +2,15 @@
 //! 离屏渲染目标（Bgra8Unorm，方便直接交给 gpui 的 RenderImage）与 GPU→CPU 回读。
 //! 移植自 gpui-wgpu 参考实现（javagg/gpui-demo）。
 
-use super::gpu::Gpu;
 use super::mesh::{self, LineVertex, Mesh, SolidVertex};
-#[cfg(not(target_family = "wasm"))]
+#[cfg(not(any(target_family = "wasm", target_os = "windows")))]
+use super::gpu::Gpu;
+#[cfg(not(any(target_family = "wasm", target_os = "windows")))]
 use anyhow::Result;
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-pub const SHADER_SRC: &str = r#"
+const SHADER_SRC: &str = r#"
 struct Uniforms {
     view_proj: mat4x4<f32>,
     eye: vec4<f32>,     // xyz = 相机位置, w = 线段深度偏移
@@ -135,8 +136,6 @@ pub struct Scene {
     pub line_vb: wgpu::Buffer,
     pub solid_verts: u32,
     pub line_verts: u32,
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
-    pub triangle_count: u32,
 }
 
 impl Scene {
@@ -194,7 +193,6 @@ impl Scene {
             line_vb,
             solid_verts: model.verts.len() as u32,
             line_verts: lines.len() as u32,
-            triangle_count: (model.verts.len() / 3) as u32,
         }
     }
 }
@@ -370,10 +368,9 @@ pub fn draw_scene(
 }
 
 /// 离屏渲染目标：颜色纹理（Bgra8Unorm）+ 深度 + 回读缓冲。
-/// 仅桌面端使用；web 端走 `gpui_wgpu::WgpuRenderTarget` 零拷贝通路，
-/// Windows 走共享设备通路（本类型在 Windows 上编译但不使用）。
-#[cfg(not(target_family = "wasm"))]
-#[allow(dead_code)]
+/// 仅非 Windows 桌面使用；web 与 Windows 走 `gpui_wgpu::WgpuRenderTarget`
+/// 共享设备的零拷贝通路。
+#[cfg(not(any(target_family = "wasm", target_os = "windows")))]
 pub struct Target {
     color: wgpu::Texture,
     pub view: wgpu::TextureView,
@@ -383,8 +380,7 @@ pub struct Target {
     pub size: (u32, u32),
 }
 
-#[cfg(not(target_family = "wasm"))]
-#[allow(dead_code)]
+#[cfg(not(any(target_family = "wasm", target_os = "windows")))]
 impl Target {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, size: (u32, u32)) -> Self {
         let (w, h) = size;
@@ -420,7 +416,7 @@ impl Target {
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
         let bpr = w * 4;
-        let padded_bpr = (bpr + 255) / 256 * 256;
+        let padded_bpr = bpr.div_ceil(256) * 256;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("viewport-readback"),
             size: (padded_bpr * h) as u64,
