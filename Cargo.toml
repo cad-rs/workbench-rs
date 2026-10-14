@@ -64,8 +64,24 @@ gpui = { package = "gpui-ce", path = ".vendor/gpui-ce/crates/gpui", features = [
 gpui-platform = { package = "gpui_ce_platform", path = ".vendor/gpui-ce/crates/gpui_platform", features = [
     "windows-wgpu",
 ] }
+# GPUI 渲染器的 wgpu 上下文（GPU 视口零拷贝通路：WgpuContextHandle /
+# WgpuRenderTarget），Windows 与 Web 与 gpui 共享设备时使用。
+gpui-wgpu = { package = "gpui_ce_wgpu", path = ".vendor/gpui-ce/crates/gpui_wgpu", features = [
+    "custom-gpu",
+    "wgpu-surfaces",
+] }
 gpui-component = { package = "gpui_ce_components", path = ".vendor/gpui-component/crates/ui" }
 gpui-component-assets = { package = "gpui_ce_components_assets", path = ".vendor/gpui-component/crates/assets" }
+
+# GPU 视口（workbench-ui 的原生视图扩展）：wgpu 版本必须与 vendored
+# gpui-ce pin 的一致（当前 29.0.3），否则类型不同一、纹理无法共享。
+wgpu = "29.0.3"
+glam = "0.30"
+bytemuck = { version = "1", features = ["derive"] }
+# 非 Windows 桌面的回读合成路径（离屏渲染 → CPU 回读 → paint_image）
+image = "0.25"
+pollster = "0.4"
+anyhow = "1"
 
 [profile.dev]
 opt-level = 1

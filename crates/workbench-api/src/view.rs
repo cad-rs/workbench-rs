@@ -15,6 +15,10 @@ pub struct ViewInput {
     pub mouse_down: bool,
     /// 本帧内发生了点击（按下并抬起）。
     pub clicked: bool,
+    /// 本帧最后一次输入事件携带的 Shift 修饰键状态。
+    pub shift: bool,
+    /// 本帧滚轮增量（像素，向下为正）；仅指针位于视图内时提供。
+    pub scroll: Option<f32>,
 }
 
 /// 视图实例：面板与中央标签共用的内容单元。
@@ -31,6 +35,13 @@ pub trait ViewInstance: 'static {
     fn update(&mut self, _ctx: &mut ViewCtx, _dt_secs: f32) {}
     /// 绘制视图内容到 rect 区域。
     fn paint(&mut self, painter: &mut dyn PaintBackend, rect: Rect, ctx: &mut ViewCtx);
+    /// 前端原生呈现出口（可选）：返回类型擦除的原生视图句柄时，前端优先
+    /// 以其原生方式呈现（如 GPU 视口表面），不再调用 [`ViewInstance::paint`]。
+    /// 句柄的具体类型由前端与其视图扩展约定（如 gpui 前端的 GPU 视口状态）；
+    /// 前端无法识别时回退 `paint`（2D PaintBackend 通道）。
+    fn native_view(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
 }
 
 /// 视图运行上下文。

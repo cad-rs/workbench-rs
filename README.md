@@ -55,6 +55,10 @@ cargo test --workspace                  # full test suite
 powershell -File scripts/verify.ps1     # one-shot verification (check + tests + selfcheck + smoke)
 ```
 
+> Evaluate interaction responsiveness (drag/zoom frame rate, GPU viewports)
+> under a release build: `cargo run --release -p product-demo`. Dev builds
+> carry UI-tree rebuild overhead that lowers the frame rate.
+
 ### Running in the browser (wasm32 + trunk)
 
 ```bash

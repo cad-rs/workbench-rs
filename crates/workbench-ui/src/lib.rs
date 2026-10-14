@@ -12,12 +12,15 @@ use std::sync::{Arc, Mutex};
 use gpui::{
     canvas, div, prelude::*, px, quad, relative, rgb_to_hsla, size, svg, App, Bounds,
     Context, Corners, Edges, Hsla, KeyDownEvent, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, SharedString, TextAlign, TextRun,
-    TitlebarOptions, TransformationMatrix, Window, WindowBounds, WindowOptions,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollDelta, ScrollWheelEvent,
+    SharedString, TextAlign, TextRun, TitlebarOptions, TransformationMatrix, Window,
+    WindowBounds, WindowOptions,
 };
 
 use workbench_api as wb;
 use workbench_core::AppRuntime;
+
+pub mod gpu_view;
 
 type SharedCore = Arc<Mutex<AppRuntime>>;
 
@@ -203,6 +206,8 @@ impl wb::PaintBackend for GpuiPainter<'_> {
 #[derive(Clone, Copy, Debug)]
 struct InputEv {
     pos: (f32, f32), // 窗口坐标
+    /// 事件时的 Shift 修饰键
+    shift: bool,
     kind: EvKind,
 }
 
@@ -211,6 +216,8 @@ enum EvKind {
     Down,
     Up,
     Move,
+    /// 滚轮（像素增量，向下为正）
+    Scroll(f32),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -257,10 +264,24 @@ impl FrameInput {
             .map(|e| wb::Point::new(e.pos.0, e.pos.1))
             .filter(|p| rect.contains(*p))
             .map(|p| wb::Point::new(p.x - ox, p.y - oy));
+        let shift = events.iter().next_back().map(|e| e.shift).unwrap_or(false);
+        let scroll_total: f32 = events
+            .iter()
+            .filter(|e| {
+                matches!(e.kind, EvKind::Scroll(_))
+                    && rect.contains(wb::Point::new(e.pos.0, e.pos.1))
+            })
+            .map(|e| match e.kind {
+                EvKind::Scroll(d) => d,
+                _ => 0.0,
+            })
+            .sum();
         wb::ViewInput {
             mouse_pos,
             mouse_down: self.mouse_down.load(std::sync::atomic::Ordering::Relaxed),
             clicked,
+            shift,
+            scroll: (scroll_total != 0.0).then_some(scroll_total),
         }
     }
 }
@@ -308,6 +329,21 @@ fn notify(weak: &gpui::WeakEntity<RootView>, cx: &mut App) {
     }
 }
 
+// ---- 面板/中央视图绘制 ----
+
+/// GPU 视口未就绪 / 失败时的占位背景（深色，与视口底色一致）。
+pub(crate) fn paint_placeholder(window: &mut Window, bounds: Bounds<Pixels>) {
+    let q = quad(
+        bounds,
+        Corners::all(px(0.)),
+        col(wb::Color::rgb(0.10, 0.11, 0.13)),
+        Edges::all(px(0.)),
+        gpui::transparent_black(),
+        gpui::BorderStyle::default(),
+    );
+    window.paint_quad(q);
+}
+
 /// 面板/中央视图绘制到 canvas。
 /// 实例存放在核心状态内，绘制需要 &mut 核心——先换出、绘制、再放回。
 fn view_canvas(core: SharedCore, frame: FrameInput, key: SlotKey) -> impl IntoElement {
@@ -344,13 +380,16 @@ fn view_canvas(core: SharedCore, frame: FrameInput, key: SlotKey) -> impl IntoEl
                 let Some(inst) = instance.as_mut() else {
                     return;
                 };
-                let mut painter = GpuiPainter {
-                    window,
-                    cx,
-                    origin: bounds.origin,
-                };
-                let mut ctx = wb::ViewCtx::new(&mut *guard as &mut dyn wb::AppServices, input);
-                inst.paint(&mut painter, area, &mut ctx);
+                // 原生视图优先（GPU 视口等）：命中则前端直接呈现，不走 2D 通道
+                if !gpu_view::paint_native_view(inst.as_mut(), window, bounds, &input) {
+                    let mut painter = GpuiPainter {
+                        window,
+                        cx,
+                        origin: bounds.origin,
+                    };
+                    let mut ctx = wb::ViewCtx::new(&mut *guard as &mut dyn wb::AppServices, input);
+                    inst.paint(&mut painter, area, &mut ctx);
+                }
             }
             if let Some(inst) = instance.take() {
                 match &key {
@@ -1083,21 +1122,28 @@ impl Render for RootView {
         root_col = root_col.child(render_status_bar(&status, core.clone(), weak.clone()));
 
         // 窗口级输入监听
+        // 窗口级输入监听。
+        // 每次输入都请求重绘：gpui 按需渲染，而视口拖拽/缩放的状态变化发生
+        // 在绘制期（视图实例内），事件侧必须显式 notify 才能驱动下一帧，
+        // 否则拖拽只在其他状态变化时零星刷新（滞后的手感）。
         root_col = root_col
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 {
                     let ev_cell = self.events.clone();
                     let down_flag = self.mouse_down.clone();
-                    move |ev: &MouseDownEvent, _w: &mut Window, _cx: &mut App| {
+                    let weak_d = weak.clone();
+                    move |ev: &MouseDownEvent, _w: &mut Window, cx: &mut App| {
                         down_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                         ev_cell
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
                             .push(InputEv {
                                 pos: (ev.position.x.as_f32(), ev.position.y.as_f32()),
+                                shift: ev.modifiers.shift,
                                 kind: EvKind::Down,
                             });
+                        notify(&weak_d, cx);
                     }
                 },
             )
@@ -1106,28 +1152,53 @@ impl Render for RootView {
                 {
                     let ev_cell = self.events.clone();
                     let down_flag = self.mouse_down.clone();
-                    move |ev: &MouseUpEvent, _w: &mut Window, _cx: &mut App| {
+                    let weak_u = weak.clone();
+                    move |ev: &MouseUpEvent, _w: &mut Window, cx: &mut App| {
                         down_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                         ev_cell
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
                             .push(InputEv {
                                 pos: (ev.position.x.as_f32(), ev.position.y.as_f32()),
+                                shift: ev.modifiers.shift,
                                 kind: EvKind::Up,
                             });
+                        notify(&weak_u, cx);
                     }
                 },
             )
             .on_mouse_move({
                 let ev_cell = self.events.clone();
-                move |ev: &MouseMoveEvent, _w: &mut Window, _cx: &mut App| {
+                let weak_m = weak.clone();
+                move |ev: &MouseMoveEvent, _w: &mut Window, cx: &mut App| {
                     ev_cell
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .push(InputEv {
                             pos: (ev.position.x.as_f32(), ev.position.y.as_f32()),
+                            shift: ev.modifiers.shift,
                             kind: EvKind::Move,
                         });
+                    notify(&weak_m, cx);
+                }
+            })
+            .on_scroll_wheel({
+                let ev_cell = self.events.clone();
+                let weak_s = weak.clone();
+                move |ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut App| {
+                    let dy = match ev.delta {
+                        ScrollDelta::Pixels(p) => p.y.as_f32(),
+                        ScrollDelta::Lines(l) => l.y * 40.0,
+                    };
+                    ev_cell
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push(InputEv {
+                            pos: (ev.position.x.as_f32(), ev.position.y.as_f32()),
+                            shift: ev.modifiers.shift,
+                            kind: EvKind::Scroll(dy),
+                        });
+                    notify(&weak_s, cx);
                 }
             })
             .on_key_down({

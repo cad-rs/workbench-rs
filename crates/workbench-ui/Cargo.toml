@@ -21,7 +21,26 @@ serde_json = { workspace = true }
 # std::time 在 wasm 上不可用；web-time 桌面转发 std、Web 走 performance.now
 web-time = { workspace = true }
 
+# GPU 视口（原生视图扩展；gpu_view 模块）
+wgpu = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+# scene::Target 的回读 Result（cfg(not(wasm)) 编译，Windows 上虽不使用但需编译）
+anyhow = { workspace = true }
+
 # Web (wasm32)：异步驱动（字体预取经 wb::asyncrt::fetch_bytes）
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
+# Web 上 gpui 渲染器即 WebGPU/WebGL：GPU 视口必须复用其共享设备
+gpui-wgpu = { workspace = true }
+wgpu = { workspace = true, features = ["webgpu"] }
+
+# Windows：同样复用 GPUI 渲染器的共享 wgpu 设备（DX12）
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui-wgpu = { workspace = true }
+
+# 其余桌面（macOS/Linux）：独立 wgpu 设备 + 离屏回读（不与 gpui 共享设备）
+[target.'cfg(not(any(target_family = "wasm", target_os = "windows")))'.dependencies]
+image = { workspace = true }
+pollster = { workspace = true }

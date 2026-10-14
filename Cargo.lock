@@ -8237,15 +8237,22 @@ dependencies = [
 name = "workbench-ui"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "bytemuck",
+ "glam",
  "gpui-ce",
  "gpui-rhai",
  "gpui_ce_components",
  "gpui_ce_components_assets",
  "gpui_ce_platform",
+ "gpui_ce_wgpu",
+ "image",
+ "pollster 0.4.0",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
+ "wgpu",
  "workbench-api",
  "workbench-core",
 ]
