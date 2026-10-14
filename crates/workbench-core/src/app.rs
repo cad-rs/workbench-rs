@@ -737,6 +737,8 @@ pub struct WorkbenchAppBuilder {
     assets: Option<std::sync::Arc<dyn api::AssetSource>>,
     /// GUI 后端标签（诊断面板/日志用；产品按构建选定填写）。
     backend_label: String,
+    /// 产品声明的额外 GPU 设备需求（不透明传递；前端解释具体类型）。
+    gpu_requirements: Option<Box<dyn std::any::Any>>,
 }
 
 impl WorkbenchAppBuilder {
@@ -754,6 +756,7 @@ impl WorkbenchAppBuilder {
             smoke_seconds: None,
             assets: None,
             backend_label: "unknown".to_string(),
+            gpu_requirements: None,
         }
     }
 
@@ -775,6 +778,21 @@ impl WorkbenchAppBuilder {
         }
         sources.push(std::sync::Arc::new(*crate::assets::standard_assets()));
         std::sync::Arc::new(api::ChainedAssets::new(sources))
+    }
+
+    /// 声明产品额外需要的 GPU 设备需求（features / limits），在前端创建设备前
+    /// 落位。类型由 GUI 前端解释（workbench-ui 期望
+    /// `gpui_wgpu::WgpuDeviceRequirements`），本层只透传 `Box<dyn Any>`
+    /// （GUI 无关契约不变）。典型用途：产品自己的渲染器需要高于平台基线的
+    /// 限制（如计算着色器的 storage buffer 数）。
+    pub fn with_gpu_requirements(mut self, requirements: Box<dyn std::any::Any>) -> Self {
+        self.gpu_requirements = Some(requirements);
+        self
+    }
+
+    /// 取出 GPU 设备需求（`build()` 之前的装配步骤消费）。
+    pub fn take_gpu_requirements(&mut self) -> Option<Box<dyn std::any::Any>> {
+        self.gpu_requirements.take()
     }
 
     /// 标记 GUI 后端（诊断面板/自动化查询用）。

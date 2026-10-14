@@ -446,7 +446,8 @@ impl wb::ViewInstance for GpuViewportView {
     }
 }
 
-/// 原生视图绘制入口：识别 [`GpuViewportView`] 并以 GPU 通道绘制。
+/// 原生视图绘制入口：先识别前端自有的 [`GpuViewportView`]，再依次尝试
+/// 外部 crate 登记过的呈现器（[`register_native_presenter`]）。
 /// 返回 true 表示已消费（前端不应再走 2D `paint` 通道）。
 pub(crate) fn paint_native_view(
     inst: &mut dyn wb::ViewInstance,
@@ -457,12 +458,58 @@ pub(crate) fn paint_native_view(
     let Some(native) = inst.native_view() else {
         return false;
     };
-    let Some(vp) = native.downcast_mut::<GpuViewportView>() else {
-        return false;
-    };
-    vp.feed_input(input);
-    vp.paint_into(window, bounds);
-    true
+    if let Some(vp) = native.downcast_mut::<GpuViewportView>() {
+        vp.feed_input(input);
+        vp.paint_into(window, bounds);
+        return true;
+    }
+    // 复制登记表再派发：绘制期间不持锁（呈现器内部若再注册不会死锁）。
+    let registered = presenters()
+        .lock()
+        .expect("native presenter registry poisoned")
+        .clone();
+    for presenter in registered {
+        if presenter(native, window, bounds, input) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 前端原生视图呈现器：**外部 crate** 接入原生视图通道的通用出口。
+///
+/// `workbench-api` 只有 GUI 无关的
+/// [`wb::ViewInstance::native_view`]（`&mut dyn Any`），具体类型由前端与其
+/// 视图扩展约定；产品侧的视图类型实现本 trait 并在 workbench `init` 里登记
+/// （[`register_native_presenter`]），前端即可命中原生通道，不再走 2D
+/// `PaintBackend`。视图类型的 `native_view()` 返回 `Some(self)`。
+pub trait NativeViewportPresenter: 'static {
+    /// 以原生通道绘制一帧；`bounds` 是该视图在本帧的屏幕区域（逻辑像素）。
+    fn paint_native(&mut self, window: &mut Window, bounds: Bounds<Pixels>, input: &wb::ViewInput);
+}
+
+/// 一次呈现尝试：命中本类型则绘制并返回 true。
+type PresenterDispatch =
+    fn(&mut dyn std::any::Any, &mut Window, Bounds<Pixels>, &wb::ViewInput) -> bool;
+
+fn presenters() -> &'static std::sync::Mutex<Vec<PresenterDispatch>> {
+    static PRESENTERS: std::sync::OnceLock<std::sync::Mutex<Vec<PresenterDispatch>>> =
+        std::sync::OnceLock::new();
+    PRESENTERS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// 登记一个外部原生视图呈现器（在 workbench `init` 的视图注册旁调用一次）。
+pub fn register_native_presenter<T: NativeViewportPresenter>() {
+    presenters()
+        .lock()
+        .expect("native presenter registry poisoned")
+        .push(|any, window, bounds, input| match any.downcast_mut::<T>() {
+            Some(view) => {
+                view.paint_native(window, bounds, input);
+                true
+            }
+            None => false,
+        });
 }
 
 /// 注册两个演示 GPU 视图、打开命令与 Ribbon 入口（产品装配时调用；

@@ -1382,9 +1382,13 @@ fn render_status_bar(
 /// 均在首帧前，避免排版缓存命中旧字形），并用 `run_embedded` 返回的句柄
 /// 保持应用存活（页面生命周期 = 应用生命周期）。
 pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> Result<(), String> {
+    let mut builder = builder;
     let smoke = builder.smoke_seconds();
     let title: SharedString = window_title.to_string().into();
     let assets = builder.asset_source();
+    // 产品声明的 GPU 设备需求：在窗口打开前交给前端（gpui 的平台层按
+    // WgpuDeviceRequirements 合并）；未声明时用平台基线。
+    let gpu_requirements = builder.take_gpu_requirements();
     let core: SharedCore = std::rc::Rc::new(Mutex::new(builder.build()?));
 
     #[cfg(target_arch = "wasm32")]
@@ -1407,7 +1411,7 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
                 app: assets,
                 component: gpui_component_assets::Assets::new(""),
             });
-            let handle = app.run_embedded(launch_app(core, title, smoke, fonts));
+            let handle = app.run_embedded(launch_app(core, title, smoke, fonts, gpu_requirements));
             // Web 平台的 run 立即返回，应用状态由句柄保持；
             // 与页面共存亡，故意泄漏句柄。
             std::mem::forget(handle);
@@ -1422,7 +1426,7 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
             app: assets,
             component: gpui_component_assets::Assets::new(""),
         });
-        app.run(launch_app(core, title, smoke, Vec::new()));
+        app.run(launch_app(core, title, smoke, Vec::new(), gpu_requirements));
         Ok(())
     }
 }
@@ -1433,10 +1437,15 @@ fn launch_app(
     title: SharedString,
     smoke: Option<f32>,
     fonts: Vec<std::borrow::Cow<'static, [u8]>>,
+    gpu_requirements: Option<Box<dyn std::any::Any>>,
 ) -> impl FnOnce(&mut App) {
     move |cx: &mut App| {
         if !fonts.is_empty() {
             let _ = cx.text_system().add_fonts(fonts);
+        }
+        // 产品声明的额外 GPU 设备需求必须在任何窗口（即任何设备）创建之前落位。
+        if let Some(requirements) = gpu_requirements {
+            cx.set_gpu_requirements(requirements);
         }
         gpui_component::init(cx);
         gpui_rhai::install(cx);
