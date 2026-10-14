@@ -291,6 +291,9 @@ struct RootView {
     /// The dock area and its mirror of the model (built on the first frame:
     /// `RootView::new` has no window to build it with).
     dock: Option<dock_panel::DockShell>,
+    /// The persisted dock layout to re-establish, applied on the first frame
+    /// after the model-driven sync has built this session's panels.
+    pending_dock: Option<gpui_component::dock::DockAreaState>,
     /// Per-frame input for the paint closures, shared with the dock panels.
     frame: dock_panel::SharedFrame,
     /// gpui-rhai script view domain (per window; created at the first script
@@ -301,13 +304,14 @@ struct RootView {
 }
 
 impl RootView {
-    fn new(core: SharedCore) -> Self {
+    fn new(core: SharedCore, pending_dock: Option<gpui_component::dock::DockAreaState>) -> Self {
         Self {
             core,
             last_render: web_time::Instant::now(),
             events: Arc::new(Mutex::new(Vec::new())),
             mouse_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             dock: None,
+            pending_dock,
             frame: std::rc::Rc::new(std::cell::RefCell::new(FrameInput {
                 events: Arc::new(Mutex::new(Vec::new())),
                 mouse_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -606,6 +610,13 @@ impl Render for RootView {
         {
             let dock = self.dock.as_mut().expect("built above");
             dock.sync(&shell_snap, window, cx);
+            // The persisted physical layout goes on top of the model-driven
+            // one, once: the panels it names exist by now, and the sync above
+            // recorded the model's panel sets so it will not rebuild the
+            // restored docks.
+            if let Some(saved) = self.pending_dock.take() {
+                dock.restore(saved, &shell_snap, window, cx);
+            }
         }
         let dock_element = div()
             .flex_1()
@@ -996,7 +1007,16 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
     // 产品声明的 GPU 设备需求：在窗口打开前交给前端（gpui 的平台层按
     // WgpuDeviceRequirements 合并）；未声明时用平台基线。
     let gpu_requirements = builder.take_gpu_requirements();
-    let core: SharedCore = std::rc::Rc::new(Mutex::new(builder.build()?));
+    let runtime = builder.build()?;
+    let core: SharedCore = std::rc::Rc::new(Mutex::new(runtime));
+    // 恢复上次的布局（模型 + 停靠区物理布局）：先落模型，窗口打开后首帧再把
+    // dock 布局叠上去。无布局文件（首次启动）或解析失败时返回 None → 默认布局。
+    let dock = {
+        let mut core = core.lock().unwrap_or_else(|p| p.into_inner());
+        core.load_layout()
+            .and_then(|restored| restored.dock)
+            .and_then(|dock| serde_json::from_value(dock).ok())
+    };
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -1018,7 +1038,8 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
                 app: assets,
                 component: gpui_component_assets::Assets::new(""),
             });
-            let handle = app.run_embedded(launch_app(core, title, smoke, fonts, gpu_requirements));
+            let handle =
+                app.run_embedded(launch_app(core, title, smoke, fonts, gpu_requirements, dock));
             // Web 平台的 run 立即返回，应用状态由句柄保持；
             // 与页面共存亡，故意泄漏句柄。
             std::mem::forget(handle);
@@ -1033,7 +1054,14 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
             app: assets,
             component: gpui_component_assets::Assets::new(""),
         });
-        app.run(launch_app(core, title, smoke, Vec::new(), gpu_requirements));
+        app.run(launch_app(
+            core,
+            title,
+            smoke,
+            Vec::new(),
+            gpu_requirements,
+            dock,
+        ));
         Ok(())
     }
 }
@@ -1045,6 +1073,7 @@ fn launch_app(
     smoke: Option<f32>,
     fonts: Vec<std::borrow::Cow<'static, [u8]>>,
     gpu_requirements: Option<Box<dyn std::any::Any>>,
+    dock: Option<gpui_component::dock::DockAreaState>,
 ) -> impl FnOnce(&mut App) {
     move |cx: &mut App| {
         if !fonts.is_empty() {
@@ -1067,27 +1096,52 @@ fn launch_app(
             ..Default::default()
         };
         let core_window = core.clone();
+        let dock_window = dock.clone();
         let handle = cx
             .open_window(options, |_window, cx| {
-                cx.new(|_cx| RootView::new(core_window))
+                cx.new(|_cx| RootView::new(core_window, dock_window))
             })
             .expect("打开窗口失败");
         let _ = handle;
         cx.activate(true);
-        cx.on_window_closed(|cx, _| {
+
+        // 有任务运行时以低频率刷新（进度动画）
+        let root_entity = cx
+            .active_window()
+            .and_then(|w| w.downcast::<RootView>())
+            .and_then(|h| h.entity(cx).ok());
+        let weak_root = root_entity.as_ref().map(|e| e.downgrade());
+        let core_loop = core.clone();
+
+        // 关窗即存布局：核心部分（面板/标签/模式）+ 停靠区物理布局（dock dump）。
+        // 多窗口（P1-4）之前，窗口只有一个，关闭即写当前布局。
+        //
+        // 这里持有根视图的**强**句柄：窗口关闭时它自己的句柄先被释放，弱引用
+        // 会来不及 upgrade，布局就存不下来（实测过）。
+        let core_save = core.clone();
+        cx.on_window_closed(move |cx, _| {
+            if let Some(root) = &root_entity {
+                let dump = {
+                    let view = root.read(cx);
+                    view.dock.as_ref().and_then(|shell| shell.dump(cx))
+                };
+                let result = core_save
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .save_layout(serde_json::Value::Null, dump);
+                // 存盘失败（只读目录、Web 无文件系统）只记日志，不阻断退出。
+                let mut core = core_save.lock().unwrap_or_else(|p| p.into_inner());
+                match result {
+                    Ok(path) => core.host.log.info(format!("已保存布局 {}", path.display())),
+                    Err(e) => core.host.log.warn(format!("保存布局失败: {e}")),
+                }
+            }
             if cx.windows().is_empty() {
                 cx.quit();
             }
         })
         .detach();
 
-        // 有任务运行时以低频率刷新（进度动画）
-        let weak_root = cx
-            .active_window()
-            .and_then(|w| w.downcast::<RootView>())
-            .and_then(|h| h.entity(cx).ok())
-            .map(|e| e.downgrade());
-        let core_loop = core.clone();
         cx.spawn(async move |cx: &mut gpui::AsyncApp| loop {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(100))

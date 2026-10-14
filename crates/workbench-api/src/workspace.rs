@@ -263,6 +263,10 @@ pub struct LayoutFile {
     /// GUI 前端私有的物理布局（如 egui_tiles 树）。无 GUI 语义，核心不解析。
     #[serde(default)]
     pub ui: Option<serde_json::Value>,
+    /// 停靠区的物理布局（gpui 前端的 `DockArea::dump` 状态：各停靠区的尺寸、
+    /// 分组与标签顺序）。同样无 GUI 语义、核心不解析；恢复时由前端 `load`。
+    #[serde(default)]
+    pub dock: Option<serde_json::Value>,
 }
 
 /// 工作区状态。UI 线程所有。
@@ -585,6 +589,7 @@ impl WorkspaceState {
                 .collect(),
             ribbon_active_tab: Some(self.active_ribbon_tab.clone()),
             ui: None,
+            dock: None,
         }
     }
 

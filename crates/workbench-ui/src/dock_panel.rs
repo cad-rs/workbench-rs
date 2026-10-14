@@ -24,8 +24,8 @@ use gpui::{
 };
 
 use gpui_component::dock::{
-    panel_handle, BasePanel, DockArea as GpuiDockArea, DockLayout, DockPlacement, DockSkin, Panel,
-    PanelControl, PanelEvent,
+    panel_handle, register_panel, BasePanel, DockArea as GpuiDockArea, DockAreaState, DockLayout,
+    DockPlacement, DockSkin, Panel, PanelControl, PanelEvent, PanelInfo, PanelState,
 };
 
 use workbench_api as wb;
@@ -187,6 +187,17 @@ pub(crate) enum PanelRef {
     Empty,
 }
 
+/// The handles every dock panel carries: the model, the frame's input, the
+/// script views, and the presentation mirror. Bundled so creating a panel —
+/// or handing the set to the shell — stays a short call.
+#[derive(Clone)]
+pub(crate) struct PanelCtx {
+    core: SharedCore,
+    frame: SharedFrame,
+    scripts: SharedScripts,
+    mirror: SharedMirror,
+}
+
 /// One model panel/tab, as a dock panel entity.
 pub(crate) struct WbPanel {
     /// Interned dock name (the panel id, or `wb.tab.{instance}`).
@@ -195,10 +206,7 @@ pub(crate) struct WbPanel {
     /// Script panels: the gpui-rhai entry point (read from the registry, fixed
     /// for the panel's lifetime).
     script: Option<String>,
-    core: SharedCore,
-    frame: SharedFrame,
-    scripts: SharedScripts,
-    mirror: SharedMirror,
+    ctx: PanelCtx,
     focus_handle: FocusHandle,
 }
 
@@ -207,20 +215,14 @@ impl WbPanel {
         name: &'static str,
         r: PanelRef,
         script: Option<String>,
-        core: SharedCore,
-        frame: SharedFrame,
-        scripts: SharedScripts,
-        mirror: SharedMirror,
+        ctx: PanelCtx,
         cx: &mut App,
     ) -> Entity<Self> {
         cx.new(|cx| Self {
             name,
             r,
             script,
-            core,
-            frame,
-            scripts,
-            mirror,
+            ctx,
             focus_handle: cx.focus_handle(),
         })
     }
@@ -228,7 +230,7 @@ impl WbPanel {
     /// The panel's title and icon, read live from the model so a renamed panel
     /// or tab updates without a dock rebuild.
     fn model_title(&self) -> (String, Option<String>) {
-        model_title(&self.r, &self.core)
+        model_title(&self.r, &self.ctx.core)
     }
 }
 
@@ -340,12 +342,12 @@ impl BasePanel for WbPanel {
 
     fn set_active(&mut self, active: bool, _: &mut Window, _: &mut Context<Self>) {
         if active {
-            mirror_active(&self.r, &self.core, &self.mirror);
+            mirror_active(&self.r, &self.ctx.core, &self.ctx.mirror);
         }
     }
 
     fn on_removed(&mut self, _: &mut Window, _: &mut Context<Self>) {
-        write_back_removed(&self.r, &self.core, &self.mirror);
+        write_back_removed(&self.r, &self.ctx.core, &self.ctx.mirror);
     }
 }
 
@@ -379,7 +381,7 @@ impl Panel for WbPanel {
 
 impl Render for WbPanel {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let frame = self.frame.borrow().clone();
+        let frame = self.ctx.frame.borrow().clone();
         match &self.r {
             PanelRef::Empty => div()
                 .size_full()
@@ -390,12 +392,12 @@ impl Render for WbPanel {
                 .child(EMPTY_CENTER_TITLE)
                 .into_any_element(),
             PanelRef::Central { instance_id } => {
-                view_canvas(self.core.clone(), frame, SlotKey::Central(*instance_id))
+                view_canvas(self.ctx.core.clone(), frame, SlotKey::Central(*instance_id))
                     .into_any_element()
             }
             PanelRef::Area { panel_id, .. } => match &self.script {
-                Some(_) => self.scripts.borrow().element(panel_id),
-                None => view_canvas(self.core.clone(), frame, SlotKey::Panel(panel_id.clone()))
+                Some(_) => self.ctx.scripts.borrow().element(panel_id),
+                None => view_canvas(self.ctx.core.clone(), frame, SlotKey::Panel(panel_id.clone()))
                     .into_any_element(),
             },
         }
@@ -488,6 +490,45 @@ fn shown_panel(panels: &[String], active: Option<&str>) -> Option<String> {
     }
 }
 
+/// Keep only the leaves of a persisted panel tree this session can rebuild,
+/// and drop the containers that lose all of theirs. Sizes and the active tab
+/// index follow the survivors, so a pruned tree is still internally
+/// consistent (a stack whose size list no longer lines up with its children
+/// could not divide its space).
+fn prune_panel(state: &PanelState, allowed: &HashSet<String>) -> Option<PanelState> {
+    if state.children.is_empty() {
+        return allowed
+            .contains(&state.panel_name)
+            .then(|| state.clone());
+    }
+
+    let sizes = state.info.sizes().cloned().unwrap_or_default();
+    let mut children = Vec::new();
+    let mut kept_sizes = Vec::new();
+    for (ix, child) in state.children.iter().enumerate() {
+        if let Some(pruned) = prune_panel(child, allowed) {
+            children.push(pruned);
+            if let Some(size) = sizes.get(ix) {
+                kept_sizes.push(*size);
+            }
+        }
+    }
+    if children.is_empty() {
+        return None;
+    }
+
+    let mut pruned = state.clone();
+    pruned.children = children;
+    pruned.info = match state.info.axis() {
+        Some(axis) => PanelInfo::stack(kept_sizes, axis),
+        None => match state.info.active_index() {
+            Some(active_ix) => PanelInfo::tabs(active_ix.min(pruned.children.len() - 1)),
+            None => state.info.clone(),
+        },
+    };
+    Some(pruned)
+}
+
 /// What [`wb::DockArea`] placement a side dock maps to (`None` for `Top`,
 /// which this front end does not show).
 fn dock_placement(area: wb::DockArea) -> Option<DockPlacement> {
@@ -504,17 +545,16 @@ fn dock_placement(area: wb::DockArea) -> Option<DockPlacement> {
 pub(crate) struct DockShell {
     area: Entity<GpuiDockArea>,
     /// Dock panel entities by interned name (bounded: registry panels + open
-    /// tabs; pruned to what the model still has).
-    panels: HashMap<&'static str, Entity<WbPanel>>,
+    /// tabs; pruned to what the model still has). Behind a shared cell because
+    /// the `PanelRegistry` builders handed to `set_dock`/`load` look panels up
+    /// through it.
+    panels: Rc<RefCell<HashMap<&'static str, Entity<WbPanel>>>>,
     pushed: HashMap<wb::DockArea, PushedSize>,
     structure: ShellStructure,
     /// Whether the first sync has run. The first one installs every region,
     /// including the empty-centre placeholder.
     installed: bool,
-    core: SharedCore,
-    frame: SharedFrame,
-    scripts: SharedScripts,
-    mirror: SharedMirror,
+    ctx: PanelCtx,
 }
 
 impl DockShell {
@@ -532,14 +572,16 @@ impl DockShell {
             DockSkin::dock_area(DOCK_AREA_ID, Some(DOCK_AREA_VERSION), window, cx);
         Self {
             area,
-            panels: HashMap::new(),
+            panels: Rc::new(RefCell::new(HashMap::new())),
             pushed: HashMap::new(),
             structure: ShellStructure::default(),
             installed: false,
-            core,
-            frame,
-            scripts,
-            mirror,
+            ctx: PanelCtx {
+                core,
+                frame,
+                scripts,
+                mirror,
+            },
         }
     }
 
@@ -551,7 +593,81 @@ impl DockShell {
     /// draws a panel's subtree through gpui's *cached* view path, so a panel
     /// repaints only when its own entity is notified.
     pub(crate) fn panel_weaks(&self) -> Vec<gpui::WeakEntity<WbPanel>> {
-        self.panels.values().map(|entity| entity.downgrade()).collect()
+        self.panels
+            .borrow()
+            .values()
+            .map(|entity| entity.downgrade())
+            .collect()
+    }
+
+    /// The dock's physical layout, as persistence stores it.
+    pub(crate) fn dump(&self, cx: &App) -> Option<serde_json::Value> {
+        serde_json::to_value(self.area.read(cx).dump(cx)).ok()
+    }
+
+    /// Re-establish a persisted layout — the side docks only, and only for the
+    /// panels this session still has.
+    ///
+    /// The centre is rebuilt from the model instead of restored: its panels are
+    /// named `wb.tab.{instance}` and instance ids are runtime numbers, so a
+    /// persisted centre could only come back as placeholder tabs. Side docks
+    /// are keyed by registry panel ids, which are stable across sessions.
+    pub(crate) fn restore(
+        &mut self,
+        saved: DockAreaState,
+        snap: &ShellSnapshot,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let allowed = |snap: &AreaSnapshot| -> HashSet<String> {
+            snap.panels.iter().map(|p| p.id.clone()).collect()
+        };
+        let restore_dock = |dock: Option<gpui_component::dock::DockState>,
+                            area: wb::DockArea|
+         -> Option<gpui_component::dock::DockState> {
+            let dock = dock?;
+            let area_snap = match area {
+                wb::DockArea::Left => &snap.left,
+                wb::DockArea::Right => &snap.right,
+                wb::DockArea::Bottom => &snap.bottom,
+                wb::DockArea::Top => return None,
+            };
+            let pruned = prune_panel(dock.panel(), &allowed(area_snap))?;
+            Some(gpui_component::dock::DockState::new(
+                pruned,
+                dock.placement(),
+                dock.size(),
+                dock.open(),
+            ))
+        };
+
+        let state = DockAreaState {
+            version: saved.version,
+            // Rebuilt from the model on the next sync (see the doc comment).
+            center: PanelState::default(),
+            left_dock: restore_dock(saved.left_dock, wb::DockArea::Left),
+            right_dock: restore_dock(saved.right_dock, wb::DockArea::Right),
+            bottom_dock: restore_dock(saved.bottom_dock, wb::DockArea::Bottom),
+        };
+        if state.left_dock.is_none() && state.right_dock.is_none() && state.bottom_dock.is_none() {
+            return;
+        }
+
+        // The panels the current layout holds are displaced by the load and
+        // told `on_removed`; that is the sync's doing, not the user's.
+        let area = self.area.clone();
+        let loaded = with_removal_suppressed(&self.ctx.mirror, || {
+            area.update(cx, |area, cx| area.load(state, window, cx).is_ok())
+        });
+        if !loaded {
+            // Unreadable state: the model-driven layout from the first sync
+            // stays (never a panic).
+            return;
+        }
+        // The recorded structure stays as the model describes it — the restored
+        // layout is the dock's own business until the model's panel set changes
+        // — except the centre, which is empty until the next sync rebuilds it.
+        self.structure.center.clear();
     }
 
     /// Mirror the model into the dock. Called from the root view's render,
@@ -569,7 +685,7 @@ impl DockShell {
                 wb::DockArea::Bottom => &snap.bottom,
                 wb::DockArea::Top => continue,
             };
-            self.sync_area(area, placement, area_snap, fresh, &mut live, window, cx);
+            self.sync_area(area, placement, area_snap, &mut live, window, cx);
         }
         self.sync_center(snap, fresh, &mut live, window, cx);
         self.installed = true;
@@ -577,7 +693,7 @@ impl DockShell {
         // A panel the model no longer has (closed tab, hidden panel) leaves the
         // dock with the next rebuild; its adapter goes now, so the map cannot
         // grow with every closed tab.
-        self.panels.retain(|name, _| live.contains(name));
+        self.panels.borrow_mut().retain(|name, _| live.contains(name));
     }
 
     fn sync_area(
@@ -585,16 +701,16 @@ impl DockShell {
         area: wb::DockArea,
         placement: DockPlacement,
         snap: &AreaSnapshot,
-        fresh: bool,
         live: &mut HashSet<&'static str>,
         window: &mut Window,
         cx: &mut App,
     ) {
+        let fresh = !self.installed;
         // Script views mount before anything draws them (the pre-dock front
         // end mounted from the root view's render the same way).
         for panel in &snap.panels {
             if let Some(script) = &panel.script {
-                self.scripts
+                self.ctx.scripts
                     .borrow_mut()
                     .mount(&panel.id, script, window, cx);
             }
@@ -605,18 +721,18 @@ impl DockShell {
             // No visible panel: the dock gives up its slot entirely.
             if self.area.read(cx).has_dock(placement) {
                 let area_entity = self.area.clone();
-                with_removal_suppressed(&self.mirror, || {
+                with_removal_suppressed(&self.ctx.mirror, || {
                     area_entity.update(cx, |a, cx| a.remove_dock(placement, window, cx));
                 });
             }
             self.structure.set_row(area, ids);
             self.pushed.remove(&area);
-            self.mirror.borrow_mut().area.remove(&area);
+            self.ctx.mirror.borrow_mut().area.remove(&area);
             return;
         }
 
         let shown = shown_panel(&ids, snap.active.as_deref());
-        let mirrored = self.mirror.borrow().area.get(&area).cloned();
+        let mirrored = self.ctx.mirror.borrow().area.get(&area).cloned();
         if fresh || self.structure.row(area) != ids.as_slice() || mirrored != shown {
             let mut layout = DockLayout::tabs();
             let mut active_ix = 0usize;
@@ -629,11 +745,11 @@ impl DockShell {
             }
             let layout = layout.active_index(active_ix);
             let area_entity = self.area.clone();
-            with_removal_suppressed(&self.mirror, || {
+            with_removal_suppressed(&self.ctx.mirror, || {
                 area_entity.update(cx, |a, cx| a.set_dock(placement, layout, window, cx));
             });
             self.structure.set_row(area, ids);
-            let mut mirror = self.mirror.borrow_mut();
+            let mut mirror = self.ctx.mirror.borrow_mut();
             match shown.as_deref() {
                 Some(id) => {
                     mirror.area.insert(area, id.to_string());
@@ -677,7 +793,7 @@ impl DockShell {
         cx: &mut App,
     ) {
         let active = shown_tab(&snap.tabs, snap.active_tab);
-        let mirrored = self.mirror.borrow().center;
+        let mirrored = self.ctx.mirror.borrow().center;
         if !(fresh || self.structure.center != snap.tabs || mirrored != active) {
             return;
         }
@@ -699,14 +815,44 @@ impl DockShell {
         }
         let layout = layout.active_index(active_ix);
         let area_entity = self.area.clone();
-        with_removal_suppressed(&self.mirror, || {
+        with_removal_suppressed(&self.ctx.mirror, || {
             area_entity.update(cx, |a, cx| a.set_center(layout, window, cx));
         });
         self.structure.center = snap.tabs.clone();
-        self.mirror.borrow_mut().center = active;
+        self.ctx.mirror.borrow_mut().center = active;
     }
 
-    /// The dock panel for one side-dock panel, created on first sight.
+    /// The dock panel registered under `name`, created on first sight.
+    fn panel_for(
+        &mut self,
+        name: &'static str,
+        make: impl FnOnce(&mut App) -> Entity<WbPanel>,
+        live: &mut HashSet<&'static str>,
+        cx: &mut App,
+    ) -> Entity<WbPanel> {
+        live.insert(name);
+        if let Some(existing) = self.panels.borrow().get(name) {
+            return existing.clone();
+        }
+        let entity = make(cx);
+        self.panels.borrow_mut().insert(name, entity.clone());
+        // `DockArea::load` rebuilds panels by name through this registry; the
+        // builder hands back the panel this session already has for that name,
+        // so a restored tree points at the same entities (no churn, and no
+        // placeholder tabs for panels we can build).
+        let map = self.panels.clone();
+        register_panel(cx, name, move |_ctx, _window, _cx| {
+            let entity = map
+                .borrow()
+                .get(name)
+                .cloned()
+                .expect("only names this session registered are ever asked for");
+            panel_handle(entity)
+        });
+        entity
+    }
+
+    /// The dock panel for one side-dock panel.
     fn panel_for_area(
         &mut self,
         area: wb::DockArea,
@@ -715,28 +861,21 @@ impl DockShell {
         cx: &mut App,
     ) -> Entity<WbPanel> {
         let name = intern(&panel.id);
-        live.insert(name);
-        if let Some(existing) = self.panels.get(name) {
-            return existing.clone();
-        }
-        let entity = WbPanel::new(
+        let r = PanelRef::Area {
+            area,
+            panel_id: panel.id.clone(),
+        };
+        let script = panel.script.clone();
+        let ctx = self.ctx.clone();
+        self.panel_for(
             name,
-            PanelRef::Area {
-                area,
-                panel_id: panel.id.clone(),
-            },
-            panel.script.clone(),
-            self.core.clone(),
-            self.frame.clone(),
-            self.scripts.clone(),
-            self.mirror.clone(),
+            |cx| WbPanel::new(name, r, script, ctx, cx),
+            live,
             cx,
-        );
-        self.panels.insert(name, entity.clone());
-        entity
+        )
     }
 
-    /// The dock panel for one central tab, created on first sight.
+    /// The dock panel for one central tab.
     fn panel_for_tab(
         &mut self,
         instance_id: u64,
@@ -744,43 +883,27 @@ impl DockShell {
         cx: &mut App,
     ) -> Entity<WbPanel> {
         let name = intern(&format!("wb.tab.{instance_id}"));
-        live.insert(name);
-        if let Some(existing) = self.panels.get(name) {
-            return existing.clone();
-        }
-        let entity = WbPanel::new(
+        let ctx = self.ctx.clone();
+        self.panel_for(
             name,
-            PanelRef::Central { instance_id },
-            None,
-            self.core.clone(),
-            self.frame.clone(),
-            self.scripts.clone(),
-            self.mirror.clone(),
+            |cx| {
+                WbPanel::new(name, PanelRef::Central { instance_id }, None, ctx, cx)
+            },
+            live,
             cx,
-        );
-        self.panels.insert(name, entity.clone());
-        entity
+        )
     }
 
-    /// The placeholder panel for an empty centre (created on first sight).
+    /// The placeholder panel for an empty centre.
     fn empty_panel(&mut self, live: &mut HashSet<&'static str>, cx: &mut App) -> Entity<WbPanel> {
         let name = intern("wb.empty");
-        live.insert(name);
-        if let Some(existing) = self.panels.get(name) {
-            return existing.clone();
-        }
-        let entity = WbPanel::new(
+        let ctx = self.ctx.clone();
+        self.panel_for(
             name,
-            PanelRef::Empty,
-            None,
-            self.core.clone(),
-            self.frame.clone(),
-            self.scripts.clone(),
-            self.mirror.clone(),
+            |cx| WbPanel::new(name, PanelRef::Empty, None, ctx, cx),
+            live,
             cx,
-        );
-        self.panels.insert(name, entity.clone());
-        entity
+        )
     }
 }
 
@@ -812,8 +935,7 @@ mod tests {
     }
 
     /// A runtime with one open tab, and the shared cells a panel carries.
-    fn tabbed_core() -> (SharedCore, SharedMirror, u64) {
-        let runtime = workbench_core::WorkbenchAppBuilder::new("test.dock.writeback", "Writeback")
+    fn tabbed_core() -> (SharedCore, SharedMirror, u64) {        let runtime = workbench_core::WorkbenchAppBuilder::new("test.dock.writeback", "Writeback")
             .with_workbench(wb_example::ExampleWorkbench)
             .open_on_start("example.welcome", false)
             .build()
@@ -945,6 +1067,95 @@ mod tests {
         let core = core.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(core.host.ws.tabs.len(), tabs_before);
         assert_eq!(core.host.ws.active_tab().map(|t| t.instance_id.0), Some(1));
+    }
+
+    // ---- 持久化：恢复前的剪枝（只留本会话能重建的面板） ----
+
+    fn allowed(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    fn leaf(name: &str) -> PanelState {
+        PanelState::new(name)
+    }
+
+    fn tabs(active_ix: usize, children: Vec<PanelState>) -> PanelState {
+        let mut state = PanelState::new("TabPanel");
+        for child in children {
+            state.add_child(child);
+        }
+        state.info = PanelInfo::tabs(active_ix);
+        state
+    }
+
+    fn stack(sizes: Vec<f32>, children: Vec<PanelState>) -> PanelState {
+        let mut state = PanelState::new("StackPanel");
+        for child in children {
+            state.add_child(child);
+        }
+        state.info = PanelInfo::stack(
+            sizes.into_iter().map(gpui::px).collect(),
+            gpui::Axis::Horizontal,
+        );
+        state
+    }
+
+    fn leaf_names(state: &PanelState) -> Vec<String> {
+        if state.children.is_empty() {
+            return vec![state.panel_name.clone()];
+        }
+        state
+            .children
+            .iter()
+            .flat_map(leaf_names)
+            .collect::<Vec<String>>()
+    }
+
+    /// A persisted group whose panel this session no longer has comes back
+    /// without it — and its active tab index follows (a stale index would
+    /// point past the end of the surviving list).
+    #[test]
+    fn restore_prunes_panels_this_session_does_not_have() {
+        let saved = tabs(
+            2,
+            vec![leaf("tasks"), leaf("properties"), leaf("ghost")],
+        );
+        let pruned = prune_panel(&saved, &allowed(&["tasks", "properties"])).expect("kept");
+
+        assert_eq!(leaf_names(&pruned), vec!["tasks", "properties"]);
+        assert_eq!(pruned.info.active_index(), Some(1));
+    }
+
+    /// A container that loses all of its panels goes with them, and the sizes
+    /// of a split follow the survivors — a stack whose size list no longer
+    /// lines up with its children could not divide its space.
+    #[test]
+    fn restore_drops_empty_containers_and_their_sizes() {
+        let saved = stack(
+            vec![240.0, 480.0],
+            vec![tabs(0, vec![leaf("ghost")]), tabs(0, vec![leaf("tasks")])],
+        );
+        let pruned = prune_panel(&saved, &allowed(&["tasks"])).expect("kept");
+
+        assert_eq!(leaf_names(&pruned), vec!["tasks"]);
+        assert_eq!(pruned.info.sizes(), Some(&vec![gpui::px(480.0)]));
+    }
+
+    /// A saved layout naming nothing this session has is dropped whole: the
+    /// model-driven layout from the first sync stays.
+    #[test]
+    fn a_layout_with_no_recognisable_panel_prunes_to_nothing() {
+        let saved = tabs(0, vec![leaf("ghost")]);
+        assert!(prune_panel(&saved, &HashSet::new()).is_none());
+    }
+
+    /// Pruning keeps the tree it was given when nothing needs dropping (the
+    /// ordinary restart case).
+    #[test]
+    fn restore_keeps_a_fully_recognised_tree() {
+        let saved = tabs(1, vec![leaf("tasks"), leaf("properties")]);
+        let pruned = prune_panel(&saved, &allowed(&["tasks", "properties"])).expect("kept");
+        assert_eq!(pruned, saved);
     }
 
     /// The panel each region displays: the model's active one when it is among

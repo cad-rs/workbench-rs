@@ -395,14 +395,21 @@ fn 布局_核心保存加载往返() {
         .with_layout_path(dir.join("roundtrip.json"))
         .build()
         .unwrap();
-    a.save_layout(serde_json::json!({ "adapter": "test" })).unwrap();
+    a.save_layout(
+        serde_json::json!({ "adapter": "test" }),
+        Some(serde_json::json!({ "center": { "panel_name": "StackPanel" } })),
+    )
+    .unwrap();
     let mut b = builder()
         .with_layout_path(dir.join("roundtrip.json"))
         .build()
         .unwrap();
-    let ui = b.load_layout();
-    assert!(ui.is_some());
-    assert_eq!(ui.unwrap()["adapter"], "test");
+    let restored = b.load_layout().expect("layout restored");
+    assert!(restored.ui.is_some());
+    assert_eq!(restored.ui.unwrap()["adapter"], "test");
+    // The dock blob rides along untouched: the core never parses it.
+    let dock = restored.dock.expect("dock layout restored");
+    assert_eq!(dock["center"]["panel_name"], "StackPanel");
 }
 
 // ===================== 阶段 2：异步命令与统一调用结果 =====================

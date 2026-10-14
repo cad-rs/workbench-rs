@@ -570,10 +570,16 @@ impl AppRuntime {
 
     // ---- 布局持久化（design.md §6.5） ----
 
-    /// 保存布局；`ui` 为 GUI 前端私有物理布局数据。
-    pub fn save_layout(&self, ui: serde_json::Value) -> Result<PathBuf, String> {
+    /// 保存布局；`ui` 为 GUI 前端私有物理布局数据，`dock` 为停靠区物理布局
+    /// （前端 `DockArea::dump` 的序列化结果）。
+    pub fn save_layout(
+        &self,
+        ui: serde_json::Value,
+        dock: Option<serde_json::Value>,
+    ) -> Result<PathBuf, String> {
         let mut file = self.host.ws.save_layout();
         file.ui = Some(ui);
+        file.dock = dock;
         let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         if let Some(dir) = self.layout_path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -585,7 +591,7 @@ impl AppRuntime {
 
     /// 尝试加载布局：应用核心部分（面板/标签/模式），返回前端私有部分供适配器恢复。
     /// 未注册的面板/视图被跳过并记录诊断（验收 #9）。
-    pub fn load_layout(&mut self) -> Option<serde_json::Value> {
+    pub fn load_layout(&mut self) -> Option<RestoredLayout> {
         let text = std::fs::read_to_string(&self.layout_path).ok()?;
         let file: api::LayoutFile = match serde_json::from_str(&text) {
             Ok(f) => f,
@@ -608,8 +614,19 @@ impl AppRuntime {
             }
         }
         self.host.log.info("已恢复上次的工作区布局");
-        file.ui
+        Some(RestoredLayout {
+            ui: file.ui,
+            dock: file.dock,
+        })
     }
+}
+
+/// [`AppRuntime::load_layout`] 恢复出的前端私有布局部分。
+pub struct RestoredLayout {
+    /// GUI 前端私有物理布局（历史字段；前端自行解释）。
+    pub ui: Option<serde_json::Value>,
+    /// 停靠区物理布局（gpui 前端交给 `DockArea::load`）。
+    pub dock: Option<serde_json::Value>,
 }
 
 impl api::AppServices for AppRuntime {
