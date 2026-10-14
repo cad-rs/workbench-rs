@@ -44,6 +44,7 @@ impl wb::Workbench for PerfWb {
                     .map_err(|e| e.to_string())
             },
             open_view: None,
+            undo_hooks: None,
         });
     }
 }

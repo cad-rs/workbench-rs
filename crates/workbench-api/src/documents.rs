@@ -35,6 +35,21 @@ pub type DocumentSerializeFn = fn(&dyn DocumentContent) -> Result<Vec<u8>, Strin
 /// 文档反序列化函数（由领域模块提供）。
 pub type DocumentDeserializeFn = fn(&[u8]) -> Result<Box<dyn DocumentContent>, String>;
 
+/// 委托式撤销钩子（由领域模块提供；`DocumentTypeDef::undo_hooks`）。
+///
+/// 提供后平台不再维护快照历史（全量克隆对参数化文档过重），
+/// 撤销/重做直接转发领域内容自带的命令式历史。`commit`/`edit` 的
+/// `undoable` 参数对委托类型不生效——可撤销性由领域内容自行管理。
+#[derive(Clone, Copy)]
+pub struct UndoHooks {
+    /// 撤销一步；返回操作标签。
+    pub undo: fn(&mut dyn DocumentContent) -> Result<String, String>,
+    /// 重做一步；返回操作标签。
+    pub redo: fn(&mut dyn DocumentContent) -> Result<String, String>,
+    pub can_undo: fn(&dyn DocumentContent) -> bool,
+    pub can_redo: fn(&dyn DocumentContent) -> bool,
+}
+
 /// 文档类型注册信息：编解码由领域模块提供，平台不定义领域 schema。
 pub struct DocumentTypeDef {
     pub id: DocumentTypeId,
@@ -46,6 +61,8 @@ pub struct DocumentTypeDef {
     pub deserialize: DocumentDeserializeFn,
     /// 新建/打开文档时建议打开的中央视图类型（可选）。
     pub open_view: Option<crate::ids::ViewTypeId>,
+    /// 委托式撤销钩子（None = 平台快照式撤销，见 [`UndoHooks`]）。
+    pub undo_hooks: Option<UndoHooks>,
 }
 
 /// 撤销历史条目（快照式）。
@@ -190,7 +207,8 @@ impl DocumentService {
     }
 
     /// 在事务边界提交一份新的文档内容。
-    /// `undoable=false` 表示明确声明不可撤销的操作（design.md §12.2）。
+    /// `undoable=false` 表示明确声明不可撤销的操作（design.md §12.2）；
+    /// 委托式撤销类型（`undo_hooks`）不做快照记录，该参数不生效。
     pub fn commit(
         &mut self,
         id: DocumentId,
@@ -198,24 +216,27 @@ impl DocumentService {
         undoable: bool,
         new_content: Box<dyn DocumentContent>,
     ) -> Result<u64, String> {
+        let delegated = self.undo_hooks_of(id).is_some();
         let doc = self.get_mut(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
-        if undoable {
-            let before = doc.content.dup();
-            doc.history.truncate(doc.history_pos);
-            doc.history.push(UndoEntry {
-                label: label.to_string(),
-                before,
-                after: new_content.dup(),
-            });
-            if doc.history.len() > Document::MAX_HISTORY {
-                doc.history.remove(0);
+        if !delegated {
+            if undoable {
+                let before = doc.content.dup();
+                doc.history.truncate(doc.history_pos);
+                doc.history.push(UndoEntry {
+                    label: label.to_string(),
+                    before,
+                    after: new_content.dup(),
+                });
+                if doc.history.len() > Document::MAX_HISTORY {
+                    doc.history.remove(0);
+                } else {
+                    doc.history_pos += 1;
+                }
             } else {
-                doc.history_pos += 1;
+                // 不可撤销操作使既有历史失效（避免撤销回不一致状态）。
+                doc.history.clear();
+                doc.history_pos = 0;
             }
-        } else {
-            // 不可撤销操作使既有历史失效（避免撤销回不一致状态）。
-            doc.history.clear();
-            doc.history_pos = 0;
         }
         doc.content = new_content;
         doc.dirty = true;
@@ -224,6 +245,7 @@ impl DocumentService {
     }
 
     /// 类型化编辑：修改前做快照，按域模块逻辑原地修改后登记历史。
+    /// 委托式撤销类型跳过前后快照（全量克隆对参数化文档过重）。
     pub fn edit<T: DocumentContent>(
         &mut self,
         id: DocumentId,
@@ -231,6 +253,7 @@ impl DocumentService {
         undoable: bool,
         f: impl FnOnce(&mut T),
     ) -> Result<u64, String> {
+        let delegated = self.undo_hooks_of(id).is_some();
         let type_ok = self
             .get(id)
             .ok_or_else(|| format!("文档不存在: {id:?}"))?
@@ -244,7 +267,7 @@ impl DocumentService {
                 std::any::type_name::<T>()
             ));
         }
-        let before = self.get(id).unwrap().content.dup();
+        let before = (!delegated).then(|| self.get(id).unwrap().content.dup());
         {
             let doc = self.get_mut(id).unwrap();
             let typed = doc
@@ -254,24 +277,27 @@ impl DocumentService {
                 .expect("类型已校验");
             f(typed);
         }
-        let after = self.get(id).unwrap().content.dup();
-        let doc = self.get_mut(id).unwrap();
-        if undoable {
-            doc.history.truncate(doc.history_pos);
-            doc.history.push(UndoEntry {
-                label: label.to_string(),
-                before,
-                after,
-            });
-            if doc.history.len() > Document::MAX_HISTORY {
-                doc.history.remove(0);
+        if let Some(before) = before {
+            let after = self.get(id).unwrap().content.dup();
+            let doc = self.get_mut(id).unwrap();
+            if undoable {
+                doc.history.truncate(doc.history_pos);
+                doc.history.push(UndoEntry {
+                    label: label.to_string(),
+                    before,
+                    after,
+                });
+                if doc.history.len() > Document::MAX_HISTORY {
+                    doc.history.remove(0);
+                } else {
+                    doc.history_pos += 1;
+                }
             } else {
-                doc.history_pos += 1;
+                doc.history.clear();
+                doc.history_pos = 0;
             }
-        } else {
-            doc.history.clear();
-            doc.history_pos = 0;
         }
+        let doc = self.get_mut(id).unwrap();
         doc.dirty = true;
         doc.revision += 1;
         Ok(doc.revision)
@@ -294,14 +320,39 @@ impl DocumentService {
 
     // ---- 撤销 / 重做 ----
 
+    /// 文档类型的委托式撤销钩子（None = 平台快照式撤销）。
+    fn undo_hooks_of(&self, id: DocumentId) -> Option<UndoHooks> {
+        let doc = self.get(id)?;
+        self.type_of(&doc.type_id)?.undo_hooks
+    }
+
     pub fn can_undo(&self, id: DocumentId) -> bool {
+        if let Some(hooks) = self.undo_hooks_of(id) {
+            return self
+                .get(id)
+                .map(|d| (hooks.can_undo)(d.content.as_ref()))
+                .unwrap_or(false);
+        }
         self.get(id).map(|d| d.can_undo()).unwrap_or(false)
     }
     pub fn can_redo(&self, id: DocumentId) -> bool {
+        if let Some(hooks) = self.undo_hooks_of(id) {
+            return self
+                .get(id)
+                .map(|d| (hooks.can_redo)(d.content.as_ref()))
+                .unwrap_or(false);
+        }
         self.get(id).map(|d| d.can_redo()).unwrap_or(false)
     }
 
     pub fn undo(&mut self, id: DocumentId) -> Result<String, String> {
+        if let Some(hooks) = self.undo_hooks_of(id) {
+            let doc = self.get_mut(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
+            let label = (hooks.undo)(doc.content.as_mut())?;
+            doc.dirty = true;
+            doc.revision += 1;
+            return Ok(label);
+        }
         let doc = self.get_mut(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
         if !doc.can_undo() {
             return Err("没有可撤销的操作".to_string());
@@ -315,6 +366,13 @@ impl DocumentService {
     }
 
     pub fn redo(&mut self, id: DocumentId) -> Result<String, String> {
+        if let Some(hooks) = self.undo_hooks_of(id) {
+            let doc = self.get_mut(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
+            let label = (hooks.redo)(doc.content.as_mut())?;
+            doc.dirty = true;
+            doc.revision += 1;
+            return Ok(label);
+        }
         let doc = self.get_mut(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
         if !doc.can_redo() {
             return Err("没有可重做的操作".to_string());

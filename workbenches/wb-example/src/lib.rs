@@ -31,6 +31,7 @@ impl wb::Workbench for ExampleWorkbench {
             serialize: shapes::serialize,
             deserialize: shapes::deserialize,
             open_view: Some(wb::ViewTypeId::new("example.canvas")),
+            undo_hooks: None,
         });
 
         // ---- 中央视图 ----

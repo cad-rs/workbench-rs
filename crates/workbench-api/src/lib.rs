@@ -41,7 +41,7 @@ pub use command::{
     CommandCtx, CommandDef, CommandExecution, CommandInvocation, CommandKind, CommandResult,
     CtxSnapshot, DocSummary, Hotkey, InvocationRecord, InvocationStatus, KeyCode, SyncHandler,
 };
-pub use documents::{Document, DocumentContent, DocumentService, DocumentTypeDef};
+pub use documents::{Document, DocumentContent, DocumentService, DocumentTypeDef, UndoHooks};
 pub use geo::{Color, Point, Rect, Size};
 pub use ids::{
     CommandId, DocumentId, DocumentTypeId, PanelId, StableId, TabInstanceId, TaskId, ToolbarGroupId,

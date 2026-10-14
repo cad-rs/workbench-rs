@@ -556,8 +556,8 @@ impl AppRuntime {
                 title: d.title.clone(),
                 dirty: d.dirty,
                 revision: d.revision,
-                can_undo: d.can_undo(),
-                can_redo: d.can_redo(),
+                can_undo: self.host.docs.can_undo(id),
+                can_redo: self.host.docs.can_redo(id),
             })
         });
         let active_view_type = self.host.ws.active_tab().map(|t| t.type_id.0.clone());

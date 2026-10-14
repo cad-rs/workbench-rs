@@ -161,6 +161,7 @@ fn 文档_编辑撤销重做与修订号() {
                     .map_err(|e| e.to_string())
             },
             open_view: None,
+            undo_hooks: None,
         })
         .unwrap();
     let id = a.host.docs.create(&wb::DocumentTypeId::new("test.doc"), "d").unwrap();
@@ -180,6 +181,102 @@ fn 文档_编辑撤销重做与修订号() {
     assert!(!a.host.docs.can_undo(id));
 }
 
+// ---- 委托式撤销（领域侧自管历史，平台不记快照） ----
+
+/// 测试用委托文档：命令式撤销栈。
+#[derive(Clone, Default)]
+struct DelegatedDoc {
+    value: i32,
+    undo_stack: Vec<i32>,
+    redo_stack: Vec<i32>,
+}
+
+impl DelegatedDoc {
+    fn apply(&mut self, delta: i32) {
+        self.undo_stack.push(self.value);
+        self.redo_stack.clear();
+        self.value += delta;
+    }
+}
+
+fn delegated_doc(c: &dyn wb::DocumentContent) -> &DelegatedDoc {
+    c.as_any().downcast_ref::<DelegatedDoc>().unwrap()
+}
+
+fn delegated_doc_mut(c: &mut dyn wb::DocumentContent) -> &mut DelegatedDoc {
+    c.as_any_mut().downcast_mut::<DelegatedDoc>().unwrap()
+}
+
+fn delegated_undo(c: &mut dyn wb::DocumentContent) -> Result<String, String> {
+    let d = delegated_doc_mut(c);
+    let prev = d.undo_stack.pop().ok_or("没有可撤销的操作")?;
+    d.redo_stack.push(d.value);
+    d.value = prev;
+    Ok("委托撤销".to_string())
+}
+
+fn delegated_redo(c: &mut dyn wb::DocumentContent) -> Result<String, String> {
+    let d = delegated_doc_mut(c);
+    let next = d.redo_stack.pop().ok_or("没有可重做的操作")?;
+    d.undo_stack.push(d.value);
+    d.value = next;
+    Ok("委托重做".to_string())
+}
+
+#[test]
+fn 文档_委托式撤销() {
+    let mut a = app();
+    a.frame_tick(0.0);
+    a.host
+        .docs
+        .register_type(wb::DocumentTypeDef {
+            id: wb::DocumentTypeId::new("test.delegated"),
+            title: "委托文档".into(),
+            extensions: vec!["tdel".into()],
+            create_default: || Box::new(DelegatedDoc::default()),
+            serialize: |c| {
+                serde_json::to_vec(&delegated_doc(c).value).map_err(|e| e.to_string())
+            },
+            deserialize: |b| {
+                let value: i32 = serde_json::from_slice(b).map_err(|e| e.to_string())?;
+                Ok(Box::new(DelegatedDoc {
+                    value,
+                    ..Default::default()
+                }))
+            },
+            open_view: None,
+            undo_hooks: Some(wb::UndoHooks {
+                undo: delegated_undo,
+                redo: delegated_redo,
+                can_undo: |c| !delegated_doc(c).undo_stack.is_empty(),
+                can_redo: |c| !delegated_doc(c).redo_stack.is_empty(),
+            }),
+        })
+        .unwrap();
+    let id = a
+        .host
+        .docs
+        .create(&wb::DocumentTypeId::new("test.delegated"), "d")
+        .unwrap();
+    a.host
+        .docs
+        .edit::<DelegatedDoc>(id, "加值", true, |d| d.apply(5))
+        .unwrap();
+    a.host
+        .docs
+        .edit::<DelegatedDoc>(id, "加值", true, |d| d.apply(7))
+        .unwrap();
+    assert_eq!(a.host.docs.read::<DelegatedDoc, i32>(id, |d| d.value), Some(12));
+    // 平台未记快照历史（可见历史标签为空），撤销/重做走领域钩子
+    assert!(a.host.docs.get(id).unwrap().last_action_label().is_none());
+    assert!(a.host.docs.can_undo(id));
+    a.host.docs.undo(id).unwrap();
+    assert_eq!(a.host.docs.read::<DelegatedDoc, i32>(id, |d| d.value), Some(5));
+    assert!(a.host.docs.can_redo(id));
+    a.host.docs.redo(id).unwrap();
+    assert_eq!(a.host.docs.read::<DelegatedDoc, i32>(id, |d| d.value), Some(12));
+}
+
 #[test]
 fn 文档_后台提交版本校验() {
     let mut a = app();
@@ -194,6 +291,7 @@ fn 文档_后台提交版本校验() {
             serialize: |_c| Ok(vec![]),
             deserialize: |_b| Ok(Box::new(0u32)),
             open_view: None,
+            undo_hooks: None,
         })
         .unwrap();
     let id = a.host.docs.create(&wb::DocumentTypeId::new("test.doc2"), "d").unwrap();
@@ -466,6 +564,7 @@ fn 阶段2_文档修订号查询() {
             serialize: |_| Ok(vec![]),
             deserialize: |_| Ok(Box::new(0u32)),
             open_view: None,
+            undo_hooks: None,
         })
         .unwrap();
     let id = a.host.docs.create(&wb::DocumentTypeId::new("t.doc"), "d").unwrap();
