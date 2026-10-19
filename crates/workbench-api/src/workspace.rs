@@ -30,22 +30,125 @@ impl DockArea {
     }
 }
 
-// ---- 工具栏（RibbonBar 的简化替身：Group → Items，与 Ribbon 同构，升级只需加 Tab 维度）----
+// ---- 工具栏（RibbonBar：Tab → Group → Items，稳定 ID + 命令绑定 + 按钮形态，ribbon-bar.md §2.4/§6）----
 
-#[derive(Clone, Debug)]
+/// Ribbon 条目形态（ribbon-bar.md §2.4）。默认（`Default` 与 serde）为
+/// [`RibbonItemKind::Command`]，旧数据与旧注册代码零改动兼容。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum RibbonItemKind {
+    /// 普通命令按钮：点击执行命令（默认形态，等价现状）。
+    Command,
+    /// 开关按钮：点击只发命令，checked 态由命令系统查询（`is_checked`）。
+    Toggle,
+    /// 分裂按钮：主区执行默认命令，箭头区弹出子命令菜单。
+    Split {
+        /// 下拉子命令条目。
+        items: Vec<ToolbarItem>,
+    },
+    /// 纯菜单按钮：整体只弹出菜单，不直接执行。
+    Menu {
+        /// 菜单条目。
+        items: Vec<ToolbarItem>,
+    },
+    /// 选择框（select-only）：当前值与选项由命令系统查询（`combo_state`），
+    /// 选中执行命令并经 [`CommandArgs::value`](crate::command::CommandArgs) 带值传入。
+    Combo,
+}
+
+impl Default for RibbonItemKind {
+    fn default() -> Self {
+        RibbonItemKind::Command
+    }
+}
+
+/// Ribbon 条目尺寸档（ribbon-bar.md §2.2）。默认（`Default` 与 serde）为
+/// [`ItemSize::Small`]（与现状视觉最接近）。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ItemSize {
+    /// 大按钮：24px 图标上置 + 标签下置，独占一列。
+    Large,
+    /// 小按钮：16px 图标 + 标签同行（默认档）。
+    Small,
+    /// 仅图标：无标签（QAT 与图标自明命令；图标缺失时回退标签首字占位）。
+    Icon,
+}
+
+impl Default for ItemSize {
+    fn default() -> Self {
+        ItemSize::Small
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ToolbarItem {
     /// 绑定的命令稳定 ID。
     pub command: crate::ids::CommandId,
     /// 显示文本；None 时回退到命令标题。
     pub label: Option<String>,
+    /// 按钮形态；缺省为 [`RibbonItemKind::Command`]（向后兼容）。
+    #[serde(default)]
+    pub kind: RibbonItemKind,
+    /// 尺寸档；缺省为 [`ItemSize::Small`]（向后兼容）。
+    #[serde(default)]
+    pub size: ItemSize,
+    /// Combo 声明宽度（逻辑像素）；None 时用组件默认宽度。
+    #[serde(default)]
+    pub width: Option<f32>,
 }
 
 impl ToolbarItem {
     pub fn command(command: impl Into<crate::ids::CommandId>) -> Self {
-        Self { command: command.into(), label: None }
+        Self {
+            command: command.into(),
+            label: None,
+            kind: RibbonItemKind::Command,
+            size: ItemSize::Small,
+            width: None,
+        }
     }
     pub fn labeled(command: impl Into<crate::ids::CommandId>, label: impl Into<String>) -> Self {
-        Self { command: command.into(), label: Some(label.into()) }
+        Self {
+            command: command.into(),
+            label: Some(label.into()),
+            kind: RibbonItemKind::Command,
+            size: ItemSize::Small,
+            width: None,
+        }
+    }
+    /// Toggle 形态（checked 态由命令系统查询）。
+    pub fn toggle(mut self) -> Self {
+        self.kind = RibbonItemKind::Toggle;
+        self
+    }
+    /// Split 形态：主按钮执行默认命令，箭头区弹出 `items` 子命令菜单。
+    pub fn split(mut self, items: Vec<ToolbarItem>) -> Self {
+        self.kind = RibbonItemKind::Split { items };
+        self
+    }
+    /// Menu 形态：整体弹出 `items` 菜单，不直接执行。
+    pub fn menu(mut self, items: Vec<ToolbarItem>) -> Self {
+        self.kind = RibbonItemKind::Menu { items };
+        self
+    }
+    /// Combo 形态：选项/当前值由命令系统查询（`combo_state`）。
+    pub fn combo(mut self) -> Self {
+        self.kind = RibbonItemKind::Combo;
+        self
+    }
+    /// 大按钮档。
+    pub fn large(mut self) -> Self {
+        self.size = ItemSize::Large;
+        self
+    }
+    /// 仅图标档（无标签）。
+    pub fn icon_only(mut self) -> Self {
+        self.size = ItemSize::Icon;
+        self
+    }
+    /// 声明宽度（Combo 选择框等；逻辑像素）。
+    pub fn width(mut self, w: f32) -> Self {
+        self.width = Some(w);
+        self
     }
 }
 
@@ -205,6 +308,9 @@ pub struct RibbonTab {
     pub groups: Vec<ToolbarGroup>,
     /// 贡献来源（Workbench/插件 ID）。
     pub source: Option<String>,
+    /// 上下文标记（ribbon-bar.md §4.7）：空 = 常驻 Tab；
+    /// 含当前 work_mode 名时该模式下可见（渲染层过滤）。
+    pub contexts: Vec<String>,
 }
 
 impl RibbonTab {
@@ -214,6 +320,7 @@ impl RibbonTab {
             title: title.into(),
             groups: Vec::new(),
             source: None,
+            contexts: Vec::new(),
         }
     }
     pub fn from_source(mut self, source: impl Into<String>) -> Self {
@@ -260,6 +367,14 @@ pub struct LayoutFile {
     /// 活动 Ribbon Tab（稳定 ID；旧布局文件无此字段时回落首个 Tab）。
     #[serde(default)]
     pub ribbon_active_tab: Option<String>,
+    /// Ribbon 折叠态（ribbon-bar.md §4.1）；None = 未记录。
+    /// 折叠态持久化由前端 bridge 接线（后续里程碑），核心不消费。
+    #[serde(default)]
+    pub ribbon_collapsed: Option<bool>,
+    /// Ribbon 空间不足策略（ribbon-bar.md §4.5）："scroll"（默认）| "collapse"；
+    /// None = 未记录，核心不消费。
+    #[serde(default)]
+    pub ribbon_overflow: Option<String>,
     /// GUI 前端私有的物理布局（如 egui_tiles 树）。无 GUI 语义，核心不解析。
     #[serde(default)]
     pub ui: Option<serde_json::Value>,
@@ -275,6 +390,9 @@ pub struct WorkspaceState {
     pub ribbon: Vec<RibbonTab>,
     /// 活动 Ribbon Tab ID（持久化）。
     pub active_ribbon_tab: String,
+    /// QAT 快速访问工具条（ribbon-bar.md §4.1）：产品静态集，复用 [`ToolbarItem`]
+    /// （渲染取 Icon 档），折叠态仍可见。用户自定义增删与持久化二期。
+    pub qat: Vec<ToolbarItem>,
     pub panels: Vec<PanelSlot>,
     pub tabs: Vec<TabSlot>,
     pub active_tab: usize,
@@ -294,6 +412,7 @@ impl WorkspaceState {
         Self {
             ribbon: Vec::new(),
             active_ribbon_tab: String::new(),
+            qat: Vec::new(),
             panels: Vec::new(),
             tabs: Vec::new(),
             active_tab: 0,
@@ -588,6 +707,9 @@ impl WorkspaceState {
                 .map(|(a, p)| (*a, p.0.clone()))
                 .collect(),
             ribbon_active_tab: Some(self.active_ribbon_tab.clone()),
+            // 折叠态/空间策略持久化是后续里程碑（前端 bridge 负责接线）
+            ribbon_collapsed: None,
+            ribbon_overflow: None,
             ui: None,
             dock: None,
         }

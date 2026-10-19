@@ -37,7 +37,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use assets::{AssetSource, ChainedAssets, StaticAssets};
 pub use asyncrt::sleep;
 pub use command::{
-    AsyncJob, AsyncJobFactory, AsyncSpec, AsyncStarter, BackgroundStarter, CommandArgs,
+    AsyncJob, AsyncJobFactory, AsyncSpec, AsyncStarter, BackgroundStarter, ComboState, CommandArgs,
     CommandCtx, CommandDef, CommandExecution, CommandInvocation, CommandKind, CommandResult,
     CtxSnapshot, DocSummary, Hotkey, InvocationRecord, InvocationStatus, KeyCode, SyncHandler,
 };
@@ -59,6 +59,6 @@ pub use tasks::{
 pub use view::{ViewCtx, ViewInput, ViewInstance};
 pub use workbench::{boxed, Workbench};
 pub use workspace::{
-    DockArea, LayoutFile, PanelDef, PanelSlot, RibbonTab, SavedPanel, SavedTab, TabSlot,
-    ToolbarGroup, ToolbarItem, ViewDef, ViewFactory, WorkspaceState,
+    DockArea, ItemSize, LayoutFile, PanelDef, PanelSlot, RibbonItemKind, RibbonTab, SavedPanel,
+    SavedTab, TabSlot, ToolbarGroup, ToolbarItem, ViewDef, ViewFactory, WorkspaceState,
 };

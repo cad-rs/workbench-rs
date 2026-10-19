@@ -7,7 +7,7 @@ use std::any::{Any, TypeId};
 use crate::command::CommandDef;
 use crate::documents::DocumentTypeDef;
 use crate::ids::WorkbenchId;
-use crate::workspace::{PanelDef, ToolbarGroup, ViewDef};
+use crate::workspace::{PanelDef, ToolbarGroup, ToolbarItem, ViewDef};
 
 /// 注册表：产品装配阶段由 Workbench.init 填充，运行期只读。
 #[derive(Default)]
@@ -15,6 +15,9 @@ pub struct Registry {
     pub commands: Vec<CommandDef>,
     pub toolbar: Vec<ToolbarGroup>,
     pub ribbon: Vec<crate::workspace::RibbonTab>,
+    /// QAT 快速访问（产品静态集，ribbon-bar.md §4.1）：装配期暂存，
+    /// build 时转入 [`WorkspaceState::qat`](crate::workspace::WorkspaceState)。
+    pub qat: Vec<ToolbarItem>,
     pub panels: Vec<PanelDef>,
     pub views: Vec<ViewDef>,
     pub doc_types: Vec<DocumentTypeDef>,
@@ -127,6 +130,12 @@ impl Registry {
         } else {
             self.ribbon.push(tab);
         }
+    }
+
+    /// 把命令加入 QAT 快速访问集（产品静态集，ribbon-bar.md §4.1）：
+    /// 渲染为 Tab 条内 Icon 档小按钮，折叠态仍可见。重复加入不去重（静态装配期声明）。
+    pub fn add_qat_command(&mut self, cmd: impl Into<crate::ids::CommandId>) {
+        self.qat.push(ToolbarItem::command(cmd));
     }
 
     // ---- 面板 / 视图 / 文档类型 ----

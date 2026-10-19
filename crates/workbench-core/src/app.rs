@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use workbench_api as api;
 use api::{
-    CommandArgs, CommandCtx, CommandExecution, CommandInvocation, CommandKind, CommandResult,
-    CtxSnapshot, DocSummary, Hotkey, InvocationRecord, InvocationStatus, PanelId, Registry,
-    ServiceHost, TaskEvent, ViewTypeId, Workbench,
+    ComboState, CommandArgs, CommandCtx, CommandExecution, CommandInvocation, CommandKind,
+    CommandResult, CtxSnapshot, DocSummary, Hotkey, InvocationRecord, InvocationStatus, PanelId,
+    Registry, ServiceHost, TaskEvent, ViewTypeId, Workbench,
 };
 
 use crate::executor::AsyncExecutor;
@@ -39,6 +39,18 @@ pub struct AppRuntime {
     /// 命令调用历史（可查询，供日志/自动化测试/诊断，design.md §16.4）。
     invocations: VecDeque<InvocationRecord>,
     invocation_seq: u64,
+    /// 在途的原生对话框（后台线程执行，结果按帧排空）。
+    dialog_in_flight: Option<DialogRequest>,
+    dialog_result_rx: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+}
+
+/// 需要弹原生对话框的 UI 动作。对话框在后台线程运行（阻塞式 rfd 调用
+/// 绝不能进 UI 线程：会饿死 gpui 事件循环并触发窗口内部重入借用），
+/// 结果经通道回传，由 [`AppRuntime::frame_tick`] 排水并执行后续动作。
+#[derive(Clone, Debug)]
+pub(crate) enum DialogRequest {
+    OpenDocument { extensions: Vec<String> },
+    SaveDocumentAs { doc_id: api::DocumentId, default_name: String, extensions: Vec<String> },
 }
 
 impl AppRuntime {
@@ -77,6 +89,27 @@ impl AppRuntime {
                 None => true,
             },
             None => false,
+        }
+    }
+
+    /// Toggle 命令当前是否选中（ribbon-bar.md §4.2：checked 态是命令系统的查询结果，
+    /// Ribbon 不自维护开关状态；未注册或未声明 checked 条件恒为 false）。
+    pub fn is_checked(&self, id: &str) -> bool {
+        match self.registry.command(id) {
+            Some(def) => match &def.checked {
+                Some(f) => f(&self.snapshot),
+                None => false,
+            },
+            None => false,
+        }
+    }
+
+    /// Combo 命令当前状态（当前值 + 选项列表，ribbon-bar.md §4.2：每帧查询；
+    /// 未注册或未声明 combo 查询恒为 None）。
+    pub fn combo_state(&self, id: &str) -> Option<ComboState> {
+        match self.registry.command(id) {
+            Some(def) => def.combo.as_ref().and_then(|f| f(&self.snapshot)),
+            None => None,
         }
     }
 
@@ -127,8 +160,141 @@ impl AppRuntime {
 
     // ---- 帧驱动 ----
 
+    /// 请求弹原生文件对话框（非阻塞）：对话框在后台线程运行， picking 结果
+    /// 由 [`Self::frame_tick`] 排水执行。同一时刻只允许一个在途对话框。
+    pub(crate) fn request_dialog(&mut self, request: DialogRequest) {
+        if self.dialog_in_flight.is_some() {
+            self.host.log.warn("已有对话框在途，忽略新的打开/保存请求");
+            return;
+        }
+        let (extensions, default_name) = match &request {
+            DialogRequest::OpenDocument { extensions } => (extensions.clone(), None),
+            DialogRequest::SaveDocumentAs {
+                extensions,
+                default_name,
+                ..
+            } => (extensions.clone(), Some(default_name.clone())),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let picked = match &default_name {
+                Some(name) => crate::dialog::pick_save_file(name, &extensions),
+                None => crate::dialog::pick_open_file(&extensions),
+            };
+            let _ = tx.send(picked);
+        });
+        self.dialog_in_flight = Some(request);
+        self.dialog_result_rx = Some(rx);
+    }
+
+    /// 排空在途对话框结果并执行后续动作（打开文档 / 另存为）。
+    fn drain_dialog_result(&mut self) {
+        let Some(rx) = &self.dialog_result_rx else {
+            return;
+        };
+        let picked = match rx.try_recv() {
+            Ok(picked) => {
+                self.dialog_result_rx = None;
+                picked
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                // 线程异常退出且未发送：按取消处理。
+                self.dialog_result_rx = None;
+                None
+            }
+        };
+        let Some(request) = self.dialog_in_flight.take() else {
+            return;
+        };
+        match (request, picked) {
+            (DialogRequest::OpenDocument { .. }, Some(path)) => {
+                if let Err(e) = platform_cmds::open_path_runtime(self, &path) {
+                    self.host.log.error(e);
+                }
+            }
+            (DialogRequest::SaveDocumentAs { doc_id, .. }, Some(path)) => {
+                match self.host.docs.save_as(doc_id, &path) {
+                    Ok(saved) => self.host.log.info(format!("已另存为 {}", saved.display())),
+                    Err(e) => self.host.log.error(e),
+                }
+            }
+            (_, None) => self.host.log.info("已取消"),
+        }
+    }
+
+    /// 平台命令 → 对话框请求的映射；返回 None 的命令照常走命令分发。
+    fn dialog_request_for_command(&self, id: &str) -> Option<DialogRequest> {
+        match id {
+            crate::platform_cmds::OPEN_DOCUMENT => Some(DialogRequest::OpenDocument {
+                extensions: self.all_extensions(),
+            }),
+            crate::platform_cmds::SAVE_DOCUMENT_AS => {
+                let doc_id = self.snapshot.active_document.as_ref()?.id;
+                let (default_name, extensions) = self.save_dialog_context(&doc_id)?;
+                Some(DialogRequest::SaveDocumentAs {
+                    doc_id,
+                    default_name,
+                    extensions,
+                })
+            }
+            // 保存：已有路径的文档走普通同步保存（无对话框），只有无路径
+            // 文档才需要“另存为”式对话框。
+            crate::platform_cmds::SAVE_DOCUMENT => {
+                let doc_id = self.snapshot.active_document.as_ref()?.id;
+                let has_path = self
+                    .host
+                    .docs
+                    .get(doc_id)
+                    .map(|d| d.path.is_some())
+                    .unwrap_or(false);
+                if has_path {
+                    return None;
+                }
+                let (default_name, extensions) = self.save_dialog_context(&doc_id)?;
+                Some(DialogRequest::SaveDocumentAs {
+                    doc_id,
+                    default_name,
+                    extensions,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn all_extensions(&self) -> Vec<String> {
+        self.host
+            .docs
+            .types()
+            .iter()
+            .flat_map(|t| t.extensions.iter().cloned())
+            .collect()
+    }
+
+    /// 另存为对话框的默认文件名与扩展名过滤（取自文档标题与类型）。
+    fn save_dialog_context(&self, doc_id: &api::DocumentId) -> Option<(String, Vec<String>)> {
+        let doc = self.host.docs.get(*doc_id)?;
+        let extensions = self
+            .host
+            .docs
+            .type_of(&doc.type_id)
+            .map(|t| t.extensions.clone())
+            .unwrap_or_default();
+        let default_name = if doc.title.contains('.') {
+            doc.title.clone()
+        } else {
+            format!(
+                "{}.{}",
+                doc.title,
+                extensions.first().map(|s| s.as_str()).unwrap_or("dat")
+            )
+        };
+        Some((default_name, extensions))
+    }
+
     /// 每帧调用：泵任务事件、自动保存计时、同步活动文档/标签标题、刷新上下文快照。
     pub fn frame_tick(&mut self, dt_secs: f32) {
+        self.drain_dialog_result();
         self.pump_task_events();
         // 自动保存（阶段 5：§18 生产级扩展）
         let interval = self
@@ -435,6 +601,13 @@ impl AppRuntime {
             self.note_invocation(seq, InvocationStatus::Failed, Some(msg.clone()));
             self.host.log.error(msg.clone());
             return CommandResult::failed(msg);
+        }
+        // 平台对话框命令走非阻塞路径：阻塞式原生对话框绝不能在 UI 线程内
+        // 执行（会饿死 gpui 事件循环并触发窗口内部重入借用）。
+        if let Some(request) = self.dialog_request_for_command(id) {
+            self.note_invocation(seq, InvocationStatus::Succeeded, Some("已弹出文件对话框".into()));
+            self.request_dialog(request);
+            return CommandResult::done_with("已弹出文件对话框");
         }
         let Some(mut def) = self.registry.take_command(id) else {
             let msg = format!("未注册的命令: {id}");
@@ -933,6 +1106,8 @@ impl WorkbenchAppBuilder {
         for group in std::mem::take(&mut registry.toolbar) {
             host.ws.add_toolbar_group(group);
         }
+        // QAT 快速访问（产品静态集，ribbon-bar.md §4.1）
+        host.ws.qat = std::mem::take(&mut registry.qat);
         for (ty, value) in registry.take_services() {
             host.insert_raw(ty, value);
         }
@@ -1005,6 +1180,8 @@ impl WorkbenchAppBuilder {
             shutdown,
             invocations: VecDeque::new(),
             invocation_seq: 0,
+            dialog_in_flight: None,
+            dialog_result_rx: None,
         };
         runtime.snapshot = runtime.make_snapshot();
 

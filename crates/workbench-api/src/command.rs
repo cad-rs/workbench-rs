@@ -127,6 +127,19 @@ impl std::fmt::Display for Hotkey {
 #[derive(Clone, Debug, Default)]
 pub struct CommandArgs {
     pub values: std::collections::BTreeMap<String, String>,
+    /// 带值执行的值槽（Combo 选中值等）；None = 无值。
+    pub value: Option<String>,
+}
+
+/// Combo（选择框）状态快照（ribbon-bar.md §4.2）：当前值 + 选项列表。
+/// 每帧由命令系统查询（`combo_state`），Ribbon 不持有选项数据——图层增删等
+/// 文档状态变化自然反映。
+#[derive(Clone, Debug)]
+pub struct ComboState {
+    /// 当前选中值。
+    pub current: String,
+    /// 可选项列表（有序）。
+    pub options: Vec<String>,
 }
 
 impl CommandArgs {
@@ -237,6 +250,12 @@ pub enum CommandExecution {
 /// 命令启用条件（依据 CtxSnapshot 求值；None 表示总是可用）。
 pub type EnabledWhen = Box<dyn Fn(&CtxSnapshot) -> bool + Send + Sync>;
 
+/// 命令开关状态查询（Toggle checked 态，ribbon-bar.md §4.2；None 表示恒为未选中）。
+pub type CheckedWhen = Box<dyn Fn(&CtxSnapshot) -> bool + Send + Sync>;
+
+/// 命令 Combo 状态查询（当前值 + 选项列表；None 表示无 Combo 状态）。
+pub type ComboStateWhen = Box<dyn Fn(&CtxSnapshot) -> Option<ComboState> + Send + Sync>;
+
 /// 命令定义。
 pub struct CommandDef {
     pub id: CommandId,
@@ -244,6 +263,11 @@ pub struct CommandDef {
     pub hotkey: Option<Hotkey>,
     /// 启用条件（None 表示总是可用）。依据 CtxSnapshot 求值。
     pub enabled: Option<EnabledWhen>,
+    /// Toggle checked 态查询（None 恒为未选中）。依据 CtxSnapshot 求值，
+    /// 与 `enabled` 同模式——开关状态由命令系统单一来源提供（ribbon-bar.md §4.2）。
+    pub checked: Option<CheckedWhen>,
+    /// Combo 状态查询（当前值 + 选项列表；None 表示无 Combo 状态）。
+    pub combo: Option<ComboStateWhen>,
     pub kind: CommandKind,
     /// 图标资源路径（如 `"icons/save.svg"`，由产品的 AssetSource 解析）；
     /// None 时 UI 回退为纯文本。
@@ -269,6 +293,8 @@ impl CommandDef {
             title: title.into(),
             hotkey: None,
             enabled: None,
+            checked: None,
+            combo: None,
             kind: CommandKind::Sync(Box::new(handler)),
             icon: None,
             source: None,
@@ -284,6 +310,8 @@ impl CommandDef {
             title: title.into(),
             hotkey: None,
             enabled: None,
+            checked: None,
+            combo: None,
             kind: CommandKind::Background(Box::new(starter)),
             icon: None,
             source: None,
@@ -299,6 +327,8 @@ impl CommandDef {
             title: title.into(),
             hotkey: None,
             enabled: None,
+            checked: None,
+            combo: None,
             kind: CommandKind::Async(Box::new(starter)),
             icon: None,
             source: None,
@@ -319,6 +349,22 @@ impl CommandDef {
         f: impl Fn(&CtxSnapshot) -> bool + Send + Sync + 'static,
     ) -> Self {
         self.enabled = Some(Box::new(f));
+        self
+    }
+    /// Toggle checked 态查询（与 [`CommandDef::enabled_when`] 同模式，依据 CtxSnapshot 求值）。
+    pub fn checked_when(
+        mut self,
+        f: impl Fn(&CtxSnapshot) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.checked = Some(Box::new(f));
+        self
+    }
+    /// Combo 状态查询（当前值 + 选项列表，每帧依据 CtxSnapshot 求值）。
+    pub fn combo_state_when(
+        mut self,
+        f: impl Fn(&CtxSnapshot) -> Option<ComboState> + Send + Sync + 'static,
+    ) -> Self {
+        self.combo = Some(Box::new(f));
         self
     }
     /// 标记贡献来源（Workbench/插件稳定 ID）。

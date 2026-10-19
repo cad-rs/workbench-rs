@@ -15,6 +15,13 @@ use std::sync::Arc;
 /// 展示）；加载失败也应返回 `None` 而不是让 UI 中断。
 pub trait AssetSource: Send + Sync {
     fn load(&self, path: &str) -> Option<Cow<'static, [u8]>>;
+
+    /// 枚举本源持有的全部资源路径（GUI 前端向 gpui `AssetRegistry`
+    /// 登记路径用；registry 只解析登记过的路径）。默认空——纯按需查询的
+    /// 源无法枚举自身，应改用可枚举形态（如 [`StaticAssets`]）。
+    fn paths(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// 链式资源源：按顺序查找，第一个命中者生效（后面的源提供回退）。
@@ -34,6 +41,10 @@ impl ChainedAssets {
 impl AssetSource for ChainedAssets {
     fn load(&self, path: &str) -> Option<Cow<'static, [u8]>> {
         self.sources.iter().find_map(|s| s.load(path))
+    }
+
+    fn paths(&self) -> Vec<String> {
+        self.sources.iter().flat_map(|s| s.paths()).collect()
     }
 }
 
@@ -55,5 +66,9 @@ impl AssetSource for StaticAssets {
             .iter()
             .find(|(p, _)| *p == path)
             .map(|(_, bytes)| Cow::Borrowed(*bytes))
+    }
+
+    fn paths(&self) -> Vec<String> {
+        self.entries.iter().map(|(p, _)| (*p).to_string()).collect()
     }
 }
