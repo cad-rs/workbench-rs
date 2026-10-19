@@ -5570,6 +5570,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ribbon"
+version = "0.1.0"
+dependencies = [
+ "gpui-ce",
+ "gpui_ce_components",
+]
+
+[[package]]
 name = "ropey"
 version = "2.0.0-beta.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8248,6 +8256,7 @@ dependencies = [
  "gpui_ce_wgpu",
  "image",
  "pollster 0.4.0",
+ "ribbon",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",

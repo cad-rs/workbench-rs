@@ -12,6 +12,8 @@ readme = "../../README.md"
 [dependencies]
 workbench-api = { workspace = true }
 workbench-core = { workspace = true }
+# RibbonBar 组件（纯 gpui 组件，无 workbench 依赖；bridge 在 src/ribbon_bridge.rs）
+ribbon = { workspace = true }
 gpui = { workspace = true }
 gpui-platform = { workspace = true }
 gpui-component = { workspace = true }

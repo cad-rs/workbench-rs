@@ -7,8 +7,8 @@ mod views;
 
 use workbench_api as wb;
 use wb::{
-    CommandArgs, CommandCtx, CommandDef, CommandResult, DocumentTypeDef, DockArea, PanelDef,
-    Registry, RibbonTab, ToolbarGroup, ToolbarItem, ViewDef,
+    ComboState, CommandArgs, CommandCtx, CommandDef, CommandResult, DocumentTypeDef, DockArea,
+    PanelDef, Registry, RibbonTab, ToolbarGroup, ToolbarItem, ViewDef,
 };
 
 use shapes::ShapeDoc;
@@ -418,12 +418,39 @@ fn register_commands(reg: &mut Registry) {
                 }
             },
         )
-        .icon(icons::MODE),
+        .icon(icons::MODE)
+        .checked_when(|snap| snap.work_mode == "草图"),
+    );
+
+    // 线宽选择（Combo 演示）：选项与当前值由 combo_state_when 提供，选中值经 args.value 回传。
+    static LINEWEIGHT_SELECTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    const LINEWEIGHTS: [&str; 4] = ["0.13 mm", "0.25 mm", "0.50 mm", "0.80 mm"];
+    reg.register_command(
+        CommandDef::sync(
+            "example.set_lineweight",
+            "线宽",
+            |_ctx: &mut CommandCtx, a: &CommandArgs| {
+                if let Some(v) = &a.value {
+                    if let Some(i) = LINEWEIGHTS.iter().position(|o| o == v) {
+                        LINEWEIGHT_SELECTED.store(i, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                CommandResult::done()
+            },
+        )
+        .combo_state_when(|_snap| {
+            Some(ComboState {
+                current: LINEWEIGHTS[LINEWEIGHT_SELECTED.load(std::sync::atomic::Ordering::Relaxed)]
+                    .to_string(),
+                options: LINEWEIGHTS.iter().map(|s| s.to_string()).collect(),
+            })
+        }),
     );
 }
 
 fn register_toolbar(reg: &mut Registry) {
-    // RibbonBar（design.md §7）：主页 Tab 与平台默认 Tab 合并，工具 Tab 收纳视图与演示
+    // RibbonBar（design.md §7）：主页 Tab 与平台默认 Tab 合并，工具 Tab 收纳视图与演示。
+    // 条目同时演示尺寸档（Large/Small）与形态（Command/Toggle/Split/Menu/Combo）。
     reg.add_ribbon_tab(
         RibbonTab::new("app.home", "主页")
             .from_source("wb-example")
@@ -431,9 +458,9 @@ fn register_toolbar(reg: &mut Registry) {
                 ToolbarGroup::new("example.file", "文件")
                     .from_source("wb-example")
                     .items(vec![
-                        ToolbarItem::command("app.new_document"),
-                        ToolbarItem::command("app.open_document"),
-                        ToolbarItem::command("app.save_document"),
+                        ToolbarItem::command("app.new_document").large(),
+                        ToolbarItem::command("app.open_document").large(),
+                        ToolbarItem::command("app.save_document").large(),
                     ]),
                 ToolbarGroup::new("example.edit", "编辑")
                     .from_source("wb-example")
@@ -444,9 +471,16 @@ fn register_toolbar(reg: &mut Registry) {
                 ToolbarGroup::new("example.shapes", "图形")
                     .from_source("wb-example")
                     .items(vec![
-                        ToolbarItem::command("example.add_shape"),
+                        ToolbarItem::command("example.add_shape").large(),
                         ToolbarItem::command("example.remove_selected"),
                         ToolbarItem::labeled("example.generate_shapes", "批量生成(后台)"),
+                    ]),
+                ToolbarGroup::new("example.properties", "特性")
+                    .from_source("wb-example")
+                    .items(vec![
+                        ToolbarItem::labeled("example.set_lineweight", "线宽")
+                            .combo()
+                            .width(110.0),
                     ]),
             ]),
     );
@@ -457,14 +491,26 @@ fn register_toolbar(reg: &mut Registry) {
                 ToolbarGroup::new("example.view", "视图")
                     .from_source("wb-example")
                     .items(vec![
-                        ToolbarItem::labeled("example.open_canvas", "画布"),
-                        ToolbarItem::labeled("example.open_welcome", "欢迎页"),
-                        ToolbarItem::labeled("example.toggle_mode", "切换模式"),
+                        ToolbarItem::labeled("example.toggle_mode", "草图模式").toggle(),
+                        ToolbarItem::labeled("example.open_canvas", "画布")
+                            .split(vec![ToolbarItem::labeled(
+                                "example.open_welcome",
+                                "欢迎页",
+                            )]),
+                        ToolbarItem::labeled("example.open_canvas", "窗口").menu(vec![
+                            ToolbarItem::labeled("example.open_canvas", "画布"),
+                            ToolbarItem::labeled("example.open_welcome", "欢迎页"),
+                        ]),
                     ]),
                 ToolbarGroup::new("example.demo", "演示")
                     .from_source("wb-example")
                     .items(vec![
-                        ToolbarItem::labeled("example.async_scan", "异步扫描(执行器)"),
+                        ToolbarItem::labeled("example.async_scan", "异步扫描")
+                            .split(vec![
+                                ToolbarItem::labeled("example.slow_job", "慢任务(可取消)"),
+                                ToolbarItem::labeled("example.failing_cmd", "失败演示"),
+                            ])
+                            .large(),
                         ToolbarItem::labeled("example.slow_job", "慢任务(可取消)"),
                         ToolbarItem::labeled("example.failing_cmd", "失败演示"),
                     ]),

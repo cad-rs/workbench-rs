@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    canvas, div, prelude::*, px, quad, relative, rgb_to_hsla, size, svg, App, Bounds,
+    canvas, div, prelude::*, px, quad, relative, rgb_to_hsla, size, App, Bounds,
     Context, Corners, Edges, Hsla, KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, TextAlign, TextRun,
     TitlebarOptions, TransformationMatrix, Window, WindowBounds, WindowOptions,
@@ -21,6 +21,9 @@ use workbench_core::AppRuntime;
 pub mod gpu_view;
 
 pub(crate) mod dock_panel;
+
+/// Ribbon 挂载桥（唯一 ribbon crate 耦合点，ribbon-bar.md §5.1）。
+pub(crate) mod ribbon_bridge;
 
 /// 平台运行时句柄：全部使用都在 UI 主线程（gpui 前台执行器），故用 `Rc`。
 type SharedCore = std::rc::Rc<Mutex<AppRuntime>>;
@@ -39,6 +42,9 @@ struct WbAssets {
 
 impl gpui::AssetSource for WbAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        // `app` is the builder's source, which already chains product assets
+        // with the platform standard icons (wb-std/*) — see
+        // WorkbenchAppBuilder::asset_source.
         if let Some(bytes) = self.app.load(path) {
             return Ok(Some(bytes));
         }
@@ -46,7 +52,26 @@ impl gpui::AssetSource for WbAssets {
     }
 
     fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
-        self.component.list(path)
+        // gpui 的 AssetRegistry 由 list("") 枚举建表（AssetSource::iter_ondemand）：
+        // 只登记这里报出的路径，未登记的路径 load 永远 miss（图标静默不渲染）。
+        // 因此根路径必须并集产品/平台标准路径与组件内置路径；同名路径（如
+        // icons/delete.svg 两边都有）去重——registry 重复 insert 会报错。
+        let mut paths: Vec<SharedString> = Vec::new();
+        if path.is_empty() {
+            let mut seen = std::collections::HashSet::new();
+            for p in self
+                .app
+                .paths()
+                .into_iter()
+                .map(SharedString::from)
+                .chain(self.component.list(path)?.into_iter())
+            {
+                if seen.insert(p.clone()) {
+                    paths.push(p.into());
+                }
+            }
+        }
+        Ok(paths)
     }
 }
 
@@ -301,6 +326,8 @@ struct RootView {
     scripts: dock_panel::SharedScripts,
     /// What the dock is showing, as last mirrored into the model.
     mirror: dock_panel::SharedMirror,
+    /// Ribbon 挂载点（ribbon crate 实体；首帧懒构建，模式同 dock）。
+    ribbon: ribbon_bridge::RibbonHost,
 }
 
 impl RootView {
@@ -322,6 +349,7 @@ impl RootView {
             mirror: std::rc::Rc::new(std::cell::RefCell::new(
                 dock_panel::DockMirror::default(),
             )),
+            ribbon: ribbon_bridge::RibbonHost::new(),
         }
     }
 }
@@ -469,22 +497,7 @@ impl Render for RootView {
         let core = self.core.clone();
 
         // ---- 核心状态读取（一次性） ----
-        struct RibbonItemUi {
-            cmd: String,
-            label: String,
-            enabled: bool,
-            icon: Option<String>,
-        }
-        struct RibbonGroupUi {
-            title: String,
-            items: Vec<RibbonItemUi>,
-        }
-        struct RibbonTabUi {
-            id: String,
-            title: String,
-            active: bool,
-        }
-        let (shell_snap, ribbon_tabs, ribbon_groups, status) = {
+        let (shell_snap, status) = {
             let core = self.core.lock().unwrap_or_else(|p| p.into_inner());
             let area_of = |a: wb::DockArea| -> dock_panel::AreaSnapshot {
                 let slots: Vec<&wb::PanelSlot> = core
@@ -527,48 +540,6 @@ impl Render for RootView {
                     .collect(),
                 active_tab: core.host.ws.active_tab().map(|t| t.instance_id.0),
             };
-            let (ribbon_tabs, ribbon_groups): (Vec<RibbonTabUi>, Vec<RibbonGroupUi>) = {
-                let ws = &core.host.ws;
-                let tabs = ws
-                    .ribbon
-                    .iter()
-                    .map(|t| RibbonTabUi {
-                        id: t.id.0.clone(),
-                        title: t.title.clone(),
-                        active: t.id.0 == ws.active_ribbon_tab,
-                    })
-                    .collect();
-                let groups = ws
-                    .active_ribbon()
-                    .map(|tab| {
-                        tab.groups
-                            .iter()
-                            .map(|g| {
-                                let items = g
-                                    .items
-                                    .iter()
-                                    .map(|it| {
-                                        let title = core
-                                            .command_title(&it.command.0)
-                                            .unwrap_or_else(|| it.command.0.clone());
-                                        RibbonItemUi {
-                                            cmd: it.command.0.clone(),
-                                            label: it.label.clone().unwrap_or(title),
-                                            enabled: core.is_enabled(&it.command.0),
-                                            icon: core.command_icon(&it.command.0),
-                                        }
-                                    })
-                                    .collect();
-                                RibbonGroupUi {
-                                    title: g.title.clone(),
-                                    items,
-                                }
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                (tabs, groups)
-            };
             let snap = core.snapshot().clone();
             let (running, last_task) = core.host.tasks.summary();
             let status = StatusData {
@@ -593,7 +564,7 @@ impl Render for RootView {
                     .last()
                     .map(|e| (e.level, format!("{} {}", e.time, e.message))),
             };
-            (shell_snap, ribbon_tabs, ribbon_groups, status)
+            (shell_snap, status)
         };
 
         // ---- Dock 同步（模型 → dock；结构变化才重建） ----
@@ -624,137 +595,10 @@ impl Render for RootView {
             .min_h(px(0.0))
             .child(self.dock.as_ref().expect("built above").area());
 
-        // ---- RibbonBar（design.md §7）：Tab 行 + 活动 Tab 的 Group 行 ----
-        let mut tab_row = div().flex().flex_row().items_end().px_2().gap_1();
-        for tab_def in &ribbon_tabs {
-            let core_c = core.clone();
-            let weak_c = weak.clone();
-            let id_c = tab_def.id.clone();
-            let mut tab = div()
-                .id(SharedString::from(format!("rtab-{}", tab_def.id)))
-                .px_2()
-                .py_1()
-                .text_size(px(12.5))
-                .cursor_pointer()
-                .child(tab_def.title.clone());
-            tab = if tab_def.active {
-                tab.text_color(col(wb::Color::WHITE))
-                    .border_b_2()
-                    .border_color(col(wb::Color::ACCENT))
-                    .bg(col(wb::Color::rgb(0.26, 0.27, 0.32)))
-            } else {
-                tab.text_color(col(wb::Color::LIGHT_GRAY))
-                    .hover(|s| s.bg(col(wb::Color::rgb(0.24, 0.25, 0.30))))
-            };
-            tab = tab.on_click(move |_: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
-                core_c
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .host
-                    .ws
-                    .set_active_ribbon_tab(&id_c);
-                notify(&weak_c, cx);
-            });
-            tab_row = tab_row.child(tab);
-        }
-
-        let mut groups_row = div().flex().flex_row().items_stretch().px_2().gap_2();
-        for (gi, group) in ribbon_groups.iter().enumerate() {
-            if gi > 0 {
-                groups_row = groups_row.child(
-                    div()
-                        .w(px(1.0))
-                        .bg(col(wb::Color::rgb(0.30, 0.31, 0.36))),
-                );
-            }
-            let mut btns = div().flex().flex_row().items_center().gap_1();
-            for item in &group.items {
-                let mut btn = div()
-                    .id(SharedString::from(format!("tb-{}", item.cmd)))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .text_size(px(12.5));
-                if let Some(icon) = &item.icon {
-                    // 左侧 15px 单色 SVG（禁用态灰色，与文本一致）
-                    btn = btn.child(
-                        svg()
-                            .path(icon.clone())
-                            .size(px(15.0))
-                            .text_color(if item.enabled {
-                                col(wb::Color::WHITE)
-                            } else {
-                                col(wb::Color::GRAY)
-                            }),
-                    );
-                }
-                btn = btn.child(item.label.clone());
-                btn = if item.enabled {
-                    btn.bg(col(wb::Color::rgb(0.27, 0.29, 0.34)))
-                        .text_color(col(wb::Color::WHITE))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(col(wb::Color::ACCENT)))
-                        .on_click({
-                            let core_c = core.clone();
-                            let weak_c = weak.clone();
-                            let cmd_c = item.cmd.clone();
-                            move |_: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
-                                let r = core_c
-                                    .lock()
-                                    .unwrap_or_else(|p| p.into_inner())
-                                    .execute_command(&cmd_c, &wb::CommandArgs::default());
-                                if let wb::CommandResult::Failed { error } = r {
-                                    core_c
-                                        .lock()
-                                        .unwrap_or_else(|p| p.into_inner())
-                                        .host
-                                        .log
-                                        .error(error);
-                                }
-                                notify(&weak_c, cx);
-                            }
-                        })
-                } else {
-                    btn.bg(col(wb::Color::rgb(0.22, 0.23, 0.27)))
-                        .text_color(col(wb::Color::GRAY))
-                };
-                btns = btns.child(btn);
-            }
-            groups_row = groups_row.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_0p5()
-                    .px_1()
-                    .py_1()
-                    .child(btns)
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(col(wb::Color::GRAY))
-                            .child(group.title.clone()),
-                    ),
-            );
-        }
-        let ribbon = div()
-            .flex()
-            .flex_col()
-            .bg(col(COL_TOOLBAR))
-            .border_b_1()
-            .border_color(col(wb::Color::rgb(0.10, 0.10, 0.12)))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_end()
-                    .child(tab_row),
-            )
-            .child(groups_row);
+        // ---- RibbonBar（ribbon crate 挂载；ribbon_bridge 每帧喂模型快照） ----
+        self.ribbon.ensure_mounted(&core, weak.clone(), cx);
+        self.ribbon.sync(&core, cx);
+        let ribbon_element = self.ribbon.element();
 
         // ---- 组装 ----
         let mut root_col = div()
@@ -764,7 +608,7 @@ impl Render for RootView {
             .font_family("Segoe UI")
             .bg(col(COL_BG))
             .text_color(col(wb::Color::LIGHT_GRAY))
-            .child(ribbon)
+            .child(ribbon_element)
             .child(dock_element);
 
         root_col = root_col.child(render_status_bar(&status, core.clone(), weak.clone()));
@@ -1179,6 +1023,35 @@ fn launch_app(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (icons silently missing): gpui builds its `AssetRegistry`
+    /// from `AssetSource::list("")`, and the registry resolves SVGs by table
+    /// lookup — a path that `list` never reports can never render. WbAssets
+    /// must therefore report the product and platform-standard paths alongside
+    /// the component's built-in icons.
+    #[test]
+    fn wb_assets_lists_product_standard_and_component_paths() {
+        use gpui::AssetSource as _;
+        // Mirror the production chain: product assets + platform standard
+        // icons (WorkbenchAppBuilder::asset_source).
+        let app: std::sync::Arc<dyn wb::AssetSource> = std::sync::Arc::new(
+            wb::ChainedAssets::new(vec![
+                std::sync::Arc::new(wb_example::example_assets()),
+                std::sync::Arc::new(*workbench_core::assets::standard_assets()),
+            ]),
+        );
+        let assets = WbAssets {
+            app,
+            component: gpui_component_assets::Assets::new(""),
+        };
+        let listed = assets.list("").expect("list root");
+        let has = |p: &str| listed.iter().any(|s| s.as_ref() == p);
+        assert!(has("icons/scan.svg"), "product icon not listed");
+        assert!(has("wb-std/new.svg"), "platform standard icon not listed");
+        assert!(listed.len() >= 5, "component icons missing from the union");
+        assert!(assets.load("icons/scan.svg").unwrap().is_some());
+        assert!(assets.load("wb-std/new.svg").unwrap().is_some());
+    }
 
     /// The model snapshot the dock mirrors is built from the live workspace:
     /// all three side areas and the central tabs reach it, and each area

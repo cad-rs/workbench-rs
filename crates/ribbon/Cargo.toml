@@ -1,0 +1,15 @@
+[package]
+name = "ribbon"
+description = "Fluent-style RibbonBar component for gpui (tab strip, command groups, large/small/icon buttons, dropdowns, overflow scrolling)"
+keywords = ["gpui", "gui", "ribbon"]
+categories = ["gui"]
+version.workspace = true
+# Edition 2024 matches the gpui / gpui-component forks this component is built
+# against (and the upstream contribution target).
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gpui = { workspace = true }
+gpui-component = { workspace = true }
