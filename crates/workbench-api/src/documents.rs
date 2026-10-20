@@ -51,6 +51,9 @@ pub struct UndoHooks {
 }
 
 /// 文档类型注册信息：编解码由领域模块提供，平台不定义领域 schema。
+///
+/// 视图选择（`open_view`）按文档内容决定，而非固定视图类型：同一文档类型
+/// 可根据内容打开不同视图。
 pub struct DocumentTypeDef {
     pub id: DocumentTypeId,
     pub title: String,
@@ -59,10 +62,23 @@ pub struct DocumentTypeDef {
     pub create_default: fn() -> Box<dyn DocumentContent>,
     pub serialize: DocumentSerializeFn,
     pub deserialize: DocumentDeserializeFn,
-    /// 新建/打开文档时建议打开的中央视图类型（可选）。
-    pub open_view: Option<crate::ids::ViewTypeId>,
+    /// The view to open for this document's content. The platform calls it with
+    /// the document's content, so one document type can open different views
+    /// depending on what the document actually holds.
+    pub open_view: Option<fn(&dyn DocumentContent) -> Option<crate::ids::ViewTypeId>>,
     /// 委托式撤销钩子（None = 平台快照式撤销，见 [`UndoHooks`]）。
     pub undo_hooks: Option<UndoHooks>,
+    /// The plugin this document type was contributed by, if any.
+    pub source: Option<String>,
+}
+
+impl DocumentTypeDef {
+    /// Attribute this document type to a plugin, so disabling the plugin
+    /// removes it.
+    pub fn from_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
 }
 
 /// 撤销历史条目（快照式）。

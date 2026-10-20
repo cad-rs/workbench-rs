@@ -1,6 +1,6 @@
 //! 平台运行时：产品装配、命令执行、任务事件泵、上下文快照与布局持久化。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -30,8 +30,6 @@ pub struct AppRuntime {
     autosave_dir: PathBuf,
     /// 距上次自动保存的累计秒数。
     autosave_accum: f32,
-    /// 绑定文档的视图类型（用于布局恢复时重新绑定默认文档）。
-    doc_bound_types: HashSet<String>,
     dispatch_depth: u32,
     /// 共享异步执行器（阶段 2：Async 命令的运行载体）。
     executor: AsyncExecutor,
@@ -779,13 +777,6 @@ impl AppRuntime {
         for msg in skipped {
             self.host.log.warn(msg);
         }
-        // 重新绑定文档视图到默认文档（文档不跨会话持久化）
-        let default_doc = self.host.docs.active_id();
-        for tab in self.host.ws.tabs.iter_mut() {
-            if tab.document.is_none() && self.doc_bound_types.contains(&tab.type_id.0) {
-                tab.document = default_doc;
-            }
-        }
         self.host.log.info("已恢复上次的工作区布局");
         Some(RestoredLayout {
             ui: file.ui,
@@ -865,14 +856,16 @@ impl api::AppServices for AppRuntime {
 }
 
 impl AppRuntime {
-    /// 运行时禁用插件（阶段 5，§16.2/§18）：移除其命令、Ribbon 组与 Tab，
-    /// 更新插件注册镜像。不可恢复（如需重载请重启应用）。
+    /// 运行时禁用插件（阶段 5，§16.2/§18）：移除它的全部贡献——命令、视图
+    /// 类型、面板、文档类型、Ribbon 组与 Tab，更新插件注册镜像。不可恢复
+    /// （如需重载请重启应用）。
     pub fn disable_plugin(&mut self, plugin_id: &str) -> Result<Vec<String>, String> {
         if !self.registry.plugins_loaded.iter().any(|x| x == plugin_id) {
             return Err(format!("插件未装载: {plugin_id}"));
         }
-        let removed = self.registry.remove_commands_from_source(plugin_id);
+        let removed = self.registry.remove_from_source(plugin_id);
         self.host.ws.remove_commands(&removed, plugin_id);
+        self.host.ws.remove_from_source(plugin_id);
         self.registry.plugins_loaded.retain(|x| x != plugin_id);
         self.registry.plugins_disabled.push(plugin_id.to_string());
         if let Some(entry) = self
@@ -922,6 +915,8 @@ pub struct WorkbenchAppBuilder {
     layout_path: Option<PathBuf>,
     open_on_start: Vec<(String, bool)>,
     create_default_document: bool,
+    /// 默认文档类型 ID（多文档类型时由产品指定）。
+    default_doc_type: Option<String>,
     smoke_seconds: Option<f32>,
     /// 产品资源源（SVG 图标等）；None 时只有平台标准资源。
     assets: Option<std::sync::Arc<dyn api::AssetSource>>,
@@ -933,7 +928,18 @@ pub struct WorkbenchAppBuilder {
     ribbon_collapse_enabled: bool,
     /// UI 主题名（"dark"/"light"）；写入 settings 默认值，用户设置优先。
     theme: String,
+    /// 产品的模块解析器：给定插件声明的模块 ID，返回要装配的 Workbench。
+    ///
+    /// 插件是运行期单位——它启用产品已编译的模块，而不是携带代码。产品提供
+    /// 这张 `模块 ID -> Workbench` 表，平台在插件装载之后调用它。
+    module_loader: Option<ModuleLoader>,
 }
+
+/// 产品的模块解析器：给定插件 ID 与它本次要装配的模块 ID，返回 Workbench。
+///
+/// 按插件逐个调用，这样平台能用 [`api::Registry::with_source`] 给该插件的
+/// 全部贡献盖上来源，运行期禁用才能精确移除。
+pub type ModuleLoader = Box<dyn Fn(&str, &[String]) -> Vec<Box<dyn Workbench>> + Send>;
 
 impl WorkbenchAppBuilder {
     pub fn new(product_id: impl Into<String>, product_name: impl Into<String>) -> Self {
@@ -947,13 +953,21 @@ impl WorkbenchAppBuilder {
             layout_path: None,
             open_on_start: Vec::new(),
             create_default_document: false,
+            default_doc_type: None,
             smoke_seconds: None,
             assets: None,
             backend_label: "unknown".to_string(),
             gpu_requirements: None,
             ribbon_collapse_enabled: false,
             theme: "dark".to_string(),
+            module_loader: None,
         }
+    }
+
+    /// 设置产品的模块解析器（插件启用的 Workbench 模块由它装配）。
+    pub fn with_module_loader(mut self, loader: ModuleLoader) -> Self {
+        self.module_loader = Some(loader);
+        self
     }
 
     /// 设置产品资源源（SVG 图标等静态资源）。查询顺序：产品源 → 平台标准源
@@ -1046,6 +1060,14 @@ impl WorkbenchAppBuilder {
         self
     }
 
+    /// 指定默认文档类型（产品注册了多个文档类型时用）。
+    ///
+    /// 未指定时回落到第一个注册的文档类型。
+    pub fn with_default_document_type(mut self, type_id: impl Into<String>) -> Self {
+        self.default_doc_type = Some(type_id.into());
+        self
+    }
+
     /// 冒烟模式：窗口打开 `seconds` 秒后自动退出（自动化验证用）。
     pub fn smoke(mut self, seconds: f32) -> Self {
         self.smoke_seconds = Some(seconds);
@@ -1057,7 +1079,7 @@ impl WorkbenchAppBuilder {
     }
 
     /// 装配产品。Workbench 初始化失败被捕获隔离（验收 #19）。
-    pub fn build(self) -> Result<AppRuntime, String> {
+    pub fn build(mut self) -> Result<AppRuntime, String> {
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
         let (tx, rx) = api::task_channel();
@@ -1091,6 +1113,41 @@ impl WorkbenchAppBuilder {
             }
         }
 
+        // 插件启用的 Workbench 模块：插件声明的是 ID，产品用模块解析器把它
+        // 们变成真正的 Workbench。放在平台命令之前，让“窗口”组能收到这些
+        // 模块注册的面板。
+        if let Some(loader) = self.module_loader.take() {
+            let mut loaded: Vec<String> = Vec::new();
+            for (plugin_id, modules) in registry.plugin_modules.clone() {
+                let pending: Vec<String> = modules
+                    .iter()
+                    .filter(|id| !loaded.contains(id))
+                    .cloned()
+                    .collect();
+                if pending.is_empty() {
+                    continue;
+                }
+                loaded.extend(pending.iter().cloned());
+                // Stamp every contribution these modules register with the
+                // plugin id, so disabling the plugin can remove them.
+                let workbenches = loader(&plugin_id, &pending);
+                registry.with_source(&plugin_id, |reg| {
+                    for wb in workbenches {
+                        reg.workbenches.push(wb.id());
+                        let result = catch_unwind(AssertUnwindSafe(|| wb.init(reg)));
+                        if let Err(panic) = result {
+                            let msg = panic
+                                .downcast_ref::<String>()
+                                .cloned()
+                                .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                                .unwrap_or_else(|| "未知 panic".to_string());
+                            reg.error(format!("插件模块初始化失败: {msg}"));
+                        }
+                    }
+                });
+            }
+        }
+
         // 平台命令（含每个面板的显示/隐藏命令与“窗口”工具栏组）
         let panel_ids: Vec<(String, String)> = registry
             .panels
@@ -1100,11 +1157,7 @@ impl WorkbenchAppBuilder {
         platform_cmds::register(&mut registry, &panel_ids);
 
         // 注册表 → 运行时
-        let mut doc_bound_types = HashSet::new();
         for def in std::mem::take(&mut registry.doc_types) {
-            if let Some(vt) = &def.open_view {
-                doc_bound_types.insert(vt.0.clone());
-            }
             if let Err(e) = host.docs.register_type(def) {
                 host.log.error(e);
             }
@@ -1202,7 +1255,6 @@ impl WorkbenchAppBuilder {
             layout_path,
             autosave_dir,
             autosave_accum: 0.0,
-            doc_bound_types,
             dispatch_depth: 0,
             executor,
             shutdown,
@@ -1229,7 +1281,22 @@ impl WorkbenchAppBuilder {
 
         // 默认文档
         if self.create_default_document {
-            if let Some(t) = runtime.host.docs.types().first().map(|t| t.id.clone()) {
+            // The product names its default type when it has more than one;
+            // otherwise the only registered type is used.
+            let default_type = self
+                .default_doc_type
+                .as_ref()
+                .and_then(|id| {
+                    runtime
+                        .host
+                        .docs
+                        .types()
+                        .into_iter()
+                        .find(|t| &t.id.0 == id)
+                        .map(|t| t.id.clone())
+                })
+                .or_else(|| runtime.host.docs.types().first().map(|t| t.id.clone()));
+            if let Some(t) = default_type {
                 let id = runtime
                     .host
                     .docs

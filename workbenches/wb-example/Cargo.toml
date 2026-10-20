@@ -1,6 +1,6 @@
 [package]
 name = "workbench-example"
-description = "Example Workbench module for workbench-rs: commands, panels, views, document type (depends only on workbench-api)"
+description = "Example Workbench module for workbench-rs: commands, panels, views, document type"
 keywords = ["workbench", "gui", "example"]
 categories = ["gui", "development-tools"]
 version.workspace = true
@@ -15,5 +15,8 @@ path = "src/lib.rs"
 
 [dependencies]
 workbench-api = { workspace = true }
+# A view's content is a frontend element tree, so a view author needs the
+# frontend's element types. workbench-rs has exactly one frontend (gpui).
+gpui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

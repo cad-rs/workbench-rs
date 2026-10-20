@@ -30,8 +30,11 @@ impl wb::Workbench for ExampleWorkbench {
             create_default: || Box::new(ShapeDoc::default()),
             serialize: shapes::serialize,
             deserialize: shapes::deserialize,
-            open_view: Some(wb::ViewTypeId::new("example.canvas")),
+            open_view: Some(|_content: &dyn wb::DocumentContent| {
+                Some(wb::ViewTypeId::new("example.canvas"))
+            }),
             undo_hooks: None,
+            source: None,
         });
 
         // ---- 中央视图 ----

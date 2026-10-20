@@ -136,9 +136,27 @@ fn load_one(registry: &mut Registry, dir: &Path) {
         .script(script.to_string_lossy().to_string());
         registry.register_panel(def);
     }
+    // Script central views: singleton, content mounted by the gpui frontend.
+    for (id, title, script) in collected.views.drain(..) {
+        let def = api::ViewDef::new(
+            id,
+            title,
+            true,
+            || -> Box<dyn api::ViewInstance> {
+                unreachable!("script view creates no instance (content is mounted by the frontend)")
+            },
+        )
+        .script(script.to_string_lossy().to_string());
+        registry.register_view(def);
+    }
     for note in collected.notes.drain(..) {
         registry.notes.push(note);
     }
+    // The plugin enables compiled-in modules; record what it declared so the
+    // product can assemble them (see `Registry::plugin_module_ids`).
+    registry
+        .plugin_modules
+        .push((plugin_id.clone(), manifest.plugin.modules.clone()));
     registry.plugins_loaded.push(plugin_id);
 }
 

@@ -26,27 +26,15 @@ fn all_extensions(ctx: &mut CommandCtx) -> Vec<String> {
 fn preferred_view_of(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> Option<api::ViewTypeId> {
     let host = ctx.host();
     let doc = host.docs.get(doc_id)?;
-    host.docs.type_of(&doc.type_id).and_then(|t| t.open_view.clone())
+    let def = host.docs.type_of(&doc.type_id)?;
+    let open_view = def.open_view?;
+    open_view(doc.content.as_ref())
 }
 
 pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
-    // ---- 平台面板（阶段 5：诊断/插件管理） ----
-    registry.register_panel(api::PanelDef::new(
-        "app.panel.diagnostics",
-        "诊断",
-        api::DockArea::Right,
-        320.0,
-        2,
-        || Box::new(crate::platform_panels::DiagnosticsPanel),
-    ));
-    registry.register_panel(api::PanelDef::new(
-        "app.panel.plugins",
-        "插件",
-        api::DockArea::Right,
-        320.0,
-        3,
-        || Box::new(crate::platform_panels::PluginsPanel),
-    ));
+    // The built-in platform panels (diagnostics / plugins) are view
+    // implementations, so the frontend registers them before this runs; their
+    // ids therefore already appear in `panel_ids` below.
 
     // ---- 插件管理命令 ----
     registry.register_command(
@@ -237,9 +225,7 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
     );
 
     // 每个面板的显示/隐藏命令 + “窗口”工具栏组（含平台自己的面板）
-    let mut all_panels: Vec<(String, String)> = panel_ids.to_vec();
-    all_panels.push(("app.panel.diagnostics".to_string(), "诊断".to_string()));
-    all_panels.push(("app.panel.plugins".to_string(), "插件".to_string()));
+    let all_panels: Vec<(String, String)> = panel_ids.to_vec();
     let mut window_group = api::ToolbarGroup::new("app.window", "窗口");
     for (id, title) in &all_panels {
         let panel_id = id.clone();
@@ -287,11 +273,14 @@ pub fn open_path_runtime(
     let doc_id = app.host.docs.open_file(path)?;
     app.host.docs.set_active(Some(doc_id));
     app.host.log.info(format!("已打开 {}", path.display()));
-    let view = app
-        .host
-        .docs
-        .get(doc_id)
-        .and_then(|d| app.host.docs.type_of(&d.type_id).and_then(|t| t.open_view.clone()));
+    let view = {
+        let docs = &app.host.docs;
+        docs.get(doc_id).and_then(|d| {
+            let def = docs.type_of(&d.type_id)?;
+            let open_view = def.open_view?;
+            open_view(d.content.as_ref())
+        })
+    };
     if let Some(vt) = view {
         app.open_view(vt.as_str(), true)?;
     }

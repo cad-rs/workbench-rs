@@ -27,6 +27,17 @@ impl wb::Workbench for TestWb {
             0,
             || Box::new(TestView),
         ));
+        reg.register_document_type(wb::DocumentTypeDef {
+            id: wb::DocumentTypeId::new("test.shapes"),
+            title: "图形文档".to_string(),
+            extensions: vec!["shapes".to_string()],
+            create_default: || Box::new(TestDoc),
+            serialize: |_| Ok(Vec::new()),
+            deserialize: |_| Ok(Box::new(TestDoc)),
+            open_view: None,
+            undo_hooks: None,
+            source: None,
+        });
         reg.work_modes = vec!["A".into(), "B".into()];
         reg.default_mode = "A".into();
     }
@@ -54,8 +65,11 @@ impl wb::ViewInstance for TestView {
     fn title(&self) -> String {
         "测试视图".to_string()
     }
-    fn paint(&mut self, p: &mut dyn wb::PaintBackend, rect: wb::Rect, _ctx: &mut wb::ViewCtx) {
-        p.fill_rect(rect, wb::Color::GRAY, 0.0);
+    fn element(
+        &mut self,
+        _host: &mut dyn wb::AppServices,
+    ) -> Option<Box<dyn std::any::Any>> {
+        None
     }
 }
 
@@ -63,6 +77,43 @@ fn builder() -> WorkbenchAppBuilder {
     WorkbenchAppBuilder::new("test.product", "测试产品")
         .with_workbench(TestWb)
         .with_layout_path(std::env::temp_dir().join("workbench-rs-test").join("layout.json"))
+}
+
+/// A workbench contributing a second document type, to exercise the
+/// "which one is the default" question.
+struct SecondDocWb;
+
+impl wb::Workbench for SecondDocWb {
+    fn id(&self) -> wb::WorkbenchId {
+        wb::WorkbenchId::new("wb-second-doc")
+    }
+    fn init(&self, reg: &mut wb::Registry) {
+        reg.register_document_type(wb::DocumentTypeDef {
+            id: wb::DocumentTypeId::new("test.second"),
+            title: "第二文档".to_string(),
+            extensions: vec!["second".to_string()],
+            create_default: || Box::new(TestDoc),
+            serialize: |_| Ok(Vec::new()),
+            deserialize: |_| Ok(Box::new(TestDoc)),
+            open_view: None,
+            undo_hooks: None,
+            source: None,
+        });
+    }
+}
+
+/// Minimal document payload for the second type.
+struct TestDoc;
+impl wb::DocumentContent for TestDoc {
+    fn dup(&self) -> Box<dyn wb::DocumentContent> {
+        Box::new(TestDoc)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 fn app() -> AppRuntime {
@@ -77,6 +128,49 @@ fn 装配_注册与面板命令() {
     assert!(a.command_title("app.toggle_panel.test.panel").is_some());
     assert!(a.command_title("app.undo").is_some());
     assert_eq!(a.host.ws.work_mode, "A");
+}
+
+fn default_doc_builder(with_second: bool) -> WorkbenchAppBuilder {
+    let builder = WorkbenchAppBuilder::new("test.default-doc", "默认文档")
+        .with_workbench(TestWb)
+        .with_layout_path(std::env::temp_dir().join("workbench-rs-test").join("layout.json"))
+        .create_default_document(true);
+    if with_second {
+        builder.with_workbench(SecondDocWb)
+    } else {
+        builder
+    }
+}
+
+#[test]
+fn 多文档类型时默认类型由产品指定() {
+    let active_type = |builder: WorkbenchAppBuilder| {
+        builder
+            .build()
+            .expect("装配失败")
+            .host
+            .docs
+            .active()
+            .map(|d| d.type_id.0.clone())
+    };
+
+    // Without a preference the first registered type wins.
+    assert_eq!(
+        active_type(default_doc_builder(true)),
+        Some("test.shapes".to_string())
+    );
+
+    // The product can name the default explicitly.
+    assert_eq!(
+        active_type(default_doc_builder(true).with_default_document_type("test.second")),
+        Some("test.second".to_string())
+    );
+
+    // An unknown id falls back rather than failing the build.
+    assert_eq!(
+        active_type(default_doc_builder(false).with_default_document_type("test.missing")),
+        Some("test.shapes".to_string())
+    );
 }
 
 #[test]
@@ -162,6 +256,7 @@ fn 文档_编辑撤销重做与修订号() {
             },
             open_view: None,
             undo_hooks: None,
+            source: None,
         })
         .unwrap();
     let id = a.host.docs.create(&wb::DocumentTypeId::new("test.doc"), "d").unwrap();
@@ -251,6 +346,7 @@ fn 文档_委托式撤销() {
                 can_undo: |c| !delegated_doc(c).undo_stack.is_empty(),
                 can_redo: |c| !delegated_doc(c).redo_stack.is_empty(),
             }),
+            source: None,
         })
         .unwrap();
     let id = a
@@ -292,6 +388,7 @@ fn 文档_后台提交版本校验() {
             deserialize: |_b| Ok(Box::new(0u32)),
             open_view: None,
             undo_hooks: None,
+            source: None,
         })
         .unwrap();
     let id = a.host.docs.create(&wb::DocumentTypeId::new("test.doc2"), "d").unwrap();
@@ -572,6 +669,7 @@ fn 阶段2_文档修订号查询() {
             deserialize: |_| Ok(Box::new(0u32)),
             open_view: None,
             undo_hooks: None,
+            source: None,
         })
         .unwrap();
     let id = a.host.docs.create(&wb::DocumentTypeId::new("t.doc"), "d").unwrap();

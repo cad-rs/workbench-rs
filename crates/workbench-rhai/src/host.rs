@@ -37,6 +37,8 @@ pub struct Collected {
     pub toolbar: Vec<(String, String, Option<String>)>,
     /// (面板 id, 标题, 脚本绝对路径, 停靠区字符串)
     pub panels: Vec<(String, String, std::path::PathBuf, String)>,
+    /// (视图 id, 标题, 脚本绝对路径)
+    pub views: Vec<(String, String, std::path::PathBuf)>,
     pub notes: Vec<String>,
 }
 
@@ -114,7 +116,7 @@ pub fn build_load_engine(plugin_dir: std::path::PathBuf, collected: SharedCollec
     // register_panel(id, title, script, area) — 脚本 UI 面板（gpui-rhai 渲染）
     {
         let collected = collected.clone();
-        let dir = plugin_dir;
+        let dir = plugin_dir.clone();
         engine.register_fn(
             "register_panel",
             move |id: &str, title: &str, script: &str, area: &str| {
@@ -124,6 +126,18 @@ pub fn build_load_engine(plugin_dir: std::path::PathBuf, collected: SharedCollec
                 }
                 let mut c = collected.lock().unwrap_or_else(|p| p.into_inner());
                 c.panels.push((id.into(), title.into(), dir.join(script), area));
+            },
+        );
+    }
+    // register_view(id, title, script) — script central view (gpui-rhai rendered)
+    {
+        let collected = collected.clone();
+        let dir = plugin_dir;
+        engine.register_fn(
+            "register_view",
+            move |id: &str, title: &str, script: &str| {
+                let mut c = collected.lock().unwrap_or_else(|p| p.into_inner());
+                c.views.push((id.into(), title.into(), dir.join(script)));
             },
         );
     }

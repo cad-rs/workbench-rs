@@ -13,7 +13,6 @@ pub mod cli;
 pub mod dialog;
 pub mod executor;
 pub mod platform_cmds;
-pub mod platform_panels;
 pub mod selfcheck;
 
 pub use app::{AppRuntime, PluginStage, WorkbenchAppBuilder};

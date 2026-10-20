@@ -45,6 +45,7 @@ impl wb::Workbench for PerfWb {
             },
             open_view: None,
             undo_hooks: None,
+            source: None,
         });
     }
 }

@@ -1,5 +1,6 @@
-// Rhai demo plugin entry: registers commands, toolbar items, and one script
-// UI panel (ui/main.rhai) through the host-injected global functions.
+// Rhai demo plugin entry: registers commands, toolbar items, one script UI
+// panel (ui/main.rhai) and one script central view (ui/view.rhai) through the
+// host-injected global functions.
 
 fn register() {
     // 同步命令：UI 线程执行，返回字符串作为备注（返回 () 表示无备注）
@@ -13,7 +14,10 @@ fn register() {
     // 脚本 UI 面板：内容完全由 ui/main.rhai 的 UiNode 树定义
     register_panel("rhai.panel", "Rhai 演示", "ui/main.rhai", "right");
 
-    log_info("Rhai demo 插件已注册（命令 ×2、工具栏组、脚本面板 ×1）");
+    // 脚本中央视图：同一套机制，挂在中央标签上而不是 dock 面板上
+    register_view("rhai.view", "Rhai 视图", "ui/view.rhai");
+
+    log_info("Rhai demo 插件已注册（命令 ×2、工具栏组、脚本面板 ×1、脚本视图 ×1）");
 }
 
 // 同步回调：args 为命令参数表（字符串键值），返回备注字符串

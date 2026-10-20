@@ -30,7 +30,7 @@ use gpui_component::dock::{
 
 use workbench_api as wb;
 
-use super::{col, view_canvas, FrameInput, SharedCore, SlotKey};
+use super::{col, tab_script, view_canvas, SharedCore, SharedViews, SlotKey};
 
 /// The dock area's id (and its version), as persistence expects them.
 const DOCK_AREA_ID: &str = "wb-main";
@@ -57,11 +57,6 @@ fn intern(name: &str) -> &'static str {
 }
 
 // ---- 共享状态（面板实体携带） ----
-
-/// Per-frame input for the paint closures, refreshed by the root view at the
-/// start of every render. Panels live in their own entities now, so they
-/// cannot read the frame the root view built unless it is shared like this.
-pub(crate) type SharedFrame = Rc<RefCell<FrameInput>>;
 
 /// The gpui-rhai view domain, shared between the root view (which mounts) and
 /// the script panels (which draw the mounted view).
@@ -115,7 +110,7 @@ impl ScriptRuntime {
 
     /// The element for a mounted script panel: the ui tree inside its host
     /// container (overlay/focus domain), or the load/run diagnostic.
-    fn element(&self, panel_id: &str) -> AnyElement {
+    pub(crate) fn element(&self, panel_id: &str) -> AnyElement {
         if let Some(err) = self.errors.get(panel_id) {
             return div()
                 .size_full()
@@ -187,14 +182,14 @@ pub(crate) enum PanelRef {
     Empty,
 }
 
-/// The handles every dock panel carries: the model, the frame's input, the
-/// script views, and the presentation mirror. Bundled so creating a panel —
-/// or handing the set to the shell — stays a short call.
+/// The handles every dock panel carries: the model, the script views, the
+/// frontend view instances, and the presentation mirror. Bundled so creating a
+/// panel — or handing the set to the shell — stays a short call.
 #[derive(Clone)]
 pub(crate) struct PanelCtx {
     core: SharedCore,
-    frame: SharedFrame,
     scripts: SharedScripts,
+    views: SharedViews,
     mirror: SharedMirror,
 }
 
@@ -381,7 +376,6 @@ impl Panel for WbPanel {
 
 impl Render for WbPanel {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let frame = self.ctx.frame.borrow().clone();
         match &self.r {
             PanelRef::Empty => div()
                 .size_full()
@@ -391,14 +385,20 @@ impl Render for WbPanel {
                 .text_color(col(wb::Color::GRAY))
                 .child(EMPTY_CENTER_TITLE)
                 .into_any_element(),
-            PanelRef::Central { instance_id } => {
-                view_canvas(self.ctx.core.clone(), frame, SlotKey::Central(*instance_id))
-                    .into_any_element()
-            }
+            PanelRef::Central { instance_id } => view_canvas(
+                self.ctx.views.clone(),
+                self.ctx.core.clone(),
+                self.ctx.scripts.clone(),
+                SlotKey::Central(*instance_id),
+            ),
             PanelRef::Area { panel_id, .. } => match &self.script {
                 Some(_) => self.ctx.scripts.borrow().element(panel_id),
-                None => view_canvas(self.ctx.core.clone(), frame, SlotKey::Panel(panel_id.clone()))
-                    .into_any_element(),
+                None => view_canvas(
+                    self.ctx.views.clone(),
+                    self.ctx.core.clone(),
+                    self.ctx.scripts.clone(),
+                    SlotKey::Panel(panel_id.clone()),
+                ),
             },
         }
     }
@@ -560,8 +560,8 @@ pub(crate) struct DockShell {
 impl DockShell {
     pub(crate) fn new(
         core: SharedCore,
-        frame: SharedFrame,
         scripts: SharedScripts,
+        views: SharedViews,
         mirror: SharedMirror,
         window: &mut Window,
         cx: &mut App,
@@ -578,8 +578,8 @@ impl DockShell {
             installed: false,
             ctx: PanelCtx {
                 core,
-                frame,
                 scripts,
+                views,
                 mirror,
             },
         }
@@ -694,6 +694,17 @@ impl DockShell {
         // dock with the next rebuild; its adapter goes now, so the map cannot
         // grow with every closed tab.
         self.panels.borrow_mut().retain(|name, _| live.contains(name));
+
+        // The view instances follow the slots: drop the ones whose tab or panel
+        // the model no longer has.
+        let live_panels: Vec<String> = [&snap.left, &snap.right, &snap.bottom]
+            .iter()
+            .flat_map(|area| area.panels.iter().map(|p| p.id.clone()))
+            .collect();
+        self.ctx
+            .views
+            .borrow_mut()
+            .prune(&snap.tabs.clone(), &live_panels);
     }
 
     fn sync_area(
@@ -792,6 +803,15 @@ impl DockShell {
         window: &mut Window,
         cx: &mut App,
     ) {
+        // Script central views mount before anything draws them, like the
+        // script panels of the side docks.
+        for instance_id in &snap.tabs {
+            if let Some(script) = tab_script(&self.ctx.core, *instance_id) {
+                let key = format!("wb.tab.{instance_id}");
+                self.ctx.scripts.borrow_mut().mount(&key, &script, window, cx);
+            }
+        }
+
         let active = shown_tab(&snap.tabs, snap.active_tab);
         let mirrored = self.ctx.mirror.borrow().center;
         if !(fresh || self.structure.center != snap.tabs || mirrored != active) {

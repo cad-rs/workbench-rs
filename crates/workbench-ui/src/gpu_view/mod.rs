@@ -3,9 +3,12 @@
 //! 其余桌面自建独立设备离屏回读（`paint_image`）。
 //! 移植自 gpui-wgpu 参考实现（javagg/gpui-demo）的 viewport/gpu/camera/mesh/scene。
 //!
-//! 集成方式：[`GpuViewportView`] 实现 [`wb::ViewInstance`]，经
-//! `ViewInstance::native_view` 类型擦除出口被前端识别（[`paint_native_view`]），
-//! 命中后前端直接以 GPU 通道呈现，不再走 2D `PaintBackend`。
+//! 集成方式：[`GpuViewportView`] 实现 [`wb::ViewInstance`]，其 `element`
+//! 返回一个 [`GpuViewportElement`]——一个自绘的 gpui `Element`，在 `paint`
+//! 阶段把一帧交给 `paint_surface` 合成。
+//!
+//! 设备不归属任何一个视图：[`shared_gpu`] 提供全进程共享的 [`Gpu`]，
+//! 供插件自带的自定义 gpui `Element` 建自己的渲染资源。
 
 mod camera;
 mod gpu;
@@ -16,10 +19,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use camera::{OrthoCamera, OrbitCamera};
-use gpu::Gpu;
-use gpui::{Bounds, Pixels, Window};
+use gpui::{
+    App, AnyElement, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta,
+    ScrollWheelEvent, Style, Window,
+};
 use scene::{Pipelines, Scene, Uniforms, ViewState};
 use workbench_api as wb;
+
+pub use gpu::Gpu;
 
 #[derive(Clone, Copy)]
 enum ViewKind {
@@ -29,8 +37,11 @@ enum ViewKind {
     Top2d,
 }
 
-/// 所有 GPU 视口共享的 GPU 资源（device/queue/scene/pipelines）。
-/// Windows / Web 在首帧渲染器就绪后从窗口惰性获取；其余桌面自建设备。
+/// Shared state of the demo GPU viewports (scene + pipelines).
+///
+/// The device is deliberately *not* owned here: it is the process-wide
+/// [`Gpu`] that every GPU view renders on. Only this module's own
+/// scene and pipeline set live here.
 struct ViewportCommon {
     gpu: Rc<Gpu>,
     scene: Rc<Scene>,
@@ -38,35 +49,82 @@ struct ViewportCommon {
 }
 
 impl ViewportCommon {
-    #[cfg(any(target_family = "wasm", target_os = "windows"))]
-    fn from_window(window: &Window) -> Option<Self> {
-        let gpu = Rc::new(Gpu::from_window(window)?);
+    fn new(gpu: Rc<Gpu>) -> Self {
         let scene = Rc::new(Scene::new(&gpu.device));
         let pipes = Rc::new(Pipelines::new(&gpu.device, gpu.target_format));
-        Some(Self { gpu, scene, pipes })
-    }
-
-    #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
-    fn standalone() -> anyhow::Result<Self> {
-        let gpu = Rc::new(Gpu::new()?);
-        let scene = Rc::new(Scene::new(&gpu.device));
-        let pipes = Rc::new(Pipelines::new(&gpu.device, gpu.target_format));
-        Ok(Self { gpu, scene, pipes })
+        Self { gpu, scene, pipes }
     }
 }
 
-/// 共享 GPU 资源槽（渲染发生在 gpui 主线程）。
-/// `Failed` 仅用于非 Windows 桌面的自建设备失败（避免每帧重试阻塞）。
-enum SharedSlot {
-    /// Windows / Web：渲染器未就绪，下一帧重试
+/// Shared GPU slot (rendering happens on the gpui thread).
+/// `Failed` only applies to the standalone-device path, so a device creation
+/// failure does not retry (and block) every frame.
+enum GpuSlot {
+    /// Windows / Web: renderer not ready yet, retry on the next frame.
     NotTried,
-    Ready(Rc<ViewportCommon>),
+    Ready(Rc<Gpu>),
     #[cfg_attr(any(target_family = "wasm", target_os = "windows"), allow(dead_code))]
     Failed,
 }
 
 thread_local! {
-    static SHARED: RefCell<SharedSlot> = const { RefCell::new(SharedSlot::NotTried) };
+    static SHARED_GPU: RefCell<GpuSlot> = const { RefCell::new(GpuSlot::NotTried) };
+}
+
+/// Acquire the process-wide GPU context, initializing it from `window` on
+/// first use.
+///
+/// A plugin-provided WebGPU view calls this from its `Element::paint` and
+/// builds its own pipelines, textures and render targets on the returned
+/// device. Sharing is not optional on Windows / Web: `paint_surface` composites
+/// a texture owned by gpui's renderer, so the texture must live on that
+/// renderer's device.
+///
+/// Returns `None` until gpui's renderer is ready; callers should skip the
+/// frame and retry later rather than treating it as an error.
+pub fn shared_gpu(window: &Window) -> Option<Rc<Gpu>> {
+    SHARED_GPU.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if matches!(&*slot, GpuSlot::NotTried) {
+            #[cfg(any(target_family = "wasm", target_os = "windows"))]
+            {
+                // The renderer may not be ready on the first frame: stay in
+                // NotTried so the next frame retries.
+                if let Some(gpu) = Gpu::from_window(window) {
+                    *slot = GpuSlot::Ready(Rc::new(gpu));
+                }
+            }
+            #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
+            {
+                match Gpu::new() {
+                    Ok(gpu) => *slot = GpuSlot::Ready(Rc::new(gpu)),
+                    Err(err) => {
+                        eprintln!("gpu viewport: failed to init wgpu device: {err}");
+                        *slot = GpuSlot::Failed;
+                    }
+                }
+            }
+        }
+        match &*slot {
+            GpuSlot::Ready(gpu) => Some(gpu.clone()),
+            _ => None,
+        }
+    })
+}
+
+// Demo viewport state (scene + pipelines), built once on top of the shared
+// device and reused by every demo viewport in the process.
+thread_local! {
+    static DEMO_VIEWPORT: RefCell<Option<Rc<ViewportCommon>>> = const { RefCell::new(None) };
+}
+
+fn demo_viewport(window: &Window) -> Option<Rc<ViewportCommon>> {
+    if let Some(common) = DEMO_VIEWPORT.with(|cell| cell.borrow().as_ref().cloned()) {
+        return Some(common);
+    }
+    let common = Rc::new(ViewportCommon::new(shared_gpu(window)?));
+    DEMO_VIEWPORT.with(|cell| *cell.borrow_mut() = Some(common.clone()));
+    Some(common)
 }
 
 /// web 端自备的深度缓冲（WgpuRenderTarget 只有颜色）
@@ -99,11 +157,11 @@ impl DepthTarget {
     }
 }
 
-/// 一个 GPU 视口视图实例（中央标签内容）。
-struct GpuViewportView {
-    kind: ViewKind,
-    type_id: &'static str,
-    title: &'static str,
+/// Mutable viewport state, shared between the view and its element.
+///
+/// The element needs live access to the camera and the GPU resources, so the
+/// state lives behind an `Rc` that both sides clone.
+struct GpuViewportInner {
     orbit: OrbitCamera,
     ortho: OrthoCamera,
     view_state: Option<ViewState>,
@@ -113,7 +171,7 @@ struct GpuViewportView {
     web_target: Option<gpui_wgpu::WgpuRenderTarget>,
     #[cfg(any(target_family = "wasm", target_os = "windows"))]
     depth: Option<DepthTarget>,
-    /// 拖拽状态（上一帧指针位置）
+    /// Drag state (pointer position of the previous frame).
     dragging: bool,
     last_pos: (f32, f32),
     dirty: bool,
@@ -121,20 +179,9 @@ struct GpuViewportView {
     image: Option<std::sync::Arc<gpui::RenderImage>>,
 }
 
-impl GpuViewportView {
-    fn new3d() -> Self {
-        Self::new(ViewKind::Orbit3d, "example.gpu3d", "三维视图 (wgpu)")
-    }
-
-    fn new_top() -> Self {
-        Self::new(ViewKind::Top2d, "example.gpu_top", "俯视图 (wgpu)")
-    }
-
-    fn new(kind: ViewKind, type_id: &'static str, title: &'static str) -> Self {
+impl GpuViewportInner {
+    fn new() -> Self {
         Self {
-            kind,
-            type_id,
-            title,
             orbit: OrbitCamera::new(),
             ortho: OrthoCamera::new(),
             view_state: None,
@@ -152,40 +199,6 @@ impl GpuViewportView {
         }
     }
 
-    /// 消费本帧输入：拖拽（旋转/平移）与滚轮缩放。
-    fn feed_input(&mut self, input: &wb::ViewInput) {
-        if input.mouse_down {
-            if let Some(p) = input.mouse_pos {
-                if self.dragging {
-                    let dx = p.x - self.last_pos.0;
-                    let dy = p.y - self.last_pos.1;
-                    if dx != 0.0 || dy != 0.0 {
-                        match (self.kind, input.shift) {
-                            (ViewKind::Orbit3d, false) => self.orbit.orbit(dx, dy),
-                            (ViewKind::Orbit3d, true) => self.orbit.pan(dx, dy),
-                            (ViewKind::Top2d, _) => self.ortho.pan(dx, dy),
-                        }
-                        self.dirty = true;
-                    }
-                    self.last_pos = (p.x, p.y);
-                } else {
-                    self.dragging = true;
-                    self.last_pos = (p.x, p.y);
-                }
-            }
-        } else {
-            self.dragging = false;
-        }
-        if let Some(dy) = input.scroll {
-            let factor = (-dy * 0.0012).exp();
-            match self.kind {
-                ViewKind::Orbit3d => self.orbit.zoom(factor),
-                ViewKind::Top2d => self.ortho.zoom(factor),
-            }
-            self.dirty = true;
-        }
-    }
-
     fn ensure_view_state(&mut self, common: &ViewportCommon) {
         if self.view_state.is_none() {
             self.view_state = Some(ViewState::new(
@@ -195,8 +208,8 @@ impl GpuViewportView {
         }
     }
 
-    fn current_uniforms(&self, aspect: f32) -> Uniforms {
-        match self.kind {
+    fn current_uniforms(&self, kind: ViewKind, aspect: f32) -> Uniforms {
+        match kind {
             ViewKind::Orbit3d => {
                 let eye = self.orbit.eye();
                 Uniforms::new(
@@ -209,7 +222,8 @@ impl GpuViewportView {
             ViewKind::Top2d => Uniforms::new(
                 self.ortho.view_proj(aspect),
                 glam::Vec3::new(self.ortho.center.x, 1000.0, self.ortho.center.z),
-                // 光从正上方（观察方向）打下来，得到工程图式的平面投影着色
+                // Light straight down the view direction: an elevation-drawing
+                // style flat projection.
                 glam::Vec3::new(0.0, -1.0, 0.0),
                 0.002,
             ),
@@ -220,6 +234,7 @@ impl GpuViewportView {
     #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
     fn render_if_needed(
         &mut self,
+        kind: ViewKind,
         common: &ViewportCommon,
         width_px: u32,
         height_px: u32,
@@ -243,7 +258,7 @@ impl GpuViewportView {
 
         self.ensure_view_state(common);
         let view_state = self.view_state.as_ref().unwrap();
-        let uniforms = self.current_uniforms(size.0 as f32 / size.1 as f32);
+        let uniforms = self.current_uniforms(kind, size.0 as f32 / size.1 as f32);
         let target = self.target.as_mut().unwrap();
 
         let bytes = target.render_and_read(
@@ -266,7 +281,7 @@ impl GpuViewportView {
 
     /// Windows / Web：把一帧渲染进 `WgpuRenderTarget`（零拷贝，由 paint_surface 合成）。
     #[cfg(any(target_family = "wasm", target_os = "windows"))]
-    fn render_frame(&mut self, common: &ViewportCommon, width_px: u32, height_px: u32) {
+    fn render_frame(&mut self, kind: ViewKind, common: &ViewportCommon, width_px: u32, height_px: u32) {
         let size = (width_px.max(1), height_px.max(1));
         let target_size =
             gpui::size(gpui::DevicePixels(size.0 as i32), gpui::DevicePixels(size.1 as i32));
@@ -291,7 +306,7 @@ impl GpuViewportView {
         let view_state = self.view_state.as_ref().unwrap();
         let web_target = self.web_target.as_ref().unwrap();
         let depth = self.depth.as_ref().unwrap();
-        let uniforms = self.current_uniforms(size.0 as f32 / size.1 as f32);
+        let uniforms = self.current_uniforms(kind, size.0 as f32 / size.1 as f32);
 
         common
             .gpu
@@ -352,66 +367,44 @@ impl GpuViewportView {
         }
     }
 
-    /// 在视图区域绘制一帧（惰性获取共享 GPU 资源；未就绪时画占位背景）。
-    fn paint_into(&mut self, window: &mut Window, bounds: Bounds<Pixels>) {
+    /// Draw one frame into the view area. Draws a placeholder background until
+    /// the process-wide GPU context is available.
+    fn paint_into(&mut self, kind: ViewKind, window: &mut Window, bounds: Bounds<Pixels>) {
         let scale = window.scale_factor();
         let (w, h) = device_size(&bounds, scale);
 
-        SHARED.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            // 惰性初始化共享 GPU 资源
-            if matches!(&*slot, SharedSlot::NotTried) {
-                #[cfg(any(target_family = "wasm", target_os = "windows"))]
-                {
-                    // 首帧渲染器可能未就绪：保持 NotTried，下一帧重试
-                    if let Some(common) = ViewportCommon::from_window(window) {
-                        *slot = SharedSlot::Ready(Rc::new(common));
-                    }
+        let Some(common) = demo_viewport(window) else {
+            crate::paint_placeholder(window, bounds);
+            return;
+        };
+
+        #[cfg(any(target_family = "wasm", target_os = "windows"))]
+        {
+            self.render_frame(kind, &common, w, h);
+            if self.web_target.is_some() {
+                let source = self.surface_source();
+                window.paint_surface(bounds, source);
+            }
+        }
+        #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
+        {
+            match self.render_if_needed(kind, &common, w, h) {
+                Ok(img) => {
+                    let _ = window.paint_image(
+                        bounds,
+                        bounds,
+                        gpui::Corners::all(gpui::px(0.)),
+                        img,
+                        0,
+                        false,
+                    );
                 }
-                #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
-                {
-                    match ViewportCommon::standalone() {
-                        Ok(common) => *slot = SharedSlot::Ready(Rc::new(common)),
-                        Err(err) => {
-                            eprintln!("gpu viewport: failed to init wgpu device: {err}");
-                            *slot = SharedSlot::Failed;
-                        }
-                    }
+                Err(err) => {
+                    eprintln!("gpu viewport render error: {err}");
+                    crate::paint_placeholder(window, bounds);
                 }
             }
-            match &mut *slot {
-                SharedSlot::Ready(common) => {
-                    #[cfg(any(target_family = "wasm", target_os = "windows"))]
-                    {
-                        self.render_frame(common, w, h);
-                        if self.web_target.is_some() {
-                            let source = self.surface_source();
-                            window.paint_surface(bounds, source);
-                        }
-                    }
-                    #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
-                    {
-                        match self.render_if_needed(common, w, h) {
-                            Ok(img) => {
-                                let _ = window.paint_image(
-                                    bounds,
-                                    bounds,
-                                    gpui::Corners::all(gpui::px(0.)),
-                                    img,
-                                    0,
-                                    false,
-                                );
-                            }
-                            Err(err) => {
-                                eprintln!("gpu viewport render error: {err}");
-                                crate::paint_placeholder(window, bounds);
-                            }
-                        }
-                    }
-                }
-                _ => crate::paint_placeholder(window, bounds),
-            }
-        });
+        }
     }
 }
 
@@ -419,6 +412,33 @@ fn device_size(bounds: &Bounds<Pixels>, scale: f32) -> (u32, u32) {
     let w = (f32::from(bounds.size.width) * scale).round().max(1.0) as u32;
     let h = (f32::from(bounds.size.height) * scale).round().max(1.0) as u32;
     (w.min(4096), h.min(4096))
+}
+
+/// A GPU viewport view instance (central tab content).
+struct GpuViewportView {
+    kind: ViewKind,
+    type_id: &'static str,
+    title: &'static str,
+    inner: Rc<RefCell<GpuViewportInner>>,
+}
+
+impl GpuViewportView {
+    fn new3d() -> Self {
+        Self::new(ViewKind::Orbit3d, "example.gpu3d", "三维视图 (wgpu)")
+    }
+
+    fn new_top() -> Self {
+        Self::new(ViewKind::Top2d, "example.gpu_top", "俯视图 (wgpu)")
+    }
+
+    fn new(kind: ViewKind, type_id: &'static str, title: &'static str) -> Self {
+        Self {
+            kind,
+            type_id,
+            title,
+            inner: Rc::new(RefCell::new(GpuViewportInner::new())),
+        }
+    }
 }
 
 impl wb::ViewInstance for GpuViewportView {
@@ -430,86 +450,148 @@ impl wb::ViewInstance for GpuViewportView {
         self.title.to_string()
     }
 
-    /// 2D 回退通道：仅在前端不识别原生视图时出现（正常 gpui 前端不会走到）。
-    fn paint(&mut self, painter: &mut dyn wb::PaintBackend, rect: wb::Rect, _ctx: &mut wb::ViewCtx) {
-        painter.fill_rect(rect, crate::theme::ui_theme().placeholder, 0.0);
-        painter.text(
-            wb::Point::new(rect.pos.x + 24.0, rect.pos.y + 24.0),
-            14.0,
-            wb::Color::GRAY,
-            "当前前端未启用原生 GPU 视图通道（此视图需要 gpui + wgpu 前端）",
-        );
-    }
-
-    fn native_view(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
-}
-
-/// 原生视图绘制入口：先识别前端自有的 [`GpuViewportView`]，再依次尝试
-/// 外部 crate 登记过的呈现器（[`register_native_presenter`]）。
-/// 返回 true 表示已消费（前端不应再走 2D `paint` 通道）。
-pub(crate) fn paint_native_view(
-    inst: &mut dyn wb::ViewInstance,
-    window: &mut Window,
-    bounds: Bounds<Pixels>,
-    input: &wb::ViewInput,
-) -> bool {
-    let Some(native) = inst.native_view() else {
-        return false;
-    };
-    if let Some(vp) = native.downcast_mut::<GpuViewportView>() {
-        vp.feed_input(input);
-        vp.paint_into(window, bounds);
-        return true;
-    }
-    // 复制登记表再派发：绘制期间不持锁（呈现器内部若再注册不会死锁）。
-    let registered = presenters()
-        .lock()
-        .expect("native presenter registry poisoned")
-        .clone();
-    for presenter in registered {
-        if presenter(native, window, bounds, input) {
-            return true;
+    fn element(&mut self, _host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
+        let element: AnyElement = GpuViewportElement {
+            kind: self.kind,
+            inner: self.inner.clone(),
         }
+        .into_any_element();
+        Some(Box::new(element))
     }
-    false
 }
 
-/// 前端原生视图呈现器：**外部 crate** 接入原生视图通道的通用出口。
+/// A gpui element that renders one GPU viewport.
 ///
-/// `workbench-api` 只有 GUI 无关的
-/// [`wb::ViewInstance::native_view`]（`&mut dyn Any`），具体类型由前端与其
-/// 视图扩展约定；产品侧的视图类型实现本 trait 并在 workbench `init` 里登记
-/// （[`register_native_presenter`]），前端即可命中原生通道，不再走 2D
-/// `PaintBackend`。视图类型的 `native_view()` 返回 `Some(self)`。
-pub trait NativeViewportPresenter: 'static {
-    /// 以原生通道绘制一帧；`bounds` 是该视图在本帧的屏幕区域（逻辑像素）。
-    fn paint_native(&mut self, window: &mut Window, bounds: Bounds<Pixels>, input: &wb::ViewInput);
+/// Pointer input is registered during `paint` — gpui clears window listeners
+/// after every frame — and drives the camera for the next frame.
+struct GpuViewportElement {
+    kind: ViewKind,
+    inner: Rc<RefCell<GpuViewportInner>>,
 }
 
-/// 一次呈现尝试：命中本类型则绘制并返回 true。
-type PresenterDispatch =
-    fn(&mut dyn std::any::Any, &mut Window, Bounds<Pixels>, &wb::ViewInput) -> bool;
+impl IntoElement for GpuViewportElement {
+    type Element = Self;
 
-fn presenters() -> &'static std::sync::Mutex<Vec<PresenterDispatch>> {
-    static PRESENTERS: std::sync::OnceLock<std::sync::Mutex<Vec<PresenterDispatch>>> =
-        std::sync::OnceLock::new();
-    PRESENTERS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+    fn into_element(self) -> Self::Element {
+        self
+    }
 }
 
-/// 登记一个外部原生视图呈现器（在 workbench `init` 的视图注册旁调用一次）。
-pub fn register_native_presenter<T: NativeViewportPresenter>() {
-    presenters()
-        .lock()
-        .expect("native presenter registry poisoned")
-        .push(|any, window, bounds, input| match any.downcast_mut::<T>() {
-            Some(view) => {
-                view.paint_native(window, bounds, input);
-                true
+impl Element for GpuViewportElement {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        // No children: the viewport fills whatever its parent gives it.
+        (window.request_layout(Style::default(), [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        self.register_input(window, bounds);
+        self.inner.borrow_mut().paint_into(self.kind, window, bounds);
+    }
+}
+
+impl GpuViewportElement {
+    /// Register the pointer handlers that drive this viewport's camera.
+    fn register_input(&self, window: &mut Window, bounds: Bounds<Pixels>) {
+        let origin = bounds.origin;
+
+        let inner = self.inner.clone();
+        window.on_mouse_event(move |ev: &MouseDownEvent, phase, _window, _cx| {
+            if phase.bubble() && ev.button == MouseButton::Left {
+                let mut v = inner.borrow_mut();
+                v.dragging = true;
+                v.last_pos = (
+                    f32::from(ev.position.x - origin.x),
+                    f32::from(ev.position.y - origin.y),
+                );
             }
-            None => false,
         });
+
+        let inner = self.inner.clone();
+        let kind = self.kind;
+        window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _window, _cx| {
+            if !phase.bubble() || !ev.dragging() {
+                return;
+            }
+            let mut v = inner.borrow_mut();
+            let p = (
+                f32::from(ev.position.x - origin.x),
+                f32::from(ev.position.y - origin.y),
+            );
+            let (dx, dy) = (p.0 - v.last_pos.0, p.1 - v.last_pos.1);
+            if dx != 0.0 || dy != 0.0 {
+                match (kind, ev.modifiers.shift) {
+                    (ViewKind::Orbit3d, false) => v.orbit.orbit(dx, dy),
+                    (ViewKind::Orbit3d, true) => v.orbit.pan(dx, dy),
+                    (ViewKind::Top2d, _) => v.ortho.pan(dx, dy),
+                }
+                v.dirty = true;
+            }
+            v.last_pos = p;
+        });
+
+        let inner = self.inner.clone();
+        window.on_mouse_event(move |ev: &MouseUpEvent, phase, _window, _cx| {
+            if phase.bubble() {
+                inner.borrow_mut().dragging = false;
+            }
+        });
+
+        let inner = self.inner.clone();
+        let kind = self.kind;
+        window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, _window, _cx| {
+            if !phase.bubble() {
+                return;
+            }
+            let delta = match ev.delta {
+                ScrollDelta::Pixels(p) => f32::from(p.y),
+                ScrollDelta::Lines(p) => p.y * 20.0,
+            };
+            let factor = (-delta * 0.0012).exp();
+            let mut v = inner.borrow_mut();
+            match kind {
+                ViewKind::Orbit3d => v.orbit.zoom(factor),
+                ViewKind::Top2d => v.ortho.zoom(factor),
+            }
+            v.dirty = true;
+        });
+    }
 }
 
 /// 注册两个演示 GPU 视图、打开命令与 Ribbon 入口（产品装配时调用；

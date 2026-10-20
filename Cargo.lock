@@ -8237,6 +8237,7 @@ dependencies = [
 name = "workbench-example"
 version = "0.1.0"
 dependencies = [
+ "gpui-ce",
  "serde",
  "serde_json",
  "workbench-api",

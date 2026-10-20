@@ -6,19 +6,26 @@
 //! `script` path are instead mounted as gpui-rhai script views (UiNode trees
 //! authored in Rhai).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    canvas, div, prelude::*, px, quad, relative, rgb_to_hsla, size, App, Bounds,
-    Context, Corners, Edges, Hsla, KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, TextAlign, TextRun,
-    TitlebarOptions, TransformationMatrix, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, quad, relative, rgb_to_hsla, size, AnyElement, App, Bounds, Context, Corners, Edges,
+    ElementId, GlobalElementId, InspectorElementId, Hsla, KeyDownEvent, LayoutId,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
+    ScrollWheelEvent, SharedString, Style, StyleRefinement, TextAlign, TextRun, TitlebarOptions,
+    TransformationMatrix, Window, WindowBounds, WindowOptions,
 };
 
 use workbench_api as wb;
 use workbench_core::AppRuntime;
 
 pub mod gpu_view;
+
+/// Built-in platform panels (diagnostics / plugins).
+pub mod platform_panels;
 
 pub(crate) mod dock_panel;
 
@@ -80,7 +87,7 @@ impl gpui::AssetSource for WbAssets {
 
 // ---- 颜色转换 ----
 
-fn col(c: wb::Color) -> Hsla {
+pub fn col(c: wb::Color) -> Hsla {
     rgb_to_hsla(Rgba::new(c.r, c.g, c.b, c.a))
 }
 
@@ -96,210 +103,6 @@ fn ui_font() -> gpui::Font {
     }
 }
 
-// ---- PaintBackend 的 gpui 实现 ----
-
-struct GpuiPainter<'a> {
-    window: &'a mut Window,
-    cx: &'a mut App,
-    origin: Point<Pixels>,
-}
-
-impl GpuiPainter<'_> {
-    fn bounds_of(&self, r: wb::Rect) -> Bounds<Pixels> {
-        Bounds {
-            origin: Point::new(self.origin.x + px(r.pos.x), self.origin.y + px(r.pos.y)),
-            size: size(px(r.size.w), px(r.size.h)),
-        }
-    }
-
-    fn paint_quad_simple(&mut self, r: wb::Rect, color: wb::Color, radius: f32) {
-        let q = quad(
-            self.bounds_of(r),
-            Corners::all(px(radius)),
-            col(color),
-            Edges::all(px(0.)),
-            gpui::transparent_black(),
-            gpui::BorderStyle::default(),
-        );
-        self.window.paint_quad(q);
-    }
-}
-
-impl wb::PaintBackend for GpuiPainter<'_> {
-    fn fill_rect(&mut self, rect: wb::Rect, color: wb::Color, corner_radius: f32) {
-        self.paint_quad_simple(rect, color, corner_radius);
-    }
-
-    fn stroke_rect(&mut self, rect: wb::Rect, color: wb::Color, width: f32, corner_radius: f32) {
-        let q = quad(
-            self.bounds_of(rect),
-            Corners::all(px(corner_radius)),
-            gpui::transparent_black(),
-            Edges::all(px(width)),
-            col(color),
-            gpui::BorderStyle::default(),
-        );
-        self.window.paint_quad(q);
-    }
-
-    fn line(&mut self, a: wb::Point, b: wb::Point, color: wb::Color, width: f32) {
-        // 用细四边形近似线段（垂直/水平精确，斜线为包围盒近似）。
-        let x0 = a.x.min(b.x);
-        let y0 = a.y.min(b.y);
-        let x1 = a.x.max(b.x);
-        let y1 = a.y.max(b.y);
-        let r = if x1 - x0 < 0.5 {
-            wb::Rect::new(a.x - width * 0.5, y0, width, (y1 - y0).max(width))
-        } else if y1 - y0 < 0.5 {
-            wb::Rect::new(x0, a.y - width * 0.5, (x1 - x0).max(width), width)
-        } else {
-            wb::Rect::new(x0, y0, x1 - x0, y1 - y0)
-        };
-        self.paint_quad_simple(r, color, 0.0);
-    }
-
-    fn fill_circle(&mut self, center: wb::Point, radius: f32, color: wb::Color) {
-        let r = wb::Rect::new(
-            center.x - radius,
-            center.y - radius,
-            radius * 2.0,
-            radius * 2.0,
-        );
-        self.paint_quad_simple(r, color, radius);
-    }
-
-    fn text(&mut self, pos: wb::Point, font_size: f32, color: wb::Color, text: &str) {
-        let text: SharedString = text.to_string().into();
-        let run = TextRun {
-            len: text.len(),
-            font: ui_font(),
-            color: col(color),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-            letter_spacing: None,
-        };
-        let line = self
-            .window
-            .text_system()
-            .shape_line(text, px(font_size), &[run], None);
-        let _ = line.paint(
-            Point::new(self.origin.x + px(pos.x), self.origin.y + px(pos.y)),
-            px(font_size * 1.3),
-            TextAlign::Left,
-            None,
-            self.window,
-            self.cx,
-        );
-    }
-
-    fn text_size(&mut self, font_size: f32, text: &str) -> wb::Size {
-        let text: SharedString = text.to_string().into();
-        let run = TextRun {
-            len: text.len(),
-            font: ui_font(),
-            color: black(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-            letter_spacing: None,
-        };
-        let line = self
-            .window
-            .text_system()
-            .shape_line(text, px(font_size), &[run], None);
-        wb::Size::new(line.width().as_f32(), font_size * 1.3)
-    }
-
-    /// 绘制 SVG 图标（等比缩放，绘制区域取 rect 与图标宽高比的较小者）。
-    /// 资源缺失时静默不绘制（与 gpui svg 元素行为一致）。
-    fn draw_icon(&mut self, rect: wb::Rect, path: &str, color: wb::Color) {
-        let _ = self.window.paint_svg(
-            self.bounds_of(rect),
-            path.into(),
-            None,
-            TransformationMatrix::unit(),
-            col(color),
-            self.cx,
-        );
-    }
-}
-
-// ---- 输入事件中转 ----
-
-#[derive(Clone, Copy, Debug)]
-struct InputEv {
-    pos: (f32, f32), // 窗口坐标
-    /// 事件时的 Shift 修饰键
-    shift: bool,
-    kind: EvKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum EvKind {
-    Down,
-    Up,
-    Move,
-    /// 滚轮（像素增量，向下为正）
-    Scroll(f32),
-}
-
-/// 追加一条窗口级输入事件（四个输入处理器共享）。
-fn push_input(events: &Arc<Mutex<Vec<InputEv>>>, pos: (f32, f32), shift: bool, kind: EvKind) {
-    events
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .push(InputEv { pos, shift, kind });
-}
-
-/// 渲染期共享给绘制闭包的输入快照。
-#[derive(Clone)]
-struct FrameInput {
-    events: Arc<Mutex<Vec<InputEv>>>,
-    mouse_down: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl FrameInput {
-    fn input_for(&self, bounds: &Bounds<Pixels>) -> wb::ViewInput {
-        let (ox, oy) = (bounds.origin.x.as_f32(), bounds.origin.y.as_f32());
-        let (w, h) = (bounds.size.width.as_f32(), bounds.size.height.as_f32());
-        let rect = wb::Rect::new(ox, oy, w, h);
-        let events = self
-            .events
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
-        let clicked = events
-            .iter()
-            .any(|e| e.kind == EvKind::Up && rect.contains(wb::Point::new(e.pos.0, e.pos.1)));
-        let mouse_pos = events
-            .iter()
-            .next_back()
-            .map(|e| wb::Point::new(e.pos.0, e.pos.1))
-            .filter(|p| rect.contains(*p))
-            .map(|p| wb::Point::new(p.x - ox, p.y - oy));
-        let shift = events.iter().next_back().map(|e| e.shift).unwrap_or(false);
-        let scroll_total: f32 = events
-            .iter()
-            .filter(|e| {
-                matches!(e.kind, EvKind::Scroll(_))
-                    && rect.contains(wb::Point::new(e.pos.0, e.pos.1))
-            })
-            .map(|e| match e.kind {
-                EvKind::Scroll(d) => d,
-                _ => 0.0,
-            })
-            .sum();
-        wb::ViewInput {
-            mouse_pos,
-            mouse_down: self.mouse_down.load(std::sync::atomic::Ordering::Relaxed),
-            clicked,
-            shift,
-            scroll: (scroll_total != 0.0).then_some(scroll_total),
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 enum SlotKey {
     Central(u64),
@@ -311,19 +114,17 @@ enum SlotKey {
 struct RootView {
     core: SharedCore,
     last_render: web_time::Instant,
-    events: Arc<Mutex<Vec<InputEv>>>,
-    mouse_down: Arc<std::sync::atomic::AtomicBool>,
     /// The dock area and its mirror of the model (built on the first frame:
     /// `RootView::new` has no window to build it with).
     dock: Option<dock_panel::DockShell>,
     /// The persisted dock layout to re-establish, applied on the first frame
     /// after the model-driven sync has built this session's panels.
     pending_dock: Option<gpui_component::dock::DockAreaState>,
-    /// Per-frame input for the paint closures, shared with the dock panels.
-    frame: dock_panel::SharedFrame,
     /// gpui-rhai script view domain (per window; created at the first script
     /// panel mount, shared with the panels that draw them).
     scripts: dock_panel::SharedScripts,
+    /// Frontend-owned view instances, one per open slot.
+    views: SharedViews,
     /// What the dock is showing, as last mirrored into the model.
     mirror: dock_panel::SharedMirror,
     /// Ribbon 挂载点（ribbon crate 实体；首帧懒构建，模式同 dock）。
@@ -335,17 +136,12 @@ impl RootView {
         Self {
             core,
             last_render: web_time::Instant::now(),
-            events: Arc::new(Mutex::new(Vec::new())),
-            mouse_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             dock: None,
             pending_dock,
-            frame: std::rc::Rc::new(std::cell::RefCell::new(FrameInput {
-                events: Arc::new(Mutex::new(Vec::new())),
-                mouse_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            })),
             scripts: std::rc::Rc::new(std::cell::RefCell::new(
                 dock_panel::ScriptRuntime::default(),
             )),
+            views: std::rc::Rc::new(std::cell::RefCell::new(ViewRuntime::default())),
             mirror: std::rc::Rc::new(std::cell::RefCell::new(
                 dock_panel::DockMirror::default(),
             )),
@@ -395,75 +191,162 @@ pub(crate) fn paint_placeholder(window: &mut Window, bounds: Bounds<Pixels>) {
 
 /// 面板/中央视图绘制到 canvas。
 /// 实例存放在核心状态内，绘制需要 &mut 核心——先换出、绘制、再放回。
-fn view_canvas(core: SharedCore, frame: FrameInput, key: SlotKey) -> impl IntoElement {
-    canvas(
-        move |_bounds, _window, _cx| {},
-        move |bounds, _state, window, cx| {
-            let input = frame.input_for(&bounds);
-            let area = wb::Rect::new(
-                0.0,
-                0.0,
-                bounds.size.width.as_f32(),
-                bounds.size.height.as_f32(),
-            );
-            let Ok(mut guard) = core.lock() else {
-                return;
-            };
-            let mut instance: Option<Box<dyn wb::ViewInstance>> = match &key {
-                SlotKey::Central(id) => guard
-                    .host
-                    .ws
-                    .tabs
-                    .iter_mut()
-                    .find(|t| t.instance_id.0 == *id)
-                    .and_then(|t| t.instance.take()),
-                SlotKey::Panel(id) => guard
-                    .host
-                    .ws
-                    .panels
-                    .iter_mut()
-                    .find(|p| &p.id.0 == id)
-                    .and_then(|p| p.instance.take()),
-            };
-            {
-                let Some(inst) = instance.as_mut() else {
-                    return;
-                };
-                // 原生视图优先（GPU 视口等）：命中则前端直接呈现，不走 2D 通道
-                if !gpu_view::paint_native_view(inst.as_mut(), window, bounds, &input) {
-                    let mut painter = GpuiPainter {
-                        window,
-                        cx,
-                        origin: bounds.origin,
-                    };
-                    let mut ctx = wb::ViewCtx::new(&mut *guard as &mut dyn wb::AppServices, input);
-                    inst.paint(&mut painter, area, &mut ctx);
-                }
-            }
-            if let Some(inst) = instance.take() {
-                match &key {
-                    SlotKey::Central(id) => {
-                        if let Some(slot) = guard
-                            .host
-                            .ws
-                            .tabs
-                            .iter_mut()
-                            .find(|t| t.instance_id.0 == *id)
-                        {
-                            slot.instance = Some(inst);
-                        }
-                    }
-                    SlotKey::Panel(id) => {
-                        if let Some(slot) = guard.host.ws.panels.iter_mut().find(|p| &p.id.0 == id)
-                        {
-                            slot.instance = Some(inst);
-                        }
-                    }
-                }
-            }
+/// The element that renders one workspace slot (central tab or dock panel).
+///
+/// This replaces the former `canvas`-based slot. `canvas` is a one-shot
+/// element — both of its closures are `FnOnce` — so a slot that lives as long
+/// as its tab or panel needs a real `Element` whose state survives across
+/// frames.
+/// Frontend-owned view instances, keyed by slot.
+///
+/// The model keeps only slot metadata; the frontend creates each instance from
+/// its view type's factory the first time it mounts the slot and keeps it
+/// alive as long as the slot is open.
+#[derive(Default)]
+pub(crate) struct ViewRuntime {
+    tabs: HashMap<u64, Rc<RefCell<Box<dyn wb::ViewInstance>>>>,
+    panels: HashMap<String, Rc<RefCell<Box<dyn wb::ViewInstance>>>>,
+}
+
+pub(crate) type SharedViews = Rc<RefCell<ViewRuntime>>;
+
+impl ViewRuntime {
+    /// The instance for a central tab, creating it on first use.
+    pub(crate) fn tab(
+        &mut self,
+        core: &SharedCore,
+        instance_id: u64,
+        type_id: &str,
+    ) -> Option<Rc<RefCell<Box<dyn wb::ViewInstance>>>> {
+        if let Some(v) = self.tabs.get(&instance_id) {
+            return Some(v.clone());
+        }
+        let instance = {
+            let guard = core.lock().ok()?;
+            let def = guard.host.ws.view_def(&wb::ViewTypeId::new(type_id))?;
+            (def.factory)()
+        };
+        let rc = Rc::new(RefCell::new(instance));
+        self.tabs.insert(instance_id, rc.clone());
+        Some(rc)
+    }
+
+    /// The instance for a dock panel, creating it on first use. Script panels
+    /// have no Rust instance (their content is a gpui-rhai view).
+    pub(crate) fn panel(
+        &mut self,
+        core: &SharedCore,
+        panel_id: &str,
+    ) -> Option<Rc<RefCell<Box<dyn wb::ViewInstance>>>> {
+        if let Some(v) = self.panels.get(panel_id) {
+            return Some(v.clone());
+        }
+        let instance = {
+            let guard = core.lock().ok()?;
+            let def = guard.host.ws.panel_def(&wb::PanelId::new(panel_id))?;
+            (def.factory)()
+        };
+        let rc = Rc::new(RefCell::new(instance));
+        self.panels.insert(panel_id.to_string(), rc.clone());
+        Some(rc)
+    }
+
+    /// Drop the instances of slots the model no longer has.
+    pub(crate) fn prune(&mut self, live_tabs: &[u64], live_panels: &[String]) {
+        self.tabs.retain(|id, _| live_tabs.contains(id));
+        self.panels.retain(|id, _| live_panels.contains(id));
+    }
+}
+
+/// The view type id of a central tab, as the model stores it.
+fn tab_type_id(core: &SharedCore, instance_id: u64) -> Option<String> {
+    let guard = core.lock().ok()?;
+    guard
+        .host
+        .ws
+        .tabs
+        .iter()
+        .find(|t| t.instance_id.0 == instance_id)
+        .map(|t| t.type_id.0.clone())
+}
+
+/// The script path of a central tab, as the model stores it (None for a Rust view).
+fn tab_script(core: &SharedCore, instance_id: u64) -> Option<String> {
+    let guard = core.lock().ok()?;
+    guard
+        .host
+        .ws
+        .tabs
+        .iter()
+        .find(|t| t.instance_id.0 == instance_id)
+        .and_then(|t| t.script.clone())
+}
+
+/// The placeholder shown for a slot whose view produced no element.
+fn slot_placeholder() -> AnyElement {
+    div()
+        .size_full()
+        .bg(col(theme::ui_theme().placeholder))
+        .into_any_element()
+}
+
+/// The element a dock panel mounts for one workspace slot.
+///
+/// The view builds its own content as a frontend element tree, reading live
+/// state through the platform host. The handle is type-erased — on the gpui
+/// frontend it is a `gpui::AnyElement`.
+fn view_canvas(
+    views: SharedViews,
+    core: SharedCore,
+    scripts: dock_panel::SharedScripts,
+    key: SlotKey,
+) -> AnyElement {
+    // A script central tab has no Rust instance: the frontend mounts the script
+    // view and draws it here, keyed by the tab instance (`wb.tab.{id}`).
+    if let SlotKey::Central(id) = &key {
+        if tab_script(&core, *id).is_some() {
+            return scripts.borrow().element(&format!("wb.tab.{id}"));
+        }
+    }
+
+    let instance = match &key {
+        SlotKey::Central(id) => match tab_type_id(&core, *id) {
+            Some(type_id) => views.borrow_mut().tab(&core, *id, &type_id),
+            None => None,
         },
-    )
-    .size_full()
+        SlotKey::Panel(id) => views.borrow_mut().panel(&core, id),
+    };
+
+    let Some(instance) = instance else {
+        return slot_placeholder();
+    };
+
+    // The view reads the host while building its element tree, so the model
+    // lock is held for the duration of `element`; the published dispatcher lets
+    // its event handlers reach the same runtime.
+    let element = {
+        let Ok(mut guard) = core.lock() else {
+            return slot_placeholder();
+        };
+        let dispatcher_core = core.clone();
+        wb::publish_dispatcher(std::rc::Rc::new(move |command, args| {
+            let mut guard = dispatcher_core.lock().unwrap_or_else(|p| p.into_inner());
+            guard.execute_command(command, &args)
+        }));
+        let built = instance
+            .borrow_mut()
+            .element(&mut *guard as &mut dyn wb::AppServices);
+        wb::clear_dispatcher();
+        built
+    };
+
+    match element {
+        Some(handle) => match handle.downcast::<AnyElement>() {
+            Ok(element) => *element,
+            Err(_) => slot_placeholder(),
+        },
+        None => slot_placeholder(),
+    }
 }
 
 impl Render for RootView {
@@ -477,22 +360,6 @@ impl Render for RootView {
             self.last_render = now;
             core.record_frame(dt_ms);
         }
-        // 本帧输入快照（事件为窗口坐标；绘制闭包在渲染结束后才执行）
-        let events_snapshot: Arc<Mutex<Vec<InputEv>>> = {
-            let mut cell = self.events.lock().unwrap_or_else(|p| p.into_inner());
-            if cell.len() > 64 {
-                { let len = cell.len(); cell.drain(0..len - 64); }
-            }
-            Arc::new(Mutex::new(std::mem::take(&mut *cell)))
-        };
-        // Publish the frame's input to the dock panels: they are separate
-        // entities now, so this shared cell is how a panel's paint closure
-        // sees the events the root view just collected.
-        *self.frame.borrow_mut() = FrameInput {
-            events: events_snapshot,
-            mouse_down: self.mouse_down.clone(),
-        };
-
         let weak = cx.entity().downgrade();
         let core = self.core.clone();
 
@@ -571,8 +438,8 @@ impl Render for RootView {
         if self.dock.is_none() {
             self.dock = Some(dock_panel::DockShell::new(
                 self.core.clone(),
-                self.frame.clone(),
                 self.scripts.clone(),
+                self.views.clone(),
                 self.mirror.clone(),
                 window,
                 cx,
@@ -613,78 +480,10 @@ impl Render for RootView {
 
         root_col = root_col.child(render_status_bar(&status, core.clone(), weak.clone()));
 
-        // 窗口级输入监听（分隔条/标签拖拽已是 dock 自身的交互，这里只驱动
-        // 视口输入管线与重绘）。
-        // 每次输入都请求重绘：gpui 按需渲染，而视口拖拽/缩放的状态变化发生
-        // 在绘制期（视图实例内），事件侧必须显式 notify 才能驱动下一帧，
-        // 否则拖拽只在其他状态变化时零星刷新（滞后的手感）。
+        // Keyboard shortcuts. Pointer input is not collected here: views are
+        // element trees now, so a view registers its own handlers from its
+        // `Element::paint` (gpui clears window listeners after every frame).
         root_col = root_col
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                {
-                    let ev_cell = self.events.clone();
-                    let down_flag = self.mouse_down.clone();
-                    let weak_d = weak.clone();
-                    move |ev: &MouseDownEvent, _w: &mut Window, cx: &mut App| {
-                        down_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                        push_input(
-                            &ev_cell,
-                            (ev.position.x.as_f32(), ev.position.y.as_f32()),
-                            ev.modifiers.shift,
-                            EvKind::Down,
-                        );
-                        notify(&weak_d, cx);
-                    }
-                },
-            )
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                {
-                    let ev_cell = self.events.clone();
-                    let down_flag = self.mouse_down.clone();
-                    let weak_u = weak.clone();
-                    move |ev: &MouseUpEvent, _w: &mut Window, cx: &mut App| {
-                        down_flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                        push_input(
-                            &ev_cell,
-                            (ev.position.x.as_f32(), ev.position.y.as_f32()),
-                            ev.modifiers.shift,
-                            EvKind::Up,
-                        );
-                        notify(&weak_u, cx);
-                    }
-                },
-            )
-            .on_mouse_move({
-                let ev_cell = self.events.clone();
-                let weak_m = weak.clone();
-                move |ev: &MouseMoveEvent, _w: &mut Window, cx: &mut App| {
-                    push_input(
-                        &ev_cell,
-                        (ev.position.x.as_f32(), ev.position.y.as_f32()),
-                        ev.modifiers.shift,
-                        EvKind::Move,
-                    );
-                    notify(&weak_m, cx);
-                }
-            })
-            .on_scroll_wheel({
-                let ev_cell = self.events.clone();
-                let weak_s = weak.clone();
-                move |ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut App| {
-                    let dy = match ev.delta {
-                        ScrollDelta::Pixels(p) => p.y.as_f32(),
-                        ScrollDelta::Lines(l) => l.y * 40.0,
-                    };
-                    push_input(
-                        &ev_cell,
-                        (ev.position.x.as_f32(), ev.position.y.as_f32()),
-                        ev.modifiers.shift,
-                        EvKind::Scroll(dy),
-                    );
-                    notify(&weak_s, cx);
-                }
-            })
             .on_key_down({
                 let core_k = core.clone();
                 let weak_k = weak.clone();
@@ -845,6 +644,10 @@ fn render_status_bar(
 /// 保持应用存活（页面生命周期 = 应用生命周期）。
 pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> Result<(), String> {
     let mut builder = builder;
+    // The built-in platform panels are view implementations, so the frontend
+    // registers them — before core's `platform_cmds::register` builds the
+    // "窗口" toolbar group, which then picks them up with every other panel.
+    builder = builder.with_plugin_stage(Box::new(platform_panels::register));
     let smoke = builder.smoke_seconds();
     let title: SharedString = window_title.to_string().into();
     let assets = builder.asset_source();
@@ -1072,8 +875,10 @@ mod tests {
     /// hand-written layout.
     #[test]
     fn the_shell_snapshot_covers_every_region() {
+        // Mirror `run()`: the platform panels are registered by the frontend.
         let runtime = workbench_core::WorkbenchAppBuilder::new("test.dock", "Dock snapshot")
             .with_workbench(wb_example::ExampleWorkbench)
+            .with_plugin_stage(Box::new(platform_panels::register))
             .open_on_start("example.welcome", false)
             .build()
             .expect("runtime builds");

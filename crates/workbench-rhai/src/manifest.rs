@@ -22,6 +22,13 @@ pub struct PluginInfo {
     pub version: String,
     pub api_version: String,
     pub entry_point: String,
+    /// Compiled-in Workbench modules this plugin enables.
+    ///
+    /// A plugin is a runtime unit: it does not contain code, it turns on
+    /// modules that were compiled into the product. A script-only plugin
+    /// leaves this out.
+    #[serde(default)]
+    pub modules: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +82,17 @@ fn validate(manifest: &PluginManifest) -> Result<(), String> {
             "entry_point 必须是 .rhai 脚本: {}",
             manifest.plugin.entry_point
         ));
+    }
+    for module in &manifest.plugin.modules {
+        if module.is_empty() {
+            return Err("modules 含空模块 ID".to_string());
+        }
+        if !module
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        {
+            return Err(format!("模块 ID 含非法字符: {module}"));
+        }
     }
     Ok(())
 }

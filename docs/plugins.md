@@ -11,7 +11,7 @@ guide covers the Rhai specifics. A runnable example lives in
 my-plugin/
   plugin.toml        # manifest (required)
   plugin.rhai        # entry script (pointed to by the manifest entry_point)
-  ui/                # optional: script panel (gpui-rhai view)
+  ui/                # optional: script panel / central view (gpui-rhai view)
     main.rhai        #   entry: view(ctx) returns a UiNode tree
     components/      #   vendored registry component sources
     theme.rhai       #   project theme
@@ -53,6 +53,7 @@ time). The following global functions are injected by the host:
 | `add_toolbar_item(group, command, label)` | contribute a Ribbon toolbar item; the group is auto-created (same-id commands merge into the group) |
 | `add_toolbar_item_no_label(group, command)` | same without a label |
 | `register_panel(id, title, script_path, area)` | register a script UI panel (`area`: `"left"`/`"right"`/`"bottom"`/`"top"`; `script_path` relative to the plugin dir) |
+| `register_view(id, title, script_path)` | register a script central view (a singleton central tab; `script_path` relative to the plugin dir) |
 | `log_info(msg)` | assembly-time log (shows up in the platform log) |
 
 ### Sync commands (UI thread)
@@ -145,6 +146,20 @@ Component sources (button/input/label/tag/progress/card/…) come from the
 gpui-rhai registry and are vendored into the plugin's `ui/components/`
 directory — see `plugins/rhai-demo/` for a complete custom-UI panel.
 
+### Script central views (gpui-rhai)
+
+`register_view` is the central-tab counterpart of `register_panel`: the same
+gpui-rhai UiNode tree, mounted as a singleton tab in the central content area
+(one tab per view type). The `view(ctx)` script is identical to a panel's.
+
+```rhai
+fn register() {
+    register_view("my.inspector", "Inspector", "ui/inspector.rhai");
+}
+```
+
+The view opens from the platform's window/view menu like any registered view.
+
 ## Lifecycle and boundaries
 
 - invalid manifest / incompatible `api_version` / `register()` runtime error →
@@ -157,5 +172,6 @@ directory — see `plugins/rhai-demo/` for a complete custom-UI panel.
   `api.document` read-only snapshot + controlled writes via commands);
 - long computation must use background commands; sync commands run on the UI
   thread — anything beyond ~16ms will lag the interface;
-- script UI panels are rendered by the gpui frontend; on wasm32 builds the
-  plugin stage is not mounted (plugin directories are a desktop convenience).
+- script UI panels and script central views are rendered by the gpui frontend;
+  on wasm32 builds the plugin stage is not mounted (plugin directories are a
+  desktop convenience).

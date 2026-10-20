@@ -196,6 +196,12 @@ pub struct ViewDef {
     pub icon: Option<String>,
     /// 是否单例：同类型同时只开一个标签。
     pub singleton: bool,
+    /// Script central view: gpui-rhai script file path (mounted by the gpui
+    /// frontend). When set the tab content is fully defined by the script and
+    /// `factory` is never called.
+    pub script: Option<String>,
+    /// The plugin this view type was contributed by, if any.
+    pub source: Option<String>,
     pub factory: ViewFactory,
 }
 
@@ -211,12 +217,26 @@ impl ViewDef {
             title: title.into(),
             icon: None,
             singleton,
+            script: None,
+            source: None,
             factory: Box::new(factory),
         }
     }
     /// 设置图标资源路径（中央标签展示用）。
     pub fn icon(mut self, path: impl Into<String>) -> Self {
         self.icon = Some(path.into());
+        self
+    }
+    /// Script central view: content is defined by a gpui-rhai script (returns a
+    /// UiNode tree). `path` is the script file path; `factory` is never called
+    /// (pass a placeholder).
+    pub fn script(mut self, path: impl Into<String>) -> Self {
+        self.script = Some(path.into());
+        self
+    }
+    /// Attribute this view type to a plugin, so disabling the plugin removes it.
+    pub fn from_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
         self
     }
 }
@@ -235,6 +255,8 @@ pub struct PanelDef {
     /// 默认尺寸：左右为宽度，上下为高度（逻辑像素）。
     pub default_size: f32,
     pub order: i32,
+    /// The plugin this panel was contributed by, if any.
+    pub source: Option<String>,
     pub factory: ViewFactory,
 }
 
@@ -255,6 +277,7 @@ impl PanelDef {
             area,
             default_size,
             order,
+            source: None,
             factory: Box::new(factory),
         }
     }
@@ -267,6 +290,11 @@ impl PanelDef {
     /// `path` 是脚本文件路径；`factory` 不会被调用（传一个占位即可）。
     pub fn script(mut self, path: impl Into<String>) -> Self {
         self.script = Some(path.into());
+        self
+    }
+    /// Attribute this panel to a plugin, so disabling the plugin removes it.
+    pub fn from_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
         self
     }
 }
@@ -283,7 +311,6 @@ pub struct PanelSlot {
     pub order: i32,
     pub size: f32,
     pub visible: bool,
-    pub instance: Option<Box<dyn ViewInstance>>,
 }
 
 /// 中央标签槽位。
@@ -293,9 +320,11 @@ pub struct TabSlot {
     pub title: String,
     /// 图标资源路径（打开时从 [`ViewDef`] 复制）。
     pub icon: Option<String>,
+    /// Script path copied from the [`ViewDef`] when the tab was opened; `Some`
+    /// means the frontend mounts the script instead of a Rust instance.
+    pub script: Option<String>,
     /// 绑定的文档（文档视图）。
     pub document: Option<DocumentId>,
-    pub instance: Option<Box<dyn ViewInstance>>,
 }
 
 // ---- RibbonBar（design.md §7：Tab → Group → Item，稳定 ID + 命令绑定）----
@@ -455,12 +484,6 @@ impl WorkspaceState {
             order: def.order,
             size: def.default_size,
             visible: visible_by_default,
-            // 脚本面板内容由前端按 script 路径挂载，不创建实例
-            instance: if def.script.is_some() {
-                None
-            } else {
-                Some((def.factory)())
-            },
         };
         self.panel_defs.insert(def.id.0.clone(), def);
         self.area_active
@@ -540,6 +563,10 @@ impl WorkspaceState {
         self.view_defs.get(type_id.as_str())
     }
 
+    pub fn panel_def(&self, id: &PanelId) -> Option<&PanelDef> {
+        self.panel_defs.get(id.as_str())
+    }
+
     pub fn view_type_ids(&self) -> impl Iterator<Item = &ViewTypeId> {
         self.view_defs.values().map(|d| &d.type_id)
     }
@@ -567,7 +594,6 @@ impl WorkspaceState {
                 return Ok(id);
             }
         }
-        let instance = Some((def.factory)());
         let instance_id = TabInstanceId(self.next_tab_instance);
         self.next_tab_instance += 1;
         let title = title_override.unwrap_or_else(|| def.title.clone());
@@ -576,8 +602,8 @@ impl WorkspaceState {
             type_id: type_id.clone(),
             title,
             icon: def.icon.clone(),
+            script: def.script.clone(),
             document: bind_document,
-            instance,
         });
         self.active_tab = self.tabs.len() - 1;
         Ok(instance_id)
@@ -677,6 +703,42 @@ impl WorkspaceState {
         !self.ribbon.iter().any(|t| t.id.0 == self.active_ribbon_tab)
     }
 
+    /// Remove a plugin's contributions from the workspace model (design.md
+    /// §16.2): its view types, panel definitions and slots, and the ribbon
+    /// tabs it contributed.
+    ///
+    /// Tabs whose view type disappeared are closed; panels whose definition
+    /// disappeared are dropped.
+    pub fn remove_from_source(&mut self, source: &str) {
+        self.view_defs
+            .retain(|_, def| def.source.as_deref() != Some(source));
+        self.panel_defs
+            .retain(|_, def| def.source.as_deref() != Some(source));
+
+        let live_panels: std::collections::HashSet<String> =
+            self.panel_defs.keys().cloned().collect();
+        self.panels.retain(|slot| live_panels.contains(&slot.id.0));
+
+        let live_views: std::collections::HashSet<String> =
+            self.view_defs.keys().cloned().collect();
+        self.tabs.retain(|tab| live_views.contains(&tab.type_id.0));
+
+        // Ribbon tabs this source contributed, and the groups inside shared
+        // tabs, go with it.
+        self.ribbon
+            .retain(|tab| tab.source.as_deref() != Some(source));
+        for tab in &mut self.ribbon {
+            tab.groups
+                .retain(|group| group.source.as_deref() != Some(source));
+        }
+        self.ribbon.retain(|tab| !tab.groups.is_empty());
+        if self.active_ribbon_tab_is_gone() {
+            if let Some(first) = self.ribbon.first() {
+                self.active_ribbon_tab = first.id.0.clone();
+            }
+        }
+    }
+
     pub fn set_work_mode(&mut self, mode: impl Into<String>) {
         self.work_mode = mode.into();
     }
@@ -748,7 +810,6 @@ impl WorkspaceState {
         for st in &file.tabs {
             match self.view_defs.get(st.type_id.as_str()) {
                 Some(def) => {
-                    let instance = Some((def.factory)());
                     let instance_id = TabInstanceId(self.next_tab_instance);
                     self.next_tab_instance += 1;
                     self.tabs.push(TabSlot {
@@ -756,8 +817,8 @@ impl WorkspaceState {
                         type_id: def.type_id.clone(),
                         title: st.title.clone(),
                         icon: def.icon.clone(),
+                        script: def.script.clone(),
                         document: None, // 文档不跨会话恢复；需要时由工作台重新绑定
-                        instance,
                     });
                 }
                 None => skipped.push(format!("视图类型 `{}` 未注册，跳过", st.type_id)),

@@ -1,9 +1,13 @@
 //! workbench-rs platform contract layer.
 //!
-//! This crate defines the GUI-agnostic platform APIs: IDs, geometry and the
-//! painting abstraction, commands, tasks, documents, the workspace model, and
-//! Workbench extension points. Workbench modules may only depend on this crate
-//! (never on egui / gpui / wgpu — design.md acceptance item #21).
+//! This crate defines the GUI-agnostic platform APIs: IDs, geometry, commands,
+//! tasks, documents, the workspace model, and Workbench extension points.
+//! Workbench modules may only depend on this crate (never on egui / gpui /
+//! wgpu — design.md acceptance item #21).
+//!
+//! A view's *content* is a frontend element tree, so the view contract hands
+//! the frontend a type-erased element handle rather than a drawing interface;
+//! see [`view::ViewInstance`].
 //!
 //! # Quick reference by downstream role
 //!
@@ -11,17 +15,17 @@
 //! |---|---|
 //! | a product developer | workbench-core's WorkbenchAppBuilder and the cli module |
 //! | a Workbench developer | workbench::Workbench + registry::Registry + command::CommandDef |
-//! | a view/panel author | view::ViewInstance + paint::PaintBackend (GUI-free drawing) |
+//! | a view/panel author | view::ViewInstance (content is a frontend element tree) |
 //! | a plugin host | the workbench-rhai crate (Host API v1, layered on this crate) |
 
 pub mod assets;
 pub mod asyncrt;
 pub mod command;
+pub mod dispatch;
 pub mod documents;
 pub mod geo;
 pub mod ids;
 pub mod log;
-pub mod paint;
 pub mod registry;
 pub mod services;
 pub mod settings;
@@ -41,6 +45,7 @@ pub use command::{
     CommandCtx, CommandDef, CommandExecution, CommandInvocation, CommandKind, CommandResult,
     CtxSnapshot, DocSummary, Hotkey, InvocationRecord, InvocationStatus, KeyCode, SyncHandler,
 };
+pub use dispatch::{clear_dispatcher, dispatch, publish_dispatcher};
 pub use documents::{Document, DocumentContent, DocumentService, DocumentTypeDef, UndoHooks};
 pub use geo::{Color, Point, Rect, Size};
 pub use ids::{
@@ -48,7 +53,6 @@ pub use ids::{
     ViewTypeId, WorkbenchId,
 };
 pub use log::{LogEntry, LogLevel, LogStore};
-pub use paint::{PaintBackend, PaintHelpers};
 pub use registry::Registry;
 pub use services::{AppServices, PluginEntry, RuntimeStats, ServiceHost};
 pub use settings::Settings;
@@ -56,7 +60,7 @@ pub use tasks::{
     task_channel, DocCommit, ProgressHandle, TaskCtx, TaskEvent, TaskEventRx, TaskFailure,
     TaskInfo, TaskJob, TaskKind, TaskManager, TaskOutcome, TaskSession, TaskSpec, TaskStatus,
 };
-pub use view::{ViewCtx, ViewInput, ViewInstance};
+pub use view::ViewInstance;
 pub use workbench::{boxed, Workbench};
 pub use workspace::{
     DockArea, ItemSize, LayoutFile, PanelDef, PanelSlot, RibbonItemKind, RibbonTab, SavedPanel,
