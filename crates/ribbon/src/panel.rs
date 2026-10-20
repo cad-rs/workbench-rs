@@ -23,25 +23,65 @@ use crate::tabs::{button_variant, icon_color, placeholder_glyph};
 use crate::tokens;
 
 /// Renders the 86px panel area showing the active tab's groups.
-pub(crate) fn render_panel(state: &RibbonState, cx: &mut Context<RibbonState>) -> AnyElement {
+pub(crate) fn render_panel(
+    state: &RibbonState,
+    window: &mut Window,
+    cx: &mut Context<RibbonState>,
+) -> AnyElement {
     match state.model.overflow {
         // Group collapse overflow is not implemented yet; the scroll strategy
         // renders as the fallback.
         // TODO(ribbon): implement strategy B (group collapse overflow).
-        OverflowStrategy::Scroll | OverflowStrategy::Collapse => render_scroll_panel(state, cx),
+        OverflowStrategy::Scroll | OverflowStrategy::Collapse => {
+            render_scroll_panel(state, window, cx)
+        }
     }
 }
 
-fn render_scroll_panel(state: &RibbonState, cx: &mut Context<RibbonState>) -> AnyElement {
+fn render_scroll_panel(
+    state: &RibbonState,
+    window: &mut Window,
+    cx: &mut Context<RibbonState>,
+) -> AnyElement {
     let offset = state.clamped_scroll_offset();
     let viewport_w = state.viewport_width();
     let content_w = state.content_width();
     let scrollable = content_w > viewport_w + 0.5;
 
+    // On-demand degradation: when the last frame's measurements show the
+    // content overflowing, degrade one more group (Large items become
+    // Small, right-most first); with enough slack, recover one. Decided at
+    // render time off the previous frame, applied via defer so the next
+    // frame re-renders with the new grouping. The hysteresis band keeps
+    // the oscillation away.
+    let max_degrade = state
+        .active_tab()
+        .map(|tab| layout::count_degradable_groups(&tab.groups))
+        .unwrap_or(0);
+    if content_w > 0.0 && viewport_w > 0.0 {
+        let level = state.degrade_level().min(max_degrade);
+        let new_level = if content_w > viewport_w && level < max_degrade {
+            Some(level + 1)
+        } else if content_w + tokens::DEGRADE_HYSTERESIS < viewport_w && level > 0 {
+            Some(level - 1)
+        } else {
+            None
+        };
+        if let Some(new_level) = new_level {
+            cx.defer_in(window, move |this, _, cx| {
+                this.set_degrade_level(new_level, cx);
+            });
+        }
+    }
+    let level = state.degrade_level().min(max_degrade);
+    let degraded_groups: Vec<RibbonGroupVm> = layout::degrade_tab(state.active_tab(), level)
+        .map(|tab| tab.groups)
+        .unwrap_or_default();
+
     let viewport_cell = state.panel_viewport_w.clone();
     let content_cell = state.panel_content_w.clone();
     let entity = cx.entity();
-    let group_elements = group_children(state, cx);
+    let group_elements = group_children(state, &degraded_groups, cx);
     let left_arrow = scrollable
         .then(|| scroll_arrow(-1.0, true, offset > 0.0, cx));
     let right_arrow = scrollable
@@ -98,13 +138,13 @@ fn render_scroll_panel(state: &RibbonState, cx: &mut Context<RibbonState>) -> An
         .into_any_element()
 }
 
-/// All groups of the active tab, separated by 1px vertical lines.
-fn group_children(state: &RibbonState, cx: &mut Context<RibbonState>) -> Vec<AnyElement> {
-    let groups: &[RibbonGroupVm] = state
-        .active_tab()
-        .map(|tab| tab.groups.as_slice())
-        .unwrap_or(&[]);
-
+/// The (already degraded) groups of the active tab, separated by 1px
+/// vertical lines.
+fn group_children(
+    state: &RibbonState,
+    groups: &[RibbonGroupVm],
+    cx: &mut Context<RibbonState>,
+) -> Vec<AnyElement> {
     let mut children = Vec::with_capacity(groups.len() * 2);
     for group in groups {
         if !children.is_empty() {
@@ -153,6 +193,12 @@ fn render_group(
                     }
                     ColumnPlan::Stack(rows) => v_flex()
                         .items_start()
+                        .children(rows.iter().map(|ix| {
+                            render_row_item(state, &group.items[*ix], &group.id, *ix, cx)
+                        }))
+                        .into_any_element(),
+                    ColumnPlan::IconRow(rows) => h_flex()
+                        .items_center()
                         .children(rows.iter().map(|ix| {
                             render_row_item(state, &group.items[*ix], &group.id, *ix, cx)
                         }))
@@ -388,12 +434,22 @@ fn render_row_item(
     let chrome = ItemChrome::new(state, item);
 
     let mut button = base_button(element_id, item, chrome.checked, cx)
-        // Fixed 3-slot grid row: 86/3 each, top-down; columns with fewer
-        // items leave the lower slots empty (no 2-way division).
+        // Fixed 3-slot grid row: large-column height over three rows,
+        // top-down; columns with fewer items leave the lower slots empty
+        // (no 2-way division).
         .h(px(tokens::ROW_HEIGHT))
         .min_w_0()
         .px(px(2.0))
         .gap(px(2.0))
+        .when(item.size == ItemSize::Icon, |b| {
+            // Icon-tier buttons pack horizontally in icon rows: a fixed
+            // compact width keeps the run tidy; a chevron widens the button.
+            b.w(px(if chrome.shows_chevron() {
+                tokens::ICON_BUTTON_WIDTH + tokens::ICON_CHEVRON_EXTRA
+            } else {
+                tokens::ICON_BUTTON_WIDTH
+            }))
+        })
         .child(row_content(item, chrome.shows_chevron(), chrome.is_split.then_some(&chrome.strip)));
 
     if chrome.shows_chevron() {

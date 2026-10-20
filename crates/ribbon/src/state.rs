@@ -28,6 +28,9 @@ pub struct RibbonState {
     scroll_offset: f32,
     /// Active scroll animation state, if a page-scroll is in progress (transient).
     scroll_animation: Option<ScrollAnimation>,
+    /// How many groups (from the right) are currently degraded from Large
+    /// to Small because the content does not fit the viewport (transient).
+    degrade_level: usize,
     /// The single open dropdown, if any (transient).
     pub(crate) open_popup: Option<PopupHandle>,
     /// Viewport width of the panel scroll area, measured during prepaint.
@@ -54,6 +57,7 @@ impl RibbonState {
             on_event: Box::new(on_event),
             scroll_offset: 0.0,
             scroll_animation: None,
+            degrade_level: 0,
             open_popup: None,
             panel_viewport_w: Rc::new(Cell::new(0.0)),
             panel_content_w: Rc::new(Cell::new(0.0)),
@@ -153,6 +157,21 @@ impl RibbonState {
         self.panel_content_w.get()
     }
 
+    /// Current degrade level: how many groups (from the right) render with
+    /// Large items demoted to Small.
+    pub(crate) fn degrade_level(&self) -> usize {
+        self.degrade_level
+    }
+
+    /// Updates the degrade level; notifies when it actually changed so the
+    /// next frame re-renders with the new grouping.
+    pub(crate) fn set_degrade_level(&mut self, level: usize, cx: &mut Context<Self>) {
+        if self.degrade_level != level {
+            self.degrade_level = level;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn handle_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -241,7 +260,9 @@ impl Render for RibbonState {
             .border_color(tokens::ribbon_border())
             .overflow_hidden()
             .child(tabs::render_tab_strip(self, cx))
-            .when(!collapsed, |root| root.child(panel::render_panel(self, cx)));
+            .when(!collapsed, |root| {
+                root.child(panel::render_panel(self, window, cx))
+            });
 
         match self.open_popup.as_ref() {
             Some(handle) => root.child(popup::render_popup(handle, window)),

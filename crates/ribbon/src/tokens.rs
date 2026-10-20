@@ -101,9 +101,9 @@ pub fn transparent() -> Hsla {
 
 /// Tab strip height.
 pub const TAB_STRIP_HEIGHT: f32 = 30.0;
-/// Panel area height (large item 86 = icon 48 + label 26 + chevron reserve
-/// 12, + group title 16 + margins 8).
-pub const PANEL_HEIGHT: f32 = 110.0;
+/// Panel area height (large item 80 = icon 48 + label 26 + chevron reserve
+/// 6, + group title 16 + margins 8).
+pub const PANEL_HEIGHT: f32 = 104.0;
 /// Large item icon zone height.
 pub const BUTTON_ZONE_HEIGHT: f32 = 48.0;
 /// Two-line label strip (2 x 13px lines) below the icon zone of a large
@@ -112,14 +112,16 @@ pub const LABEL_HEIGHT: f32 = 26.0;
 /// Line height of one large-item label line.
 pub const LABEL_LINE_HEIGHT: f32 = 13.0;
 /// Chevron strip below the label of a Large Split/Menu button (6 o'clock
-/// position: below the text, centered, never covering or moving it).
-pub const CHEVRON_STRIP_HEIGHT: f32 = 12.0;
+/// position: below the text, centered, never covering or moving it). Every
+/// Large button reserves this row so icons and labels sit at identical y
+/// positions whether or not a chevron is present.
+pub const CHEVRON_STRIP_HEIGHT: f32 = 6.0;
 /// Group caption strip height.
 pub const GROUP_TITLE_HEIGHT: f32 = 16.0;
-/// Small-item row height: one third of the large-item column (86/3). Small
+/// Small-item row height: one third of the large-item column (80/3). Small
 /// columns are a fixed 3-slot grid — columns with fewer items leave the
 /// lower slots empty; there is no 2-way division.
-pub const ROW_HEIGHT: f32 = 28.67;
+pub const ROW_HEIGHT: f32 = 26.67;
 /// Column width occupied by a Large item.
 pub const LARGE_COLUMN_WIDTH: f32 = 48.0;
 /// Default combo box width (min 60 / max 300, declarable override).
@@ -144,6 +146,15 @@ pub const POPUP_MIN_WIDTH: f32 = 160.0;
 pub const POPUP_EDGE_MARGIN: f32 = 8.0;
 /// Width of the overlay scroll arrows.
 pub const SCROLL_ARROW_WIDTH: f32 = 15.0;
+/// Icon-tier button width in an icon row (16px icon + 2x4px padding).
+pub const ICON_BUTTON_WIDTH: f32 = 24.0;
+/// Extra width for an icon-tier button carrying a chevron.
+pub const ICON_CHEVRON_EXTRA: f32 = 12.0;
+/// Maximum icon-tier buttons on one icon row.
+pub const ICONS_PER_ROW: usize = 4;
+/// Viewport slack (logical px) required before a degraded group upgrades
+/// back — the hysteresis band that keeps the degrade oscillation-free.
+pub const DEGRADE_HYSTERESIS: f32 = 16.0;
 
 /// Combo width resolution: declared width clamped to [60, 300], else default.
 pub fn combo_width(declared: Option<f32>) -> f32 {
