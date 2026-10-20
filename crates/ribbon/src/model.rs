@@ -124,6 +124,11 @@ pub struct RibbonModel {
     pub active_tab_id: String,
     /// When true the panel area is hidden and only the 30px tab strip remains.
     pub collapsed: bool,
+    /// Whether the collapse feature is enabled. Disabled by default: no
+    /// toggle button is rendered and double-clicking the active tab does
+    /// nothing. When enabled, the host also receives `ToggleCollapse`
+    /// events from the corner button and the tab double-click.
+    pub collapse_enabled: bool,
     pub overflow: OverflowStrategy,
     /// Active work mode name. Kept for diagnostics; filtering already happened
     /// in the bridge.

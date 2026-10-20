@@ -99,27 +99,31 @@ pub(crate) fn render_tab_strip(state: &RibbonState, cx: &mut Context<RibbonState
         // window is too narrow (low priority; Logo/QAT stay pinned left).
     );
 
-    // Collapse toggle at the right end of the strip.
-    let chevron = if collapsed {
-        IconName::ChevronDown
-    } else {
-        IconName::ChevronUp
-    };
-    strip = strip.child(
-        strip_button(
-            SharedString::from("ribbon-collapse"),
-            None,
-            icon_element(Icon::new(chevron), true),
-            cx,
-        )
-        .on_click(cx.listener(
-            |this: &mut RibbonState, _: &ClickEvent, window: &mut Window, cx| {
-                // Collapsing dismisses any open dropdown.
-                this.open_popup = None;
-                this.emit(RibbonEvent::ToggleCollapse, window, cx);
-            },
-        )),
-    );
+    // Collapse toggle at the right end of the strip: rendered only when the
+    // collapse feature is enabled (disabled by default; collapsing is also
+    // available via double-clicking the active tab and Ctrl+F1).
+    if state.model.collapse_enabled {
+        let chevron = if collapsed {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronUp
+        };
+        strip = strip.child(
+            strip_button(
+                SharedString::from("ribbon-collapse"),
+                None,
+                icon_element(Icon::new(chevron), true),
+                cx,
+            )
+            .on_click(cx.listener(
+                |this: &mut RibbonState, _: &ClickEvent, window: &mut Window, cx| {
+                    // Collapsing dismisses any open dropdown.
+                    this.open_popup = None;
+                    this.emit(RibbonEvent::ToggleCollapse, window, cx);
+                },
+            )),
+        );
+    }
 
     strip.into_any_element()
 }
@@ -230,7 +234,9 @@ fn render_tab(
                     event,
                     ClickEvent::Mouse(mouse) if mouse.down.click_count >= 2
                 );
-                if double_click && was_active {
+                // Collapsing is a product capability, disabled by default;
+                // double-click only toggles when the host enables it.
+                if double_click && was_active && this.model.collapse_enabled {
                     this.emit(RibbonEvent::ToggleCollapse, window, cx);
                 } else if !was_active {
                     this.emit(

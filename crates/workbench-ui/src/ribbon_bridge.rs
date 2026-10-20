@@ -43,6 +43,9 @@ pub(crate) fn build_model(core: &AppRuntime, collapsed: bool) -> RibbonModel {
             .collect(),
         active_tab_id: ws.active_ribbon_tab.clone(),
         collapsed,
+        // The collapse feature is a product capability and is disabled by
+        // default: no toggle button, double-click does nothing.
+        collapse_enabled: false,
         overflow: OverflowStrategy::Scroll,
         work_mode: ws.work_mode.clone(),
     }
