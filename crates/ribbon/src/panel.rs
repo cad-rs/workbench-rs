@@ -614,11 +614,9 @@ fn scroll_arrow(
                 .on_click(cx.listener(
                     move |this: &mut RibbonState,
                           _: &ClickEvent,
-                          _window: &mut Window,
+                          window: &mut Window,
                           cx: &mut Context<RibbonState>| {
-                        // TODO(ribbon): animate the page scroll (~150ms);
-                        // currently it jumps instantly.
-                        this.scroll_by_page(direction, cx);
+                        this.scroll_by_page(direction, window, cx);
                     },
                 ))
         })

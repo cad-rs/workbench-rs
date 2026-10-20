@@ -26,12 +26,22 @@ pub struct RibbonState {
     on_event: OnEvent,
     /// Panel horizontal scroll offset in logical pixels (transient).
     scroll_offset: f32,
+    /// Active scroll animation state, if a page-scroll is in progress (transient).
+    scroll_animation: Option<ScrollAnimation>,
     /// The single open dropdown, if any (transient).
     pub(crate) open_popup: Option<PopupHandle>,
     /// Viewport width of the panel scroll area, measured during prepaint.
     pub(crate) panel_viewport_w: Rc<Cell<f32>>,
     /// Total content width of the panel scroll area, measured during prepaint.
     pub(crate) panel_content_w: Rc<Cell<f32>>,
+}
+
+/// In-progress page scroll animation: eases from `start_offset` to
+/// `target_offset` over 150 ms with an ease-out cubic curve.
+struct ScrollAnimation {
+    start_offset: f32,
+    target_offset: f32,
+    start_time: std::time::Instant,
 }
 
 impl RibbonState {
@@ -43,6 +53,7 @@ impl RibbonState {
             model,
             on_event: Box::new(on_event),
             scroll_offset: 0.0,
+            scroll_animation: None,
             open_popup: None,
             panel_viewport_w: Rc::new(Cell::new(0.0)),
             panel_content_w: Rc::new(Cell::new(0.0)),
@@ -159,21 +170,60 @@ impl RibbonState {
         if horizontal == px(0.0) {
             return;
         }
-        // Any scrolling dismisses the open dropdown.
+        // Any scrolling dismisses the open dropdown and cancels any
+        // in-progress page-scroll animation.
         self.open_popup = None;
+        self.scroll_animation = None;
         let max_offset = (self.panel_content_w.get() - self.panel_viewport_w.get()).max(0.0);
         self.scroll_offset = (self.scroll_offset + f32::from(horizontal)).clamp(0.0, max_offset);
         cx.stop_propagation();
         cx.notify();
     }
 
-    /// Scrolls the panel by roughly 80% of the viewport (endpoint arrows).
-    pub(crate) fn scroll_by_page(&mut self, direction: f32, cx: &mut Context<Self>) {
+    /// Advances the page-scroll animation by one frame: interpolates
+    /// `scroll_offset` along an ease-out cubic curve over 150 ms, then
+    /// re-registers itself via `on_next_frame` until the duration elapses.
+    fn tick_scroll_animation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(anim) = self.scroll_animation.as_ref() else {
+            return;
+        };
+        let elapsed_ms = anim.start_time.elapsed().as_millis() as f32;
+        let t = (elapsed_ms / SCROLL_ANIM_DURATION_MS).min(1.0);
+        let eased = ease_out_cubic(t);
+        self.scroll_offset =
+            anim.start_offset + (anim.target_offset - anim.start_offset) * eased;
+        if t < 1.0 {
+            cx.on_next_frame(window, move |this, window, cx| {
+                this.tick_scroll_animation(window, cx);
+            });
+        } else {
+            // Snap to the exact target and clear the animation state.
+            self.scroll_offset = anim.target_offset;
+            self.scroll_animation = None;
+        }
+        cx.notify();
+    }
+
+    /// Scrolls the panel by roughly 80% of the viewport (endpoint arrows)
+    /// with a 150 ms ease-out animation.
+    pub(crate) fn scroll_by_page(&mut self, direction: f32, window: &mut Window, cx: &mut Context<Self>) {
         self.open_popup = None;
         let viewport = self.panel_viewport_w.get().max(0.0);
         let max_offset = (self.panel_content_w.get() - viewport).max(0.0);
-        self.scroll_offset = (self.scroll_offset + direction * viewport * 0.8).clamp(0.0, max_offset);
-        cx.notify();
+        let start = self.clamped_scroll_offset();
+        let target = (start + direction * viewport * 0.8).clamp(0.0, max_offset);
+        // No-op if already at the target.
+        if (target - start).abs() < 0.5 {
+            return;
+        }
+        self.scroll_animation = Some(ScrollAnimation {
+            start_offset: start,
+            target_offset: target,
+            start_time: std::time::Instant::now(),
+        });
+        cx.on_next_frame(window, move |this, window, cx| {
+            this.tick_scroll_animation(window, cx);
+        });
     }
 }
 
@@ -198,4 +248,13 @@ impl Render for RibbonState {
             None => root,
         }
     }
+}
+
+/// Duration of the page-scroll animation in milliseconds.
+const SCROLL_ANIM_DURATION_MS: f32 = 150.0;
+
+/// Ease-out cubic: fast start, gentle deceleration to the target.
+fn ease_out_cubic(t: f32) -> f32 {
+    let inv = 1.0 - t;
+    1.0 - inv * inv * inv
 }
