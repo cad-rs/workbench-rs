@@ -39,3 +39,4 @@ pub use model::{
     RibbonItemVm, RibbonModel, RibbonTabVm,
 };
 pub use state::RibbonState;
+pub use tokens::{set_theme, theme, ThemeKind};

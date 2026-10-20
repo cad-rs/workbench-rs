@@ -931,6 +931,8 @@ pub struct WorkbenchAppBuilder {
     gpu_requirements: Option<Box<dyn std::any::Any>>,
     /// Ribbon 折叠能力开关（ribbon-bar.md §4.5）；默认 false。
     ribbon_collapse_enabled: bool,
+    /// UI 主题名（"dark"/"light"）；写入 settings 默认值，用户设置优先。
+    theme: String,
 }
 
 impl WorkbenchAppBuilder {
@@ -950,6 +952,7 @@ impl WorkbenchAppBuilder {
             backend_label: "unknown".to_string(),
             gpu_requirements: None,
             ribbon_collapse_enabled: false,
+            theme: "dark".to_string(),
         }
     }
 
@@ -998,6 +1001,13 @@ impl WorkbenchAppBuilder {
     /// button, Tab double-click and Ctrl+F1 become active.
     pub fn ribbon_collapse_enabled(mut self, on: bool) -> Self {
         self.ribbon_collapse_enabled = on;
+        self
+    }
+
+    /// UI 主题（`"dark"` / `"light"`）。作为 settings `ui.theme` 的默认值——
+    /// 用户已保存的设置优先。
+    pub fn with_theme(mut self, name: impl Into<String>) -> Self {
+        self.theme = name.into();
         self
     }
 
@@ -1154,6 +1164,12 @@ impl WorkbenchAppBuilder {
         host.settings = settings;
         if let Some(e) = settings_err {
             host.log.warn(format!("[设置] {e}"));
+        }
+        // UI 主题默认值：builder 声明，用户已保存的设置优先。
+        if host.settings.get("ui.theme").is_none() {
+            let _ = host
+                .settings
+                .set("ui.theme", serde_json::Value::String(self.theme.clone()));
         }
         host.stats.backend = self.backend_label.clone();
 

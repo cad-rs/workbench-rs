@@ -435,12 +435,21 @@ struct DemoView {
 
 impl Render for DemoView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().flex().flex_col().w_full().bg(rgb(0x2b2c30)).child(self._ribbon.clone())
+    let bg = match ribbon::theme() {
+        ribbon::ThemeKind::Light => rgb(0xEFEDEB),
+        ribbon::ThemeKind::Dark => rgb(0x2b2c30),
+    };
+    div().flex().flex_col().w_full().bg(bg).child(self._ribbon.clone())
     }
 }
 
 fn main() {
     env_logger::init();
+    // `--light` starts with the light palette (default: dark).
+    let light = std::env::args().any(|a| a == "--light");
+    if light {
+        ribbon::set_theme(ribbon::ThemeKind::Light);
+    }
     let app = gpui_platform::application();
     // Register the demo's SVG icon directory with gpui's AssetRegistry,
     // with gpui-component built-ins as fallback (chevrons, menu glyphs).

@@ -1,31 +1,74 @@
-//! Named color and metric tokens for the RibbonBar (dark theme).
+//! Named color and metric tokens for the RibbonBar (dark + light themes).
 //!
 //! All colors are centralized here so the component never carries bare color
-//! values. Values follow the product dark palette; a light theme would add a
-//! second set of accessors later without touching call sites.
+//! values. The active theme is a process-wide setting (`set_theme`); every
+//! color accessor resolves through it, so call sites stay theme-free. A
+//! metric never depends on the theme.
+
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use gpui::{ColorExt as _, Hsla, hsla, rgb, rgb_to_hsla};
+
+// -- Theme selection --------------------------------------------------------
+
+/// The available ribbon themes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ThemeKind {
+    /// Dark product palette (default).
+    #[default]
+    Dark = 0,
+    /// Light palette (Office-like).
+    Light = 1,
+}
+
+impl ThemeKind {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Light,
+            _ => Self::Dark,
+        }
+    }
+}
+
+static ACTIVE_THEME: AtomicU8 = AtomicU8::new(0);
+
+/// Sets the process-wide ribbon theme.
+pub fn set_theme(kind: ThemeKind) {
+    ACTIVE_THEME.store(kind as u8, Ordering::Relaxed);
+}
+
+/// The active ribbon theme.
+pub fn theme() -> ThemeKind {
+    ThemeKind::from_u8(ACTIVE_THEME.load(Ordering::Relaxed))
+}
+
+fn pick(dark: Hsla, light: Hsla) -> Hsla {
+    match theme() {
+        ThemeKind::Dark => dark,
+        ThemeKind::Light => light,
+    }
+}
 
 // -- Colors -----------------------------------------------------------------
 
 /// Ribbon body background (`COL_TOOLBAR`).
 pub fn ribbon_bg() -> Hsla {
-    rgb_to_hsla(rgb(0x333640))
+    pick(rgb_to_hsla(rgb(0x333640)), rgb_to_hsla(rgb(0xF3F2F1)))
 }
 
 /// Tab strip background, one step darker than the panel (`COL_BG`).
 pub fn tab_strip_bg() -> Hsla {
-    rgb_to_hsla(rgb(0x292B33))
+    pick(rgb_to_hsla(rgb(0x292B33)), rgb_to_hsla(rgb(0xE8E6E3)))
 }
 
 /// Non-active tab text (`LIGHT_GRAY`).
 pub fn tab_text() -> Hsla {
-    rgb_to_hsla(rgb(0xC7C7CC))
+    pick(rgb_to_hsla(rgb(0xC7C7CC)), rgb_to_hsla(rgb(0x4A4A4A)))
 }
 
-/// Active tab text (white).
+/// Active tab text (white / near-black).
 pub fn tab_active_text() -> Hsla {
-    rgb_to_hsla(rgb(0xFFFFFF))
+    pick(rgb_to_hsla(rgb(0xFFFFFF)), rgb_to_hsla(rgb(0x1A1A1A)))
 }
 
 /// Active tab 2px indicator bar (accent).
@@ -35,7 +78,7 @@ pub fn tab_active_bar() -> Hsla {
 
 /// Tab hover background.
 pub fn tab_hover_bg() -> Hsla {
-    rgb_to_hsla(rgb(0x3D404D))
+    pick(rgb_to_hsla(rgb(0x3D404D)), rgb_to_hsla(rgb(0xD9D7D4)))
 }
 
 /// Button resting background (transparent, melts into `ribbon_bg`).
@@ -45,12 +88,12 @@ pub fn btn_rest() -> Hsla {
 
 /// Button hover background.
 pub fn btn_hover() -> Hsla {
-    rgb_to_hsla(rgb(0x4D5261))
+    pick(rgb_to_hsla(rgb(0x4D5261)), rgb_to_hsla(rgb(0xE0DFDC)))
 }
 
 /// Button pressed background.
 pub fn btn_pressed() -> Hsla {
-    rgb_to_hsla(rgb(0x424754))
+    pick(rgb_to_hsla(rgb(0x424754)), rgb_to_hsla(rgb(0xD4D2CF)))
 }
 
 /// Checked toggle background (accent at 25% alpha).
@@ -67,14 +110,14 @@ pub fn accent() -> Hsla {
 // contextual tab styling (rgb(0.9, 0.7, 0.2)); the first version keeps the
 // regular accent.
 
-/// Usable button label / icon color (white).
+/// Usable button label / icon color (white on dark, near-black on light).
 pub fn text() -> Hsla {
-    rgb_to_hsla(rgb(0xFFFFFF))
+    pick(rgb_to_hsla(rgb(0xFFFFFF)), rgb_to_hsla(rgb(0x242424)))
 }
 
-/// Disabled label / icon color (`GRAY`).
+/// Disabled label / icon color.
 pub fn text_disabled() -> Hsla {
-    rgb_to_hsla(rgb(0x80808C))
+    pick(rgb_to_hsla(rgb(0x80808C)), rgb_to_hsla(rgb(0x9A9A9A)))
 }
 
 /// Secondary text (group captions).
@@ -84,12 +127,22 @@ pub fn text_secondary() -> Hsla {
 
 /// Ribbon bottom 1px border.
 pub fn ribbon_border() -> Hsla {
-    rgb_to_hsla(rgb(0x1A1A1F))
+    pick(rgb_to_hsla(rgb(0x1A1A1F)), rgb_to_hsla(rgb(0xD0CECD)))
 }
 
 /// Group vertical separator line and combo box outline.
 pub fn group_sep() -> Hsla {
-    rgb_to_hsla(rgb(0x4D4F5C))
+    pick(rgb_to_hsla(rgb(0x4D4F5C)), rgb_to_hsla(rgb(0xC8C6C4)))
+}
+
+/// Popup surface background (menu dropdowns).
+pub fn popup_bg() -> Hsla {
+    pick(rgb_to_hsla(rgb(0x2A2C34)), rgb_to_hsla(rgb(0xFFFFFF)))
+}
+
+/// Popup hover row background.
+pub fn popup_hover_bg() -> Hsla {
+    pick(rgb_to_hsla(rgb(0x3D404D)), rgb_to_hsla(rgb(0xE8E6E3)))
 }
 
 /// Fully transparent color.
@@ -161,4 +214,26 @@ pub fn combo_width(declared: Option<f32>) -> f32 {
     declared
         .unwrap_or(COMBO_DEFAULT_WIDTH)
         .clamp(COMBO_MIN_WIDTH, COMBO_MAX_WIDTH)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_roundtrips_and_palettes_differ() {
+        let dark_bg = ribbon_bg();
+        let dark_text = text();
+        set_theme(ThemeKind::Light);
+        let light_bg = ribbon_bg();
+        let light_text = text();
+        assert_ne!(dark_bg, light_bg, "background must differ per theme");
+        assert_ne!(dark_text, light_text, "text must differ per theme");
+        assert_eq!(theme(), ThemeKind::Light);
+        set_theme(ThemeKind::Dark);
+        assert_eq!(theme(), ThemeKind::Dark);
+        assert_eq!(ribbon_bg(), dark_bg);
+        // Metrics are theme-independent.
+        assert_eq!(PANEL_HEIGHT, 104.0);
+    }
 }

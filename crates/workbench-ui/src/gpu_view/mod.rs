@@ -432,7 +432,7 @@ impl wb::ViewInstance for GpuViewportView {
 
     /// 2D 回退通道：仅在前端不识别原生视图时出现（正常 gpui 前端不会走到）。
     fn paint(&mut self, painter: &mut dyn wb::PaintBackend, rect: wb::Rect, _ctx: &mut wb::ViewCtx) {
-        painter.fill_rect(rect, wb::Color::rgb(0.10, 0.11, 0.13), 0.0);
+        painter.fill_rect(rect, crate::theme::ui_theme().placeholder, 0.0);
         painter.text(
             wb::Point::new(rect.pos.x + 24.0, rect.pos.y + 24.0),
             14.0,

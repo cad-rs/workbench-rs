@@ -25,6 +25,9 @@ pub(crate) mod dock_panel;
 /// Ribbon 挂载桥（唯一 ribbon crate 耦合点，ribbon-bar.md §5.1）。
 pub(crate) mod ribbon_bridge;
 
+/// UI 主题（dark/light）：shell 配色 + 全窗口主题应用。
+pub mod theme;
+
 /// 平台运行时句柄：全部使用都在 UI 主线程（gpui 前台执行器），故用 `Rc`。
 type SharedCore = std::rc::Rc<Mutex<AppRuntime>>;
 
@@ -84,9 +87,6 @@ fn col(c: wb::Color) -> Hsla {
 fn black() -> Hsla {
     rgb_to_hsla(Rgba::new(0.0, 0.0, 0.0, 1.0))
 }
-
-const COL_BG: wb::Color = wb::Color::rgb(0.16, 0.17, 0.20);
-const COL_TOOLBAR: wb::Color = wb::Color::rgb(0.20, 0.21, 0.25);
 
 fn ui_font() -> gpui::Font {
     gpui::Font {
@@ -385,7 +385,7 @@ pub(crate) fn paint_placeholder(window: &mut Window, bounds: Bounds<Pixels>) {
     let q = quad(
         bounds,
         Corners::all(px(0.)),
-        col(wb::Color::rgb(0.10, 0.11, 0.13)),
+        col(theme::ui_theme().placeholder),
         Edges::all(px(0.)),
         gpui::transparent_black(),
         gpui::BorderStyle::default(),
@@ -606,7 +606,7 @@ impl Render for RootView {
             .flex_col()
             .size_full()
             .font_family("Segoe UI")
-            .bg(col(COL_BG))
+            .bg(col(theme::ui_theme().bg))
             .text_color(col(wb::Color::LIGHT_GRAY))
             .child(ribbon_element)
             .child(dock_element);
@@ -764,7 +764,7 @@ fn render_status_bar(
                     .h(px(8.0))
                     .rounded_sm()
                     .overflow_hidden()
-                    .bg(col(wb::Color::rgb(0.12, 0.12, 0.15)))
+                    .bg(col(theme::ui_theme().progress_track))
                     .child(
                         div()
                             .h_full()
@@ -787,7 +787,7 @@ fn render_status_bar(
                         .rounded_sm()
                         .text_size(px(11.0))
                         .cursor_pointer()
-                        .bg(col(wb::Color::rgb(0.35, 0.22, 0.22)))
+                        .bg(col(theme::ui_theme().cancel_rest))
                         .hover(|s| s.bg(col(wb::Color::RED)))
                         .child("取消")
                         .on_click(move |_ev: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
@@ -811,7 +811,7 @@ fn render_status_bar(
         .h(px(26.0))
         .px_2()
         .gap_2()
-        .bg(col(COL_TOOLBAR))
+        .bg(col(theme::ui_theme().toolbar))
         .child(
             div()
                 .flex()
@@ -853,6 +853,12 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
     let gpu_requirements = builder.take_gpu_requirements();
     let runtime = builder.build()?;
     let core: SharedCore = std::rc::Rc::new(Mutex::new(runtime));
+    // Theme from settings (builder default already seeded): applied after
+    // gpui_component::init in launch_app, before any window opens.
+    let theme_name = {
+        let core = core.lock().unwrap_or_else(|p| p.into_inner());
+        core.host.settings.get_str("ui.theme", "dark")
+    };
     // 恢复上次的布局（模型 + 停靠区物理布局）：先落模型，窗口打开后首帧再把
     // dock 布局叠上去。无布局文件（首次启动）或解析失败时返回 None → 默认布局。
     let dock = {
@@ -883,7 +889,7 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
                 component: gpui_component_assets::Assets::new(""),
             });
             let handle =
-                app.run_embedded(launch_app(core, title, smoke, fonts, gpu_requirements, dock));
+                app.run_embedded(launch_app(core, title, smoke, fonts, gpu_requirements, dock, theme_name));
             // Web 平台的 run 立即返回，应用状态由句柄保持；
             // 与页面共存亡，故意泄漏句柄。
             std::mem::forget(handle);
@@ -905,6 +911,7 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
             Vec::new(),
             gpu_requirements,
             dock,
+            theme_name,
         ));
         Ok(())
     }
@@ -918,6 +925,7 @@ fn launch_app(
     fonts: Vec<std::borrow::Cow<'static, [u8]>>,
     gpu_requirements: Option<Box<dyn std::any::Any>>,
     dock: Option<gpui_component::dock::DockAreaState>,
+    theme_name: String,
 ) -> impl FnOnce(&mut App) {
     move |cx: &mut App| {
         if !fonts.is_empty() {
@@ -929,6 +937,9 @@ fn launch_app(
         }
         gpui_component::init(cx);
         gpui_rhai::install(cx);
+        // 主题在组件初始化后、任何窗口打开前应用：shell 配色、ribbon tokens
+        // 与 gpui-component 全局主题一次切齐。
+        theme::apply_theme(&theme_name, cx);
         let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
