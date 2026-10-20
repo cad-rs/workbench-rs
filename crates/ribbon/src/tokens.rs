@@ -116,7 +116,6 @@ pub const LABEL_LINE_HEIGHT: f32 = 13.0;
 pub const CHEVRON_STRIP_HEIGHT: f32 = 12.0;
 /// Group caption strip height.
 pub const GROUP_TITLE_HEIGHT: f32 = 16.0;
-/// Row height of Small / Icon / Combo items.
 /// Small-item row height: one third of the large-item column (86/3). Small
 /// columns are a fixed 3-slot grid — columns with fewer items leave the
 /// lower slots empty; there is no 2-way division.

@@ -90,7 +90,11 @@ fn group_children(state: &RibbonState, cx: &mut Context<RibbonState>) -> Vec<Any
             children.push(
                 Separator::vertical()
                     .color(tokens::group_sep())
-                    .h(px(tokens::BUTTON_ZONE_HEIGHT + tokens::LABEL_HEIGHT))
+                    .h(px(
+                        tokens::BUTTON_ZONE_HEIGHT
+                            + tokens::LABEL_HEIGHT
+                            + tokens::CHEVRON_STRIP_HEIGHT,
+                    ))
                     .self_center()
                     .flex_shrink_0()
                     .into_any_element(),
@@ -154,6 +158,92 @@ fn item_element_id(group_key: &str, item_ix: usize, command: &str) -> SharedStri
     SharedString::from(format!("panel-item-{group_key}/{item_ix}/{command}"))
 }
 
+/// Per-item click dispatch shared by the large and row button builders.
+///
+/// A Split's chevron hit zone routes to the dropdown branch, a Menu's whole
+/// button opens the list, and everything else emits the default command.
+/// The cells carry the whole-button bounds (dropdown anchor) and the chevron
+/// rect (hit zone); the button builders feed them via `track_trigger`.
+struct ItemChrome {
+    item_id: String,
+    entries: Option<Vec<MenuEntry>>,
+    is_split: bool,
+    is_menu: bool,
+    checked: bool,
+    anchor: TriggerBoundsCell,
+    strip: TriggerBoundsCell,
+}
+
+impl ItemChrome {
+    fn new(state: &RibbonState, item: &RibbonItemVm) -> Self {
+        Self {
+            item_id: item.id.clone(),
+            entries: popup::item_entries(item),
+            is_split: matches!(item.kind, RibbonItemKindVm::Split { .. }),
+            is_menu: matches!(item.kind, RibbonItemKindVm::Menu { .. }),
+            checked: matches!(&item.kind, RibbonItemKindVm::Toggle { checked } if *checked),
+            anchor: state.new_popup_trigger_cell(),
+            strip: state.new_popup_trigger_cell(),
+        }
+    }
+
+    /// Whether this kind carries a chevron affordance (Split / Menu).
+    fn shows_chevron(&self) -> bool {
+        self.is_split || self.is_menu
+    }
+
+    /// Attaches the single position-dispatching click handler.
+    fn attach_click(&self, button: Button, cx: &mut Context<RibbonState>) -> Button {
+        let item_id = self.item_id.clone();
+        let entries = self.entries.clone();
+        let is_split = self.is_split;
+        let is_menu = self.is_menu;
+        let anchor = self.anchor.clone();
+        let strip = self.strip.clone();
+        button.on_click(cx.listener(
+            move |this: &mut RibbonState, ev: &ClickEvent, window: &mut Window, cx| {
+                let open_menu = |this: &mut RibbonState,
+                                 window: &mut Window,
+                                 cx: &mut Context<RibbonState>| {
+                    if let (Some(bounds), Some(entries)) = (anchor.get(), entries.as_ref()) {
+                        if !entries.is_empty() {
+                            this.open_dropdown(
+                                bounds,
+                                DropdownRequest::Items {
+                                    entries: entries.clone(),
+                                },
+                                window,
+                                cx,
+                            );
+                        }
+                    }
+                };
+                // Split strip hit zone routes to the dropdown branch.
+                if is_split {
+                    if let (Some(rect), Some(pos)) = (strip.get(), click_position(ev)) {
+                        if rect.contains(&pos) {
+                            open_menu(this, window, cx);
+                            return;
+                        }
+                    }
+                }
+                if is_menu {
+                    open_menu(this, window, cx);
+                    return;
+                }
+                this.emit(
+                    RibbonEvent::Command {
+                        id: item_id.clone(),
+                        value: None,
+                    },
+                    window,
+                    cx,
+                );
+            },
+        ))
+    }
+}
+
 /// Pointer position of a click (mouse / tap / keyboard-activated button).
 fn click_position(ev: &ClickEvent) -> Option<gpui::Point<gpui::Pixels>> {
     match ev {
@@ -188,17 +278,7 @@ fn render_large_column(
     }
 
     let element_id = item_element_id(group_key, item_ix, &item.id);
-    let entries = popup::item_entries(item);
-    let item_id = item.id.clone();
-    let is_split = matches!(item.kind, RibbonItemKindVm::Split { .. });
-    let is_menu = matches!(item.kind, RibbonItemKindVm::Menu { .. });
-    let checked = matches!(&item.kind, RibbonItemKindVm::Toggle { checked } if *checked);
-
-    let anchor = state.new_popup_trigger_cell();
-    // 6 o'clock strip (below the label) hit zone: Split routes clicks there
-    // to the dropdown branch; Menu's whole button is the affordance.
-    let strip = state.new_popup_trigger_cell();
-    let with_strip = is_split || is_menu;
+    let chrome = ItemChrome::new(state, item);
 
     let icon_zone = div()
         .h(px(tokens::BUTTON_ZONE_HEIGHT))
@@ -208,33 +288,45 @@ fn render_large_column(
         .justify_center()
         .child(large_icon(item));
 
-    // 6 o'clock chevron strip: below the label, centered, IN FLOW. Every
+    // 6 o'clock chevron strip: below the label, centered, in flow. Every
     // large button reserves this 12px row — split/menu render the chevron
     // there, other kinds leave it empty — so icons and labels sit at
-    // identical y positions whether or not a chevron is present.
-    let chevron_strip = div()
-        .h(px(tokens::CHEVRON_STRIP_HEIGHT))
-        .w_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .when(is_split && item.enabled, |d| {
-            d.cursor_pointer().hover(|s| s.bg(tokens::btn_hover()))
-        })
-        .when(is_split || is_menu, |d| {
-            d.child(
-                Icon::new(IconName::ChevronDown)
-                    .with_size(Size::Size(px(10.0)))
-                    .text_color(icon_color(item.enabled)),
+    // identical y positions whether or not a chevron is present. The strip
+    // rect feeds the Split click dispatch (strip hit zone = menu).
+    let strip_row = if chrome.is_split {
+        let strip = div()
+            .id(SharedString::from(format!("{element_id}-arrow")))
+            .h(px(tokens::CHEVRON_STRIP_HEIGHT))
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(2.0))
+            .when(item.enabled, |d| {
+                d.cursor_pointer().hover(|s| s.bg(tokens::btn_hover()))
+            })
+            .text_color(icon_color(item.enabled))
+            .child(
+                Icon::new(IconName::ChevronDown).with_size(Size::Size(px(10.0))),
+            );
+        popup::track_trigger(strip, &chrome.strip).into_any_element()
+    } else if chrome.is_menu {
+        div()
+            .h(px(tokens::CHEVRON_STRIP_HEIGHT))
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(icon_color(item.enabled))
+            .child(
+                Icon::new(IconName::ChevronDown).with_size(Size::Size(px(10.0))),
             )
-        });
-    let chevron_strip = if is_split {
-        popup::track_trigger(chevron_strip, &strip)
+            .into_any_element()
     } else {
-        chevron_strip
+        div().h(px(tokens::CHEVRON_STRIP_HEIGHT)).into_any_element()
     };
 
-    let mut button = base_button(element_id, item, checked, cx)
+    let mut button = base_button(element_id, item, chrome.checked, cx)
         .w(px(tokens::LARGE_COLUMN_WIDTH))
         .h(px(
             tokens::BUTTON_ZONE_HEIGHT
@@ -247,54 +339,13 @@ fn render_large_column(
                 .size_full()
                 .child(icon_zone)
                 .child(large_label(item))
-                .child(chevron_strip),
+                .child(strip_row),
         );
 
-    if is_split || is_menu {
-        button = popup::track_trigger(button, &anchor);
+    if chrome.shows_chevron() {
+        button = popup::track_trigger(button, &chrome.anchor);
     }
-    button = button.on_click(cx.listener(
-        move |this: &mut RibbonState, ev: &ClickEvent, window: &mut Window, cx| {
-            let open_menu = |this: &mut RibbonState,
-                             window: &mut Window,
-                             cx: &mut Context<RibbonState>| {
-                if let (Some(bounds), Some(entries)) = (anchor.get(), entries.as_ref()) {
-                    if !entries.is_empty() {
-                        this.open_dropdown(
-                            bounds,
-                            DropdownRequest::Items {
-                                entries: entries.clone(),
-                            },
-                            window,
-                            cx,
-                        );
-                    }
-                }
-            };
-            // 6 o'clock strip hit zone routes to the dropdown branch.
-            if is_split {
-                if let (Some(rect), Some(pos)) = (strip.get(), click_position(ev)) {
-                    if rect.contains(&pos) {
-                        open_menu(this, window, cx);
-                        return;
-                    }
-                }
-            }
-            if is_menu {
-                open_menu(this, window, cx);
-                return;
-            }
-            this.emit(
-                RibbonEvent::Command {
-                    id: item_id.clone(),
-                    value: None,
-                },
-                window,
-                cx,
-            );
-        },
-    ));
-    button.into_any_element()
+    chrome.attach_click(button, cx).into_any_element()
 }
 
 /// A 22px row item: Small / Icon button, Split, Menu, or Combo. Non-combo
@@ -313,69 +364,21 @@ fn render_row_item(
         return render_combo(state, item, element_id, cx);
     }
 
-    let entries = popup::item_entries(item);
-    let item_id = item.id.clone();
-    let is_split = matches!(item.kind, RibbonItemKindVm::Split { .. });
-    let is_menu = matches!(item.kind, RibbonItemKindVm::Menu { .. });
-    let checked = matches!(&item.kind, RibbonItemKindVm::Toggle { checked } if *checked);
+    let chrome = ItemChrome::new(state, item);
 
-    let anchor = state.new_popup_trigger_cell();
-    let strip = state.new_popup_trigger_cell();
-
-    let mut button = base_button(element_id, item, checked, cx)
+    let mut button = base_button(element_id, item, chrome.checked, cx)
         // Fixed 3-slot grid row: 86/3 each, top-down; columns with fewer
         // items leave the lower slots empty (no 2-way division).
         .h(px(tokens::ROW_HEIGHT))
         .min_w_0()
         .px(px(2.0))
         .gap(px(2.0))
-        .child(row_content(item, is_split || is_menu, is_split.then_some(&strip)));
+        .child(row_content(item, chrome.shows_chevron(), chrome.is_split.then_some(&chrome.strip)));
 
-    if is_split || is_menu {
-        button = popup::track_trigger(button, &anchor);
+    if chrome.shows_chevron() {
+        button = popup::track_trigger(button, &chrome.anchor);
     }
-    button = button.on_click(cx.listener(
-        move |this: &mut RibbonState, ev: &ClickEvent, window: &mut Window, cx| {
-            let open_menu = |this: &mut RibbonState,
-                             window: &mut Window,
-                             cx: &mut Context<RibbonState>| {
-                if let (Some(bounds), Some(entries)) = (anchor.get(), entries.as_ref()) {
-                    if !entries.is_empty() {
-                        this.open_dropdown(
-                            bounds,
-                            DropdownRequest::Items {
-                                entries: entries.clone(),
-                            },
-                            window,
-                            cx,
-                        );
-                    }
-                }
-            };
-            // 6 o'clock strip hit zone routes to the dropdown branch.
-            if is_split {
-                if let (Some(rect), Some(pos)) = (strip.get(), click_position(ev)) {
-                    if rect.contains(&pos) {
-                        open_menu(this, window, cx);
-                        return;
-                    }
-                }
-            }
-            if is_menu {
-                open_menu(this, window, cx);
-                return;
-            }
-            this.emit(
-                RibbonEvent::Command {
-                    id: item_id.clone(),
-                    value: None,
-                },
-                window,
-                cx,
-            );
-        },
-    ));
-    button.into_any_element()
+    chrome.attach_click(button, cx).into_any_element()
 }
 
 /// Combo box row: value area + chevron; the whole box opens the option list.
@@ -523,20 +526,28 @@ fn row_content(
 ) -> AnyElement {
     let icon_tier = item.size == ItemSize::Icon;
 
+    // 16px icon; the Icon tier falls back to a letter glyph when the
+    // resource is absent, other tiers silently show no icon.
+    let icon = match &item.icon {
+        Some(path) => Icon::empty()
+            .path(path.clone())
+            .with_size(Size::Size(px(tokens::ICON_SMALL)))
+            .text_color(icon_color(item.enabled))
+            .into_any_element(),
+        None if icon_tier => {
+            placeholder_glyph(&item.label, icon_color(item.enabled)).into_any_element()
+        }
+        None => div().into_any_element(),
+    };
+
     h_flex()
         .w_full()
         .h_full()
         .items_center()
         .gap(px(4.0))
+        .child(icon)
         .when(!icon_tier, |row| {
-            row.child(match &item.icon {
-                Some(path) => Icon::empty().path(path.clone())
-                    .with_size(Size::Size(px(tokens::ICON_SMALL)))
-                    .text_color(icon_color(item.enabled))
-                    .into_any_element(),
-                None => div().into_any_element(),
-            })
-            .child(
+            row.child(
                 div()
                     .min_w_0()
                     .overflow_hidden()
@@ -546,15 +557,6 @@ fn row_content(
                     .text_color(icon_color(item.enabled))
                     .child(SharedString::from(item.label.clone())),
             )
-        })
-        .when(icon_tier, |row| {
-            row.child(match &item.icon {
-                Some(path) => Icon::empty().path(path.clone())
-                    .with_size(Size::Size(px(tokens::ICON_SMALL)))
-                    .text_color(icon_color(item.enabled))
-                    .into_any_element(),
-                None => placeholder_glyph(&item.label, icon_color(item.enabled)),
-            })
         })
         .when(show_chevron, |row| {
             let chevron = div()

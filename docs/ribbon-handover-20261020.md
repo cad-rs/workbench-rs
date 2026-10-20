@@ -5,7 +5,7 @@
 
 ## 1. 当前状态（已提交，未推送）
 
-workbench-rs master（自 4321188 起 4 个提交）：
+workbench-rs master（自 4321188 起 6 个提交）：
 
 | Commit | 内容 |
 |--------|------|
@@ -13,6 +13,8 @@ workbench-rs master（自 4321188 起 4 个提交）：
 | `acc5f9b` | feat(ui)：`crates/ribbon` 纯组件 crate + workbench-ui 集成（ribbon_bridge）+ wb-example 演示 + 图标链/a11y 修复 |
 | `8da3ceb` | docs：ribbon-bar.md（485 行规格） |
 | `75763a4` | fix(ui)：折叠功能默认禁用（collapse_enabled，默认 false） |
+| `a60bf56` | docs：本文档（交接） |
+| `3478394` | refactor(ui)：条目点击分派统一（ItemChrome）+ 分隔线高度/规范修正 |
 
 父仓库 rcad-pro（feat/acceptance-suites 分支）：`63f4f3c57`（creator QAT 注册）、
 `b2703eb22`（submodule 指针 8da3ceb → 后续提交后需再推进）。
