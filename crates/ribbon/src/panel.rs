@@ -50,26 +50,33 @@ fn render_scroll_panel(
 
     // On-demand degradation: when the last frame's measurements show the
     // content overflowing, degrade one more group (Large items become
-    // Small, right-most first); with enough slack, recover one. Decided at
-    // render time off the previous frame, applied via defer so the next
-    // frame re-renders with the new grouping. The hysteresis band keeps
-    // the oscillation away.
+    // Small, right-most first); recover one only when the content plus the
+    // measured per-step saving would STILL fit — a recovery can therefore
+    // never re-trigger a degrade, which is what keeps the loop from
+    // oscillating when one step saves more than the hysteresis band.
+    // Decided at render time off the previous frame, applied via defer so
+    // the next frame re-renders with the new grouping.
     let max_degrade = state
         .active_tab()
         .map(|tab| layout::count_degradable_groups(&tab.groups))
         .unwrap_or(0);
     if content_w > 0.0 && viewport_w > 0.0 {
+        // Learn the saving of a degrade step that just landed.
+        if let Some(pre) = state.take_pre_degrade_content() {
+            state.set_degrade_saving((pre - content_w).max(0.0));
+        }
+        let saving = state.degrade_saving();
         let level = state.degrade_level().min(max_degrade);
-        let new_level = if content_w > viewport_w && level < max_degrade {
-            Some(level + 1)
-        } else if content_w + tokens::DEGRADE_HYSTERESIS < viewport_w && level > 0 {
-            Some(level - 1)
+        let (new_level, pre_content) = if content_w > viewport_w && level < max_degrade {
+            (Some(level + 1), Some(content_w))
+        } else if level > 0 && content_w + saving + 1.0 < viewport_w {
+            (Some(level - 1), None)
         } else {
-            None
+            (None, None)
         };
         if let Some(new_level) = new_level {
             cx.defer_in(window, move |this, _, cx| {
-                this.set_degrade_level(new_level, cx);
+                this.apply_degrade_level(new_level, pre_content, cx);
             });
         }
     }
