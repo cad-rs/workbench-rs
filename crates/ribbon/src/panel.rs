@@ -198,7 +198,7 @@ fn render_group(
                         }))
                         .into_any_element(),
                     ColumnPlan::IconRow(rows) => h_flex()
-                        .items_center()
+                        .items_start()
                         .children(rows.iter().map(|ix| {
                             render_row_item(state, &group.items[*ix], &group.id, *ix, cx)
                         }))
