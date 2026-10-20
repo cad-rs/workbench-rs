@@ -5,6 +5,7 @@ members = [
     "crates/workbench-core",
     "crates/workbench-rhai",
     "crates/ribbon",
+    "crates/ribbon-demo",
     "crates/workbench-ui",
     "workbenches/wb-example",
     "products/product-demo",

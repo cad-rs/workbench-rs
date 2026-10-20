@@ -1,0 +1,13 @@
+[package]
+name = "ribbon-demo"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone RibbonBar demo: exercises every item kind, tier, tab and collapse behavior without any workbench dependencies"
+
+[dependencies]
+env_logger = { workspace = true }
+gpui = { workspace = true }
+gpui-component = { workspace = true }
+gpui-component-assets = { workspace = true }
+gpui-platform = { workspace = true }
+ribbon = { workspace = true }

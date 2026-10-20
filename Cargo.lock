@@ -5578,6 +5578,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ribbon-demo"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "gpui-ce",
+ "gpui_ce_components",
+ "gpui_ce_components_assets",
+ "gpui_ce_platform",
+ "ribbon",
+]
+
+[[package]]
 name = "ropey"
 version = "2.0.0-beta.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
