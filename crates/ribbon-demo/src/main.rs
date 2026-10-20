@@ -321,6 +321,32 @@ fn demo_model() -> RibbonModel {
                                 width: None,
                                 kind: RibbonItemKindVm::Command,
                             },
+                            RibbonItemVm {
+                                id: "demo.icon4".into(),
+                                label: "Mark".into(),
+                                icon: Some("mode.svg".into()),
+                                enabled: true,
+                                size: ItemSize::Icon,
+                                width: None,
+                                kind: RibbonItemKindVm::Split {
+                                    items: vec![MenuEntry::Item(ribbon::MenuEntryVm {
+                                        id: "demo.icon4_menu".into(),
+                                        label: "Mark Menu".into(),
+                                        icon: None,
+                                        enabled: true,
+                                        checked: false,
+                                    })],
+                                },
+                            },
+                            RibbonItemVm {
+                                id: "demo.icon5".into(),
+                                label: "Tasks".into(),
+                                icon: Some("tasks.svg".into()),
+                                enabled: true,
+                                size: ItemSize::Icon,
+                                width: None,
+                                kind: RibbonItemKindVm::Command,
+                            },
                         ],
                     },
                     RibbonGroupVm {
