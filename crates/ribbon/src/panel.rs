@@ -5,8 +5,8 @@
 use gpui::ColorExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AppContext as _, AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement, Styled as _, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::separator::Separator;
@@ -40,18 +40,28 @@ fn render_scroll_panel(state: &RibbonState, cx: &mut Context<RibbonState>) -> An
 
     let viewport_cell = state.panel_viewport_w.clone();
     let content_cell = state.panel_content_w.clone();
+    let entity = cx.entity();
     let group_elements = group_children(state, cx);
     let left_arrow = scrollable
         .then(|| scroll_arrow(-1.0, true, offset > 0.0, cx));
     let right_arrow = scrollable
         .then(|| scroll_arrow(1.0, false, offset < content_w - viewport_w, cx));
 
+    let content_entity = entity.clone();
     let content_row = h_flex()
         .items_stretch()
         .flex_shrink_0()
         .relative()
         .left(px(-offset))
-        .on_prepaint(move |bounds, _, _| content_cell.set(f32::from(bounds.size.width)))
+        .on_prepaint(move |bounds, _, cx| {
+            // Re-render on measurement change: the first pass measured zero,
+            // so the scroll arrows would never appear without this repaint.
+            let w = f32::from(bounds.size.width);
+            if content_cell.get() != w {
+                content_cell.set(w);
+                cx.notify(content_entity.entity_id());
+            }
+        })
         .children(group_elements);
 
     div()
@@ -62,13 +72,24 @@ fn render_scroll_panel(state: &RibbonState, cx: &mut Context<RibbonState>) -> An
         .items_stretch()
         .px(px(8.0))
         .bg(tokens::ribbon_bg())
-        .on_prepaint(move |bounds, _, _| viewport_cell.set(f32::from(bounds.size.width)))
+        .on_prepaint(move |bounds, _, cx| {
+            let w = f32::from(bounds.size.width);
+            if viewport_cell.get() != w {
+                viewport_cell.set(w);
+                cx.notify(entity.entity_id());
+            }
+        })
         .child(
             div()
                 .relative()
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
+                // Flex container so the shrink-0 content row sizes to its
+                // max-content width: as a plain block child it would fill
+                // the viewport and the overflow measurement would never
+                // exceed it (arrows could never appear).
+                .flex()
                 .on_scroll_wheel(cx.listener(RibbonState::handle_scroll_wheel))
                 .child(content_row)
                 .when_some(left_arrow, |viewport, arrow| viewport.child(arrow))
