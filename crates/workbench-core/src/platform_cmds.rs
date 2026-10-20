@@ -215,6 +215,27 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
         .hotkey(Hotkey::new(KeyCode::W).ctrl(true)),
     );
 
+    // Ribbon 折叠切换（Ctrl+F1，仅开启时生效，ribbon-bar.md §4.5）
+    registry.register_command(
+        CommandDef::sync(
+            "app.toggle_ribbon_collapse",
+            "折叠/展开 Ribbon",
+            |ctx: &mut CommandCtx, _args: &CommandArgs| {
+                let host = ctx.host();
+                if !host.ws.ribbon_collapse_enabled {
+                    return CommandResult::failed("Ribbon 折叠能力未开启");
+                }
+                host.ws.ribbon_collapsed = !host.ws.ribbon_collapsed;
+                CommandResult::done_with(if host.ws.ribbon_collapsed {
+                    "已折叠"
+                } else {
+                    "已展开"
+                })
+            },
+        )
+        .hotkey(Hotkey::new(KeyCode::F1).ctrl(true)),
+    );
+
     // 每个面板的显示/隐藏命令 + “窗口”工具栏组（含平台自己的面板）
     let mut all_panels: Vec<(String, String)> = panel_ids.to_vec();
     all_panels.push(("app.panel.diagnostics".to_string(), "诊断".to_string()));

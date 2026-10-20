@@ -43,9 +43,9 @@ pub(crate) fn build_model(core: &AppRuntime, collapsed: bool) -> RibbonModel {
             .collect(),
         active_tab_id: ws.active_ribbon_tab.clone(),
         collapsed,
-        // The collapse feature is a product capability and is disabled by
-        // default: no toggle button, double-click does nothing.
-        collapse_enabled: false,
+        // The collapse feature is a product capability, disabled by default
+        // and enabled via WorkbenchAppBuilder::ribbon_collapse_enabled.
+        collapse_enabled: ws.ribbon_collapse_enabled,
         overflow: OverflowStrategy::Scroll,
         work_mode: ws.work_mode.clone(),
     }
@@ -181,6 +181,12 @@ impl RibbonHost {
         if self.entity.is_some() {
             return;
         }
+        // Seed the collapsed runtime state from the persisted workspace value.
+        let persisted_collapsed = {
+            let core = core.lock().unwrap_or_else(|p| p.into_inner());
+            core.host.ws.ribbon_collapsed
+        };
+        self.collapsed.set(persisted_collapsed);
         let model = {
             let core = core.lock().unwrap_or_else(|p| p.into_inner());
             build_model(&core, self.collapsed.get())
@@ -199,6 +205,16 @@ impl RibbonHost {
         let Some(entity) = self.entity.as_ref() else {
             return;
         };
+        // Reconcile: if ws.ribbon_collapsed was toggled externally (Ctrl+F1
+        // command path), adopt it so the runtime stays in sync.
+        {
+            let core = core.lock().unwrap_or_else(|p| p.into_inner());
+            let ws_collapsed = core.host.ws.ribbon_collapsed;
+            drop(core);
+            if ws_collapsed != self.collapsed.get() {
+                self.collapsed.set(ws_collapsed);
+            }
+        }
         let model = {
             let core = core.lock().unwrap_or_else(|p| p.into_inner());
             build_model(&core, self.collapsed.get())
@@ -248,8 +264,14 @@ fn handle_event(
         }
         RibbonEvent::ToggleCollapse => {
             // The bridge owns the collapsed state; the component only reports
-            // the request. Persistence is a later milestone (ribbon-bar.md M3).
-            collapsed.set(!state.model().collapsed);
+            // the request. Sync to the workspace so it persists across sessions.
+            let new_collapsed = !state.model().collapsed;
+            collapsed.set(new_collapsed);
+            core.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .host
+                .ws
+                .ribbon_collapsed = new_collapsed;
         }
     }
     notify(weak, cx);

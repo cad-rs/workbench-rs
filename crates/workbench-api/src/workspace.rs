@@ -393,6 +393,11 @@ pub struct WorkspaceState {
     /// QAT 快速访问工具条（ribbon-bar.md §4.1）：产品静态集，复用 [`ToolbarItem`]
     /// （渲染取 Icon 档），折叠态仍可见。用户自定义增删与持久化二期。
     pub qat: Vec<ToolbarItem>,
+    /// Ribbon 折叠态（ribbon-bar.md §4.1）；持久化于 LayoutFile.ribbon_collapsed。
+    pub ribbon_collapsed: bool,
+    /// Ribbon 折叠能力开关（ribbon-bar.md §4.5）；默认 false（禁用），
+    /// 产品经 builder 开启。门控折叠钮渲染、Tab 双击与 Ctrl+F1 快捷键。
+    pub ribbon_collapse_enabled: bool,
     pub panels: Vec<PanelSlot>,
     pub tabs: Vec<TabSlot>,
     pub active_tab: usize,
@@ -413,6 +418,8 @@ impl WorkspaceState {
             ribbon: Vec::new(),
             active_ribbon_tab: String::new(),
             qat: Vec::new(),
+            ribbon_collapsed: false,
+            ribbon_collapse_enabled: false,
             panels: Vec::new(),
             tabs: Vec::new(),
             active_tab: 0,
@@ -707,8 +714,7 @@ impl WorkspaceState {
                 .map(|(a, p)| (*a, p.0.clone()))
                 .collect(),
             ribbon_active_tab: Some(self.active_ribbon_tab.clone()),
-            // 折叠态/空间策略持久化是后续里程碑（前端 bridge 负责接线）
-            ribbon_collapsed: None,
+            ribbon_collapsed: Some(self.ribbon_collapsed),
             ribbon_overflow: None,
             ui: None,
             dock: None,
@@ -759,6 +765,8 @@ impl WorkspaceState {
         }
         self.active_tab = saved_active.min(self.tabs.len().saturating_sub(1));
         self.work_mode = file.work_mode.clone();
+        // Restore the ribbon collapse state (defaults to expanded when absent).
+        self.ribbon_collapsed = file.ribbon_collapsed.unwrap_or(false);
         // 活动 Ribbon Tab：未注册的 Tab 回落首个 Tab（§6.5 失效项可诊断）
         match &file.ribbon_active_tab {
             Some(id) if self.ribbon.iter().any(|t| t.id.0 == *id) => {

@@ -929,6 +929,8 @@ pub struct WorkbenchAppBuilder {
     backend_label: String,
     /// 产品声明的额外 GPU 设备需求（不透明传递；前端解释具体类型）。
     gpu_requirements: Option<Box<dyn std::any::Any>>,
+    /// Ribbon 折叠能力开关（ribbon-bar.md §4.5）；默认 false。
+    ribbon_collapse_enabled: bool,
 }
 
 impl WorkbenchAppBuilder {
@@ -947,6 +949,7 @@ impl WorkbenchAppBuilder {
             assets: None,
             backend_label: "unknown".to_string(),
             gpu_requirements: None,
+            ribbon_collapse_enabled: false,
         }
     }
 
@@ -988,6 +991,13 @@ impl WorkbenchAppBuilder {
     /// 标记 GUI 后端（诊断面板/自动化查询用）。
     pub fn with_backend_label(mut self, label: impl Into<String>) -> Self {
         self.backend_label = label.into();
+        self
+    }
+
+    /// Enable the ribbon collapse feature (ribbon-bar.md §4.5): the toggle
+    /// button, Tab double-click and Ctrl+F1 become active.
+    pub fn ribbon_collapse_enabled(mut self, on: bool) -> Self {
+        self.ribbon_collapse_enabled = on;
         self
     }
 
@@ -1108,6 +1118,8 @@ impl WorkbenchAppBuilder {
         }
         // QAT 快速访问（产品静态集，ribbon-bar.md §4.1）
         host.ws.qat = std::mem::take(&mut registry.qat);
+        // Ribbon 折叠能力开关（产品经 builder 声明，ribbon-bar.md §4.5）
+        host.ws.ribbon_collapse_enabled = self.ribbon_collapse_enabled;
         for (ty, value) in registry.take_services() {
             host.insert_raw(ty, value);
         }
