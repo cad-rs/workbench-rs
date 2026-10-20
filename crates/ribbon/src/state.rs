@@ -28,16 +28,20 @@ pub struct RibbonState {
     scroll_offset: f32,
     /// Active scroll animation state, if a page-scroll is in progress (transient).
     scroll_animation: Option<ScrollAnimation>,
-    /// How many groups (from the right) are currently degraded from Large
-    /// to Small because the content does not fit the viewport (transient).
-    degrade_level: usize,
-    /// Content width captured right before the pending degrade step lands,
-    /// to measure how much width one step actually saves.
-    pre_degrade_content: Cell<Option<f32>>,
+    /// Current degrade level: how many groups (from the right) render with
+    /// Large items demoted to Small. A Cell because the decision runs inside
+    /// the prepaint listener, outside any `&mut self` scope.
+    pub(crate) degrade_level: Cell<usize>,
+    /// Upper bound for the degrade level, refreshed from the model each
+    /// render before the prepaint-time decision runs.
+    pub(crate) max_degrade: Cell<usize>,
+    /// Content width captured when a degrade step is requested, to measure
+    /// how much width one step actually saves.
+    pub(crate) pre_degrade_content: Cell<Option<f32>>,
     /// Last observed width saved by a single degrade step. Recovery is only
     /// allowed when the content plus this saving still fits, so a recovery
     /// can never re-trigger a degrade (oscillation breaker).
-    degrade_saving: Cell<f32>,
+    pub(crate) degrade_saving: Cell<f32>,
     /// The single open dropdown, if any (transient).
     pub(crate) open_popup: Option<PopupHandle>,
     /// Viewport width of the panel scroll area, measured during prepaint.
@@ -64,7 +68,8 @@ impl RibbonState {
             on_event: Box::new(on_event),
             scroll_offset: 0.0,
             scroll_animation: None,
-            degrade_level: 0,
+            degrade_level: Cell::new(0),
+            max_degrade: Cell::new(0),
             pre_degrade_content: Cell::new(None),
             degrade_saving: Cell::new(0.0),
             open_popup: None,
@@ -166,50 +171,22 @@ impl RibbonState {
         self.panel_content_w.get()
     }
 
+    /// Cells driving the prepaint-time degrade decision: the level itself,
+    /// its model-derived upper bound, the pre-step content probe and the
+    /// learned per-step saving.
+    pub(crate) fn degrade_cells(&self) -> (Cell<usize>, Cell<usize>, Cell<Option<f32>>, Cell<f32>) {
+        (
+            self.degrade_level.clone(),
+            self.max_degrade.clone(),
+            self.pre_degrade_content.clone(),
+            self.degrade_saving.clone(),
+        )
+    }
+
     /// Current degrade level: how many groups (from the right) render with
     /// Large items demoted to Small.
     pub(crate) fn degrade_level(&self) -> usize {
-        self.degrade_level
-    }
-
-    /// Updates the degrade level; notifies when it actually changed so the
-    /// next frame re-renders with the new grouping.
-    pub(crate) fn set_degrade_level(&mut self, level: usize, cx: &mut Context<Self>) {
-        if self.degrade_level != level {
-            self.degrade_level = level;
-            cx.notify();
-        }
-    }
-
-    /// Applies a degrade decision from the deferred callback: an upgrade
-    /// (level+1) also records the content measured before the step, so the
-    /// per-step saving can be learned on the next frame.
-    pub(crate) fn apply_degrade_level(
-        &mut self,
-        level: usize,
-        pre_content: Option<f32>,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(pre) = pre_content {
-            self.pre_degrade_content.set(Some(pre));
-        }
-        self.set_degrade_level(level, cx);
-    }
-
-    /// Consumes the recorded pre-degrade content, if a degrade step just
-    /// landed (call once per frame before deciding).
-    pub(crate) fn take_pre_degrade_content(&self) -> Option<f32> {
-        self.pre_degrade_content.take()
-    }
-
-    /// Records the measured width one degrade step saves.
-    pub(crate) fn set_degrade_saving(&self, saving: f32) {
-        self.degrade_saving.set(saving);
-    }
-
-    /// Last measured width saved by a single degrade step.
-    pub(crate) fn degrade_saving(&self) -> f32 {
-        self.degrade_saving.get()
+        self.degrade_level.get()
     }
 
     pub(crate) fn handle_scroll_wheel(

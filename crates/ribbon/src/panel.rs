@@ -48,45 +48,28 @@ fn render_scroll_panel(
     let content_w = state.content_width();
     let scrollable = content_w > viewport_w + 0.5;
 
-    // On-demand degradation: when the last frame's measurements show the
-    // content overflowing, degrade one more group (Large items become
-    // Small, right-most first); recover one only when the content plus the
-    // measured per-step saving would STILL fit — a recovery can therefore
-    // never re-trigger a degrade, which is what keeps the loop from
-    // oscillating when one step saves more than the hysteresis band.
-    // Decided at render time off the previous frame, applied via defer so
-    // the next frame re-renders with the new grouping.
+    // On-demand degradation: the decision runs inside the content row's
+    // prepaint listener, on THIS frame's fresh measurements — deciding at
+    // render time lags a frame, which stalled the chain when no repaint
+    // followed and cascaded stale decisions on resize. Overflowing degrades
+    // one more group (Large items become Small, right-most first); recovery
+    // fires only when the content plus the measured per-step saving would
+    // STILL fit, so a recovery can never re-trigger a degrade (oscillation
+    // breaker). The change applies via defer (a prepaint listener cannot
+    // mutate the entity synchronously).
+
     let max_degrade = state
         .active_tab()
         .map(|tab| layout::count_degradable_groups(&tab.groups))
         .unwrap_or(0);
-    if content_w > 0.0 && viewport_w > 0.0 {
-        // Learn the saving of a degrade step that just landed.
-        if let Some(pre) = state.take_pre_degrade_content() {
-            state.set_degrade_saving((pre - content_w).max(0.0));
-        }
-        let saving = state.degrade_saving();
-        let level = state.degrade_level().min(max_degrade);
-        let (new_level, pre_content) = if content_w > viewport_w && level < max_degrade {
-            (Some(level + 1), Some(content_w))
-        } else if level > 0 && content_w + saving + 1.0 < viewport_w {
-            (Some(level - 1), None)
-        } else {
-            (None, None)
-        };
-        if let Some(new_level) = new_level {
-            cx.defer_in(window, move |this, _, cx| {
-                this.apply_degrade_level(new_level, pre_content, cx);
-            });
-        }
-    }
-    let level = state.degrade_level().min(max_degrade);
+    let viewport_cell = state.panel_viewport_w.clone();
+    let content_cell = state.panel_content_w.clone();
+    let (level_cell, max_cell, pre_degrade_cell, saving_cell) = state.degrade_cells();
+    max_cell.set(max_degrade);
+    let level = level_cell.get().min(max_degrade);
     let degraded_groups: Vec<RibbonGroupVm> = layout::degrade_tab(state.active_tab(), level)
         .map(|tab| tab.groups)
         .unwrap_or_default();
-
-    let viewport_cell = state.panel_viewport_w.clone();
-    let content_cell = state.panel_content_w.clone();
     let entity = cx.entity();
     let group_elements = group_children(state, &degraded_groups, cx);
     let left_arrow = scrollable
@@ -94,6 +77,9 @@ fn render_scroll_panel(
     let right_arrow = scrollable
         .then(|| scroll_arrow(1.0, false, offset < content_w - viewport_w, cx));
 
+    // Distinct cell clones: the content-row listener owns one set (it reads
+    // the viewport for the decision), the viewport listener owns another.
+    let viewport_cell_decision = state.panel_viewport_w.clone();
     let content_entity = entity.clone();
     let content_row = h_flex()
         .items_stretch()
@@ -104,13 +90,48 @@ fn render_scroll_panel(
             // Re-render on measurement change: the first pass measured zero,
             // so the scroll arrows would never appear without this repaint.
             let w = f32::from(bounds.size.width);
-            if content_cell.get() != w {
-                content_cell.set(w);
+            let changed = content_cell.get() != w;
+            content_cell.set(w);
+            // Learn the per-step saving here, where the post-degrade width
+            // is fresh, then decide on THIS frame's measurements — deciding
+            // at render time lags a frame, which stalled the chain.
+            if let Some(pre) = pre_degrade_cell.take() {
+                saving_cell.set((pre - w).max(0.0));
+            }
+            let viewport = viewport_cell_decision.get();
+            if w > 0.0 && viewport > 0.0 {
+                let max_degrade = max_cell.get();
+                let level = level_cell.get().min(max_degrade);
+                let saving = saving_cell.get();
+                let (new_level, pre_content) = if w > viewport && level < max_degrade {
+                    (Some(level + 1), Some(w))
+                } else if level > 0 && w + saving + 1.0 < viewport {
+                    (Some(level - 1), None)
+                } else {
+                    (None, None)
+                };
+                if let Some(new_level) = new_level {
+                    let entity = content_entity.clone();
+                    cx.defer(move |cx| {
+                        entity.update(cx, |this, cx| {
+                            if let Some(pre) = pre_content {
+                                this.pre_degrade_content.set(Some(pre));
+                            }
+                            if this.degrade_level.get() != new_level {
+                                this.degrade_level.set(new_level);
+                                cx.notify();
+                            }
+                        });
+                    });
+                }
+            }
+            if changed {
                 cx.notify(content_entity.entity_id());
             }
         })
         .children(group_elements);
 
+    let entity = entity.clone();
     div()
         .h(px(tokens::PANEL_HEIGHT))
         .w_full()
