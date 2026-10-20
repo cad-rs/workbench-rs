@@ -23,26 +23,16 @@ use crate::tabs::{button_variant, icon_color, placeholder_glyph};
 use crate::tokens;
 
 /// Renders the 86px panel area showing the active tab's groups.
-pub(crate) fn render_panel(
-    state: &RibbonState,
-    window: &mut Window,
-    cx: &mut Context<RibbonState>,
-) -> AnyElement {
+pub(crate) fn render_panel(state: &RibbonState, cx: &mut Context<RibbonState>) -> AnyElement {
     match state.model.overflow {
         // Group collapse overflow is not implemented yet; the scroll strategy
         // renders as the fallback.
         // TODO(ribbon): implement strategy B (group collapse overflow).
-        OverflowStrategy::Scroll | OverflowStrategy::Collapse => {
-            render_scroll_panel(state, window, cx)
-        }
+        OverflowStrategy::Scroll | OverflowStrategy::Collapse => render_scroll_panel(state, cx),
     }
 }
 
-fn render_scroll_panel(
-    state: &RibbonState,
-    window: &mut Window,
-    cx: &mut Context<RibbonState>,
-) -> AnyElement {
+fn render_scroll_panel(state: &RibbonState, cx: &mut Context<RibbonState>) -> AnyElement {
     let offset = state.clamped_scroll_offset();
     let viewport_w = state.viewport_width();
     let content_w = state.content_width();

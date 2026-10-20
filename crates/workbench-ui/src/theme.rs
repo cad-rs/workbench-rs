@@ -45,19 +45,11 @@ pub const LIGHT: UiTheme = UiTheme {
 
 static ACTIVE_UI_THEME: AtomicU8 = AtomicU8::new(0);
 
-fn from_name(name: &str) -> u8 {
-    if name.eq_ignore_ascii_case("light") {
-        1
-    } else {
-        0
-    }
-}
-
 /// Sets the shell palette from a theme name (`"dark"` / `"light"`, case
 /// insensitive; anything else falls back to dark).
 pub fn set_ui_theme(name: &str) {
     let light = name.eq_ignore_ascii_case("light");
-    ACTIVE_UI_THEME.store(from_name(name), Ordering::Relaxed);
+    ACTIVE_UI_THEME.store(u8::from(light), Ordering::Relaxed);
     ribbon::set_theme(if light {
         ribbon::ThemeKind::Light
     } else {

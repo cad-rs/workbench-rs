@@ -157,8 +157,12 @@ impl RibbonState {
 
     /// Clamped scroll offset for the currently measured widths.
     pub(crate) fn clamped_scroll_offset(&self) -> f32 {
-        let max_offset = (self.panel_content_w.get() - self.panel_viewport_w.get()).max(0.0);
-        self.scroll_offset.clamp(0.0, max_offset)
+        self.scroll_offset.clamp(0.0, self.max_scroll_offset())
+    }
+
+    /// Largest scroll offset the current measurements allow.
+    fn max_scroll_offset(&self) -> f32 {
+        (self.panel_content_w.get() - self.panel_viewport_w.get()).max(0.0)
     }
 
     /// Viewport width of the panel scroll area (measured last frame).
@@ -183,12 +187,6 @@ impl RibbonState {
         )
     }
 
-    /// Current degrade level: how many groups (from the right) render with
-    /// Large items demoted to Small.
-    pub(crate) fn degrade_level(&self) -> usize {
-        self.degrade_level.get()
-    }
-
     pub(crate) fn handle_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -210,8 +208,7 @@ impl RibbonState {
         // in-progress page-scroll animation.
         self.open_popup = None;
         self.scroll_animation = None;
-        let max_offset = (self.panel_content_w.get() - self.panel_viewport_w.get()).max(0.0);
-        self.scroll_offset = (self.scroll_offset + f32::from(horizontal)).clamp(0.0, max_offset);
+        self.scroll_offset = (self.scroll_offset + f32::from(horizontal)).clamp(0.0, self.max_scroll_offset());
         cx.stop_propagation();
         cx.notify();
     }
@@ -245,9 +242,8 @@ impl RibbonState {
     pub(crate) fn scroll_by_page(&mut self, direction: f32, window: &mut Window, cx: &mut Context<Self>) {
         self.open_popup = None;
         let viewport = self.panel_viewport_w.get().max(0.0);
-        let max_offset = (self.panel_content_w.get() - viewport).max(0.0);
         let start = self.clamped_scroll_offset();
-        let target = (start + direction * viewport * 0.8).clamp(0.0, max_offset);
+        let target = (start + direction * viewport * 0.8).clamp(0.0, self.max_scroll_offset());
         // No-op if already at the target.
         if (target - start).abs() < 0.5 {
             return;
@@ -277,9 +273,7 @@ impl Render for RibbonState {
             .border_color(tokens::ribbon_border())
             .overflow_hidden()
             .child(tabs::render_tab_strip(self, cx))
-            .when(!collapsed, |root| {
-                root.child(panel::render_panel(self, window, cx))
-            });
+            .when(!collapsed, |root| root.child(panel::render_panel(self, cx)));
 
         match self.open_popup.as_ref() {
             Some(handle) => root.child(popup::render_popup(handle, window)),

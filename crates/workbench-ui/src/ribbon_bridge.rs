@@ -205,18 +205,15 @@ impl RibbonHost {
         let Some(entity) = self.entity.as_ref() else {
             return;
         };
-        // Reconcile: if ws.ribbon_collapsed was toggled externally (Ctrl+F1
-        // command path), adopt it so the runtime stays in sync.
-        {
+        // One lock covers both the reconcile (if ws.ribbon_collapsed was
+        // toggled externally — the Ctrl+F1 command path — adopt it so the
+        // runtime stays in sync) and the model projection.
+        let model = {
             let core = core.lock().unwrap_or_else(|p| p.into_inner());
             let ws_collapsed = core.host.ws.ribbon_collapsed;
-            drop(core);
             if ws_collapsed != self.collapsed.get() {
                 self.collapsed.set(ws_collapsed);
             }
-        }
-        let model = {
-            let core = core.lock().unwrap_or_else(|p| p.into_inner());
             build_model(&core, self.collapsed.get())
         };
         entity.update(cx, |state, cx| state.set_model(model, cx));

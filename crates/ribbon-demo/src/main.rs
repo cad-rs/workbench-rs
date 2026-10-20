@@ -9,8 +9,8 @@ use gpui::{
     div, prelude::*, px, rgb, App, Bounds, Context, Entity, Size, Window, WindowBounds, WindowOptions,
 };
 use ribbon::{
-    ItemSize, MenuEntry, OverflowStrategy, RibbonEvent, RibbonGroupVm, RibbonItemKindVm, RibbonItemVm,
-    RibbonModel, RibbonState, RibbonTabVm,
+    ItemSize, MenuEntry, MenuEntryVm, OverflowStrategy, RibbonEvent, RibbonGroupVm, RibbonItemKindVm,
+    RibbonItemVm, RibbonModel, RibbonState, RibbonTabVm,
 };
 
 /// Filesystem-based AssetSource: loads SVG icons from a directory so the
@@ -78,322 +78,153 @@ impl gpui::AssetSource for DemoAssets {
     }
 }
 
-/// Build the demo model: two tabs, many groups, every item kind.
-fn demo_model() -> RibbonModel {
-    let l = |id: &str, label: &str, icon: &str| RibbonItemVm {
+/// One dropdown entry.
+fn entry(id: &str, label: &str, enabled: bool) -> MenuEntry {
+    MenuEntry::Item(MenuEntryVm {
         id: id.to_string(),
         label: label.to_string(),
-        icon: Some(icon.to_string()),
-        enabled: true,
-        size: ItemSize::Large,
-        width: None,
-        kind: RibbonItemKindVm::Command,
-    };
-    let s = |id: &str, label: &str, icon: &str| RibbonItemVm {
-        id: id.to_string(),
-        label: label.to_string(),
-        icon: Some(icon.to_string()),
-        enabled: true,
-        size: ItemSize::Small,
-        width: None,
-        kind: RibbonItemKindVm::Command,
-    };
-    let icon = |id: &str| RibbonItemVm {
-        id: id.to_string(),
-        label: id.to_string(),
         icon: None,
-        enabled: true,
-        size: ItemSize::Icon,
-        width: None,
-        kind: RibbonItemKindVm::Command,
+        enabled,
+        checked: false,
+    })
+}
+
+/// A dropdown separator.
+fn sep() -> MenuEntry {
+    MenuEntry::Separator
+}
+
+/// Builds the demo model: two tabs, many groups, every item kind. The local
+/// helpers keep each item to one line — the model stays a flat, readable
+/// inventory of the demo's ribbon.
+fn demo_model() -> RibbonModel {
+    // (id, label, icon, size, kind) — the shared item constructor.
+    let item = |id: &str, label: &str, icon: Option<&str>, size: ItemSize, kind: RibbonItemKindVm| {
+        RibbonItemVm {
+            id: id.to_string(),
+            label: label.to_string(),
+            icon: icon.map(str::to_string),
+            enabled: true,
+            size,
+            width: None,
+            kind,
+        }
+    };
+    let l = |id: &str, label: &str, icon: &str| {
+        item(id, label, Some(icon), ItemSize::Large, RibbonItemKindVm::Command)
+    };
+    let s = |id: &str, label: &str, icon: &str| {
+        item(id, label, Some(icon), ItemSize::Small, RibbonItemKindVm::Command)
+    };
+    let qat_icon = |id: &str| item(id, id, None, ItemSize::Icon, RibbonItemKindVm::Command);
+    let icon_btn = |id: &str, label: &str, icon: &str| {
+        item(id, label, Some(icon), ItemSize::Icon, RibbonItemKindVm::Command)
+    };
+    let toggle = |id: &str, label: &str, icon: &str, checked: bool| {
+        item(id, label, Some(icon), ItemSize::Small, RibbonItemKindVm::Toggle { checked })
+    };
+    let disabled = |id: &str, label: &str, icon: &str| RibbonItemVm {
+        enabled: false,
+        ..item(id, label, Some(icon), ItemSize::Small, RibbonItemKindVm::Command)
+    };
+    let split = |id: &str, label: &str, icon: &str, size: ItemSize, items: Vec<MenuEntry>| {
+        item(id, label, Some(icon), size, RibbonItemKindVm::Split { items })
+    };
+    let menu_s = |id: &str, label: &str, icon: &str, items: Vec<MenuEntry>| {
+        item(id, label, Some(icon), ItemSize::Small, RibbonItemKindVm::Menu { items })
+    };
+    let combo_s = |id: &str, label: &str, icon: &str, current: &str, options: Vec<&str>| RibbonItemVm {
+        width: Some(120.0),
+        ..item(
+            id,
+            label,
+            Some(icon),
+            ItemSize::Small,
+            RibbonItemKindVm::Combo {
+                current: current.to_string(),
+                options: options.into_iter().map(str::to_string).collect(),
+            },
+        )
+    };
+
+    let group = |id: &str, title: &str, items: Vec<RibbonItemVm>| RibbonGroupVm {
+        id: id.to_string(),
+        title: title.to_string(),
+        items,
     };
 
     RibbonModel {
         logo: None,
-        qat: vec![icon("demo.save"), icon("demo.undo"), icon("demo.redo")],
+        qat: vec![qat_icon("demo.save"), qat_icon("demo.undo"), qat_icon("demo.redo")],
         tabs: vec![
             RibbonTabVm {
                 id: "demo.home".into(),
                 title: "Home".into(),
                 contextual: false,
                 groups: vec![
-                    RibbonGroupVm {
-                        id: "demo.g1".into(),
-                        title: "File".into(),
-                        items: vec![
-                            l("demo.new", "New", "add.svg"),
-                            l("demo.open", "Open", "explorer.svg"),
-                            l("demo.save", "Save", "output.svg"),
-                        ],
-                    },
-                    RibbonGroupVm {
-                        id: "demo.g2".into(),
-                        title: "Toggle".into(),
-                        items: vec![
-                            RibbonItemVm {
-                                id: "demo.snap".into(),
-                                label: "Snap".into(),
-                                icon: Some("mode.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Small,
-                                width: None,
-                                kind: RibbonItemKindVm::Toggle { checked: true },
-                            },
-                            RibbonItemVm {
-                                id: "demo.grid".into(),
-                                label: "Grid".into(),
-                                icon: Some("properties.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Small,
-                                width: None,
-                                kind: RibbonItemKindVm::Toggle { checked: false },
-                            },
-                            s("demo.zoom_fit", "Zoom Fit", "scan.svg"),
-                        ],
-                    },
-                    RibbonGroupVm {
-                        id: "demo.g3".into(),
-                        title: "Split".into(),
-                        items: vec![
-                            RibbonItemVm {
-                                id: "demo.run".into(),
-                                label: "Run".into(),
-                                icon: Some("generate.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Small,
-                                width: None,
-                                kind: RibbonItemKindVm::Split {
-                                    items: vec![MenuEntry::Item(ribbon::MenuEntryVm {
-                                        id: "demo.run_all".into(),
-                                        label: "Run All".into(),
-                                        icon: None,
-                                        enabled: true,
-                                        checked: false,
-                                    })],
-                                },
-                            },
-                            RibbonItemVm {
-                                id: "demo.debug".into(),
-                                label: "Debug".into(),
-                                icon: Some("clock.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Large,
-                                width: None,
-                                kind: RibbonItemKindVm::Split {
-                                    items: vec![
-                                        MenuEntry::Item(ribbon::MenuEntryVm {
-                                            id: "demo.debug_start".into(),
-                                            label: "Start".into(),
-                                            icon: None,
-                                            enabled: true,
-                                            checked: false,
-                                        }),
-                                        MenuEntry::Separator,
-                                        MenuEntry::Item(ribbon::MenuEntryVm {
-                                            id: "demo.debug_stop".into(),
-                                            label: "Stop".into(),
-                                            icon: None,
-                                            enabled: false,
-                                            checked: false,
-                                        }),
-                                    ],
-                                },
-                            },
-                        ],
-                    },
-                    RibbonGroupVm {
-                        id: "demo.g4".into(),
-                        title: "Menu".into(),
-                        items: vec![RibbonItemVm {
-                            id: "demo.file".into(),
-                            label: "File".into(),
-                            icon: Some("explorer.svg".into()),
-                            enabled: true,
-                            size: ItemSize::Small,
-                            width: None,
-                            kind: RibbonItemKindVm::Menu {
-                                items: vec![
-                                    MenuEntry::Item(ribbon::MenuEntryVm {
-                                        id: "demo.export".into(),
-                                        label: "Export".into(),
-                                        icon: None,
-                                        enabled: true,
-                                        checked: false,
-                                    }),
-                                    MenuEntry::Item(ribbon::MenuEntryVm {
-                                        id: "demo.import".into(),
-                                        label: "Import".into(),
-                                        icon: None,
-                                        enabled: true,
-                                        checked: false,
-                                    }),
-                                ],
-                            },
-                        }],
-                    },
-                    RibbonGroupVm {
-                        id: "demo.g5".into(),
-                        title: "Combo".into(),
-                        items: vec![
-                            RibbonItemVm {
-                                id: "demo.lineweight".into(),
-                                label: "Weight".into(),
-                                icon: Some("properties.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Small,
-                                width: Some(120.0),
-                                kind: RibbonItemKindVm::Combo {
-                                    current: "0.25".into(),
-                                    options: vec![
-                                        "0.13".into(),
-                                        "0.25".into(),
-                                        "0.50".into(),
-                                        "1.00".into(),
-                                    ],
-                                },
-                            },
-                            RibbonItemVm {
-                                id: "demo.layer".into(),
-                                label: "Layer".into(),
-                                icon: Some("tasks.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Small,
-                                width: Some(120.0),
-                                kind: RibbonItemKindVm::Combo {
-                                    current: "0".into(),
-                                    options: vec!["0".into(), "1".into(), "2".into()],
-                                },
-                            },
-                        ],
-                    },
-                    RibbonGroupVm {
-                        id: "demo.g6".into(),
-                        title: "Disabled".into(),
-                        items: vec![
-                            RibbonItemVm {
-                                id: "demo.lock".into(),
-                                label: "Lock".into(),
-                                icon: Some("delete.svg".into()),
-                                enabled: false,
-                                size: ItemSize::Small,
-                                width: None,
-                                kind: RibbonItemKindVm::Command,
-                            },
-                            RibbonItemVm {
-                                id: "demo.readonly".into(),
-                                label: "Read Only".into(),
-                                icon: Some("warning.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Small,
-                                width: None,
-                                kind: RibbonItemKindVm::Toggle { checked: true },
-                            },
-                        ],
-                    },
-                    RibbonGroupVm {
-                        id: "demo.g7".into(),
-                        title: "Icon Row".into(),
-                        items: vec![
-                            RibbonItemVm {
-                                id: "demo.icon1".into(),
-                                label: "Measure".into(),
-                                icon: Some("scan.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Icon,
-                                width: None,
-                                kind: RibbonItemKindVm::Command,
-                            },
-                            RibbonItemVm {
-                                id: "demo.icon2".into(),
-                                label: "Properties".into(),
-                                icon: Some("properties.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Icon,
-                                width: None,
-                                kind: RibbonItemKindVm::Command,
-                            },
-                            RibbonItemVm {
-                                id: "demo.icon3".into(),
-                                label: "Clock".into(),
-                                icon: Some("clock.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Icon,
-                                width: None,
-                                kind: RibbonItemKindVm::Command,
-                            },
-                            RibbonItemVm {
-                                id: "demo.icon4".into(),
-                                label: "Mark".into(),
-                                icon: Some("mode.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Icon,
-                                width: None,
-                                kind: RibbonItemKindVm::Split {
-                                    items: vec![MenuEntry::Item(ribbon::MenuEntryVm {
-                                        id: "demo.icon4_menu".into(),
-                                        label: "Mark Menu".into(),
-                                        icon: None,
-                                        enabled: true,
-                                        checked: false,
-                                    })],
-                                },
-                            },
-                            RibbonItemVm {
-                                id: "demo.icon5".into(),
-                                label: "Tasks".into(),
-                                icon: Some("tasks.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Icon,
-                                width: None,
-                                kind: RibbonItemKindVm::Command,
-                            },
-                        ],
-                    },
-                    RibbonGroupVm {
-                        id: "demo.g10".into(),
-                        title: "Edit".into(),
-                        items: vec![
-                            l("demo.cut", "Cut", "delete.svg"),
-                            l("demo.copy", "Copy", "canvas.svg"),
-                            l("demo.paste", "Paste", "add.svg"),
-                        ],
-                    },
-                    RibbonGroupVm {
-                        id: "demo.g11".into(),
-                        title: "Annotate".into(),
-                        items: vec![
-                            s("demo.note", "Note", "warning.svg"),
-                            s("demo.mark", "Mark Up", "mode.svg"),
-                            s("demo.measure_dist", "Measure", "scan.svg"),
-                            s("demo.dim", "Dimension", "generate.svg"),
-                        ],
-                    },
-                    RibbonGroupVm {
-                        id: "demo.g12".into(),
-                        title: "View".into(),
-                        items: vec![
-                            l("demo.pan", "Pan", "canvas.svg"),
-                            l("demo.orbit", "Orbit", "mode.svg"),
-                            l("demo.zoom", "Zoom", "scan.svg"),
-                        ],
-                    },
-                    RibbonGroupVm {
-                        id: "demo.g13".into(),
-                        title: "Filter".into(),
-                        items: vec![
-                            RibbonItemVm {
-                                id: "demo.filter_sel".into(),
-                                label: "Selected".into(),
-                                icon: Some("properties.svg".into()),
-                                enabled: true,
-                                size: ItemSize::Small,
-                                width: None,
-                                kind: RibbonItemKindVm::Toggle { checked: true },
-                            },
-                            s("demo.filter_hidden", "Hidden", "delete.svg"),
-                            s("demo.filter_locked", "Locked", "warning.svg"),
-                        ],
-                    },
+                    group("demo.g1", "File", vec![
+                        l("demo.new", "New", "add.svg"),
+                        l("demo.open", "Open", "explorer.svg"),
+                        l("demo.save", "Save", "output.svg"),
+                    ]),
+                    group("demo.g2", "Toggle", vec![
+                        toggle("demo.snap", "Snap", "mode.svg", true),
+                        toggle("demo.grid", "Grid", "properties.svg", false),
+                        s("demo.zoom_fit", "Zoom Fit", "scan.svg"),
+                    ]),
+                    group("demo.g3", "Split", vec![
+                        split("demo.run", "Run", "generate.svg", ItemSize::Small, vec![
+                            entry("demo.run_all", "Run All", true),
+                        ]),
+                        split("demo.debug", "Debug", "clock.svg", ItemSize::Large, vec![
+                            entry("demo.debug_start", "Start", true),
+                            sep(),
+                            entry("demo.debug_stop", "Stop", false),
+                        ]),
+                    ]),
+                    group("demo.g4", "Menu", vec![menu_s("demo.file", "File", "explorer.svg", vec![
+                        entry("demo.export", "Export", true),
+                        entry("demo.import", "Import", true),
+                    ])]),
+                    group("demo.g5", "Combo", vec![
+                        combo_s("demo.lineweight", "Weight", "properties.svg", "0.25",
+                            vec!["0.13", "0.25", "0.50", "1.00"]),
+                        combo_s("demo.layer", "Layer", "tasks.svg", "0", vec!["0", "1", "2"]),
+                    ]),
+                    group("demo.g6", "Disabled", vec![
+                        disabled("demo.lock", "Lock", "delete.svg"),
+                        toggle("demo.readonly", "Read Only", "warning.svg", true),
+                    ]),
+                    group("demo.g7", "Icon Row", vec![
+                        icon_btn("demo.icon1", "Measure", "scan.svg"),
+                        icon_btn("demo.icon2", "Properties", "properties.svg"),
+                        icon_btn("demo.icon3", "Clock", "clock.svg"),
+                        split("demo.icon4", "Mark", "mode.svg", ItemSize::Icon, vec![
+                            entry("demo.icon4_menu", "Mark Menu", true),
+                        ]),
+                        icon_btn("demo.icon5", "Tasks", "tasks.svg"),
+                    ]),
+                    group("demo.g10", "Edit", vec![
+                        l("demo.cut", "Cut", "delete.svg"),
+                        l("demo.copy", "Copy", "canvas.svg"),
+                        l("demo.paste", "Paste", "add.svg"),
+                    ]),
+                    group("demo.g11", "Annotate", vec![
+                        s("demo.note", "Note", "warning.svg"),
+                        s("demo.mark", "Mark Up", "mode.svg"),
+                        s("demo.measure_dist", "Measure", "scan.svg"),
+                        s("demo.dim", "Dimension", "generate.svg"),
+                    ]),
+                    group("demo.g12", "View", vec![
+                        l("demo.pan", "Pan", "canvas.svg"),
+                        l("demo.orbit", "Orbit", "mode.svg"),
+                        l("demo.zoom", "Zoom", "scan.svg"),
+                    ]),
+                    group("demo.g13", "Filter", vec![
+                        toggle("demo.filter_sel", "Selected", "properties.svg", true),
+                        s("demo.filter_hidden", "Hidden", "delete.svg"),
+                        s("demo.filter_locked", "Locked", "warning.svg"),
+                    ]),
                 ],
             },
             RibbonTabVm {
@@ -401,23 +232,15 @@ fn demo_model() -> RibbonModel {
                 title: "Tools".into(),
                 contextual: true,
                 groups: vec![
-                    RibbonGroupVm {
-                        id: "demo.g8".into(),
-                        title: "Contextual".into(),
-                        items: vec![
-                            s("demo.measure", "Measure", "scan.svg"),
-                            s("demo.section", "Section", "canvas.svg"),
-                        ],
-                    },
-                    RibbonGroupVm {
-                        id: "demo.g9".into(),
-                        title: "Export".into(),
-                        items: vec![
-                            l("demo.render", "Render", "generate.svg"),
-                            s("demo.export_img", "Export Image", "output.svg"),
-                            s("demo.print", "Print", "welcome.svg"),
-                        ],
-                    },
+                    group("demo.g8", "Contextual", vec![
+                        s("demo.measure", "Measure", "scan.svg"),
+                        s("demo.section", "Section", "canvas.svg"),
+                    ]),
+                    group("demo.g9", "Export", vec![
+                        l("demo.render", "Render", "generate.svg"),
+                        s("demo.export_img", "Export Image", "output.svg"),
+                        s("demo.print", "Print", "welcome.svg"),
+                    ]),
                 ],
             },
         ],
@@ -435,11 +258,11 @@ struct DemoView {
 
 impl Render for DemoView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-    let bg = match ribbon::theme() {
-        ribbon::ThemeKind::Light => rgb(0xEFEDEB),
-        ribbon::ThemeKind::Dark => rgb(0x2b2c30),
-    };
-    div().flex().flex_col().w_full().bg(bg).child(self._ribbon.clone())
+        let bg = match ribbon::theme() {
+            ribbon::ThemeKind::Light => rgb(0xEFEDEB),
+            ribbon::ThemeKind::Dark => rgb(0x2b2c30),
+        };
+        div().flex().flex_col().w_full().bg(bg).child(self._ribbon.clone())
     }
 }
 

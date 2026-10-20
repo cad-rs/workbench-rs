@@ -135,16 +135,6 @@ pub fn group_sep() -> Hsla {
     pick(rgb_to_hsla(rgb(0x4D4F5C)), rgb_to_hsla(rgb(0xC8C6C4)))
 }
 
-/// Popup surface background (menu dropdowns).
-pub fn popup_bg() -> Hsla {
-    pick(rgb_to_hsla(rgb(0x2A2C34)), rgb_to_hsla(rgb(0xFFFFFF)))
-}
-
-/// Popup hover row background.
-pub fn popup_hover_bg() -> Hsla {
-    pick(rgb_to_hsla(rgb(0x3D404D)), rgb_to_hsla(rgb(0xE8E6E3)))
-}
-
 /// Fully transparent color.
 pub fn transparent() -> Hsla {
     hsla(0.0, 0.0, 0.0, 0.0)
@@ -205,9 +195,6 @@ pub const ICON_BUTTON_WIDTH: f32 = 24.0;
 pub const ICON_CHEVRON_EXTRA: f32 = 12.0;
 /// Maximum icon-tier buttons on one icon row.
 pub const ICONS_PER_ROW: usize = 4;
-/// Viewport slack (logical px) required before a degraded group upgrades
-/// back — the hysteresis band that keeps the degrade oscillation-free.
-pub const DEGRADE_HYSTERESIS: f32 = 16.0;
 
 /// Combo width resolution: declared width clamped to [60, 300], else default.
 pub fn combo_width(declared: Option<f32>) -> f32 {
