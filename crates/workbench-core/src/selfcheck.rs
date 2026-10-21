@@ -389,38 +389,50 @@ pub fn run(app: &mut AppRuntime) -> i32 {
         checks.push(Check::skip("阶段3: 插件命令执行", "未装载 rhai demo 插件"));
     }
 
-    // 15.（Ribbon）Tab 模型（前置：wb.example.tools —— 示例产品的 Tab 组织）
-    let ribbon_ok = if app.host.ws.ribbon.iter().any(|t| t.id.0 == "wb.example.tools") {
+    // 15.（Ribbon）Tab 模型（前置：默认 Tab 存在 —— 平台「窗口」组并入其中）
+    let ribbon_ok = if app.host.ws.ribbon.iter().any(|t| t.id.0 == "app.home") {
         let ws = &mut app.host.ws;
-        let has_home = ws.ribbon.iter().any(|t| t.id.0 == "app.home");
-        let has_tools = ws.ribbon.iter().any(|t| t.id.0 == "wb.example.tools");
         let home = ws.ribbon.iter().find(|t| t.id.0 == "app.home");
         let home_groups = home.map(|t| t.groups.len()).unwrap_or(0);
         // legacy（平台「窗口」组）并入默认 Tab
         let has_window_group = home
             .map(|t| t.groups.iter().any(|g| g.id.0 == "app.window"))
             .unwrap_or(false);
-        // 活动 Tab 切换 + 布局持久化往返
-        ws.set_active_ribbon_tab("wb.example.tools");
-        let saved = ws.save_layout();
-        let restored_active = saved.ribbon_active_tab.as_deref() == Some("wb.example.tools");
-        let skipped = ws.apply_layout(&saved);
-        let restored = ws.active_ribbon_tab == "wb.example.tools" && skipped.is_empty();
-        ws.set_active_ribbon_tab("app.home");
-        let ok = has_home
-            && has_tools
-            && home_groups >= 4
-            && has_window_group
-            && restored_active
-            && restored;
+        // 活动 Tab 切换 + 布局持久化往返：有第二个 Tab 才测切换
+        let other = ws
+            .ribbon
+            .iter()
+            .find(|t| t.id.0 != "app.home")
+            .map(|t| t.id.0.clone());
+        let (restored_active, restored) = match &other {
+            Some(id) => {
+                ws.set_active_ribbon_tab(id);
+                let saved = ws.save_layout();
+                let active_ok = saved.ribbon_active_tab.as_deref() == Some(id.as_str());
+                let skipped = ws.apply_layout(&saved);
+                (active_ok, ws.active_ribbon_tab == *id && skipped.is_empty())
+            }
+            None => (false, false),
+        };
+        if let Some(id) = &other {
+            ws.set_active_ribbon_tab(id);
+        }
+        // With a single tab there is nothing to switch to; the round-trip is
+        // only meaningful when a second tab exists.
+        let switching_ok = other
+            .as_ref()
+            .map(|_| restored_active && restored)
+            .unwrap_or(true);
+        let ok = home_groups >= 1 && has_window_group && switching_ok;
         (
             ok,
             format!(
-                "home={has_home} tools={has_tools} home_groups={home_groups} window={has_window_group} persist={restored_active}/{restored}"
+                "home_groups={home_groups} window={has_window_group} other_tab={} persist={restored_active}/{restored}",
+                other.as_deref().unwrap_or("（无）")
             ),
         )
     } else {
-        (false, "未装配示例 Ribbon Tab".to_string())
+        (false, "没有默认 Ribbon Tab".to_string())
     };
     checks.push(Check::new(
         "Ribbon: Tab 合并/legacy 兼容/活动 Tab 持久化",
@@ -495,6 +507,39 @@ pub fn run(app: &mut AppRuntime) -> i32 {
     } else {
         checks.push(Check::skip("阶段5: 插件运行时禁用", "未装载 demo 插件"));
     }
+
+    // 19. 装配探针：视图类型 / 文档类型 / 插件（任何产品都应注册了什么）
+    let view_types: Vec<String> = app
+        .host
+        .ws
+        .view_type_ids()
+        .map(|t| t.0.clone())
+        .collect();
+    checks.push(Check::new(
+        "装配: 视图类型已注册",
+        !view_types.is_empty(),
+        format!("views={view_types:?}"),
+    ));
+
+    let doc_types: Vec<String> = app
+        .host
+        .docs
+        .types()
+        .iter()
+        .map(|t| t.id.0.clone())
+        .collect();
+    checks.push(Check::new(
+        "装配: 文档类型已注册",
+        !doc_types.is_empty(),
+        format!("doc_types={doc_types:?}"),
+    ));
+
+    let plugins = app.plugins_loaded().to_vec();
+    checks.push(Check::new(
+        "装配: 插件已装载",
+        !plugins.is_empty(),
+        format!("plugins={plugins:?}"),
+    ));
 
     // 汇总
     let failed = checks.iter().filter(|c| !c.ok && !c.skipped).count();

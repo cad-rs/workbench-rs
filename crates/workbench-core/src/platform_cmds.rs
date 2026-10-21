@@ -70,8 +70,20 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
 
     // ---- 文档生命周期命令 ----    // 新建文档
     registry.register_command(
-        CommandDef::sync(NEW_DOCUMENT, "新建文档", |ctx: &mut CommandCtx, _args: &CommandArgs| {
-            let Some(type_id) = ctx.host().docs.types().first().map(|t| t.id.clone()) else {
+        CommandDef::sync(NEW_DOCUMENT, "新建文档", |ctx: &mut CommandCtx, args: &CommandArgs| {
+            // `type` names a specific document type (the welcome page offers one
+            // entry per type); without it the product's default type is used.
+            let wanted = args
+                .get("type")
+                .map(str::to_string)
+                .or_else(|| ctx.host().ws.default_document_type.clone());
+            let type_id = {
+                let types = ctx.host().docs.types();
+                wanted
+                    .and_then(|id| types.iter().find(|t| t.id.0 == id).map(|t| t.id.clone()))
+                    .or_else(|| types.first().map(|t| t.id.clone()))
+            };
+            let Some(type_id) = type_id else {
                 return CommandResult::failed("产品没有注册任何文档类型");
             };
             let count = ctx.host().docs.docs().count();

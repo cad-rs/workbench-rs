@@ -433,6 +433,8 @@ pub struct WorkspaceState {
     /// 当前工作模式（Perspective 的简化：影响命令启用状态）。
     pub work_mode: String,
     pub work_modes: Vec<String>,
+    /// 产品指定的默认文档类型 ID（多文档类型时用；None = 第一个注册的）。
+    pub default_document_type: Option<String>,
     /// 各区域的活动面板。
     pub area_active: HashMap<DockArea, PanelId>,
 
@@ -454,6 +456,7 @@ impl WorkspaceState {
             active_tab: 0,
             work_mode: default_mode.into(),
             work_modes: Vec::new(),
+            default_document_type: None,
             area_active: HashMap::new(),
             view_defs: HashMap::new(),
             panel_defs: HashMap::new(),

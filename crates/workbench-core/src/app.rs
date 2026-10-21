@@ -1191,6 +1191,10 @@ impl WorkbenchAppBuilder {
             host.ws
                 .set_work_modes(registry.work_modes.clone(), &registry.default_mode);
         }
+        // 产品指定的默认文档类型（多文档类型时用）
+        if let Some(id) = self.default_doc_type.clone() {
+            host.ws.default_document_type = Some(id);
+        }
         for err in &registry.errors {
             host.log.error(format!("[装配] {err}"));
         }
