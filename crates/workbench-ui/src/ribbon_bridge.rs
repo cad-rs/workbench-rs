@@ -30,8 +30,11 @@ use crate::{RootView, SharedCore, notify};
 pub(crate) fn build_model(core: &AppRuntime, collapsed: bool) -> RibbonModel {
     let ws = &core.host.ws;
     RibbonModel {
-        // Product logo mount is deferred to a later milestone.
-        logo: None,
+        // Product brand: logo asset path + display name from the product
+        // profile (product.toml); rendered at the left edge of the tab strip,
+        // before the QAT.
+        logo: core.profile().logo.clone(),
+        product_name: Some(core.product_name().to_string()),
         qat: ws.qat.iter().map(|item| qat_item_vm(core, item)).collect(),
         tabs: ws
             .ribbon
@@ -305,9 +308,11 @@ mod tests {
         let ids: Vec<&str> = model.tabs.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["app.home", "wb.example.tools"]);
         assert_eq!(model.active_tab_id, "app.home");
-        // Logo is deferred; overflow defaults to scroll; collapsed comes from
-        // the caller.
+        // The default profile carries no logo asset; the product name always
+        // projects. Overflow defaults to scroll; collapsed comes from the
+        // caller.
         assert!(model.logo.is_none());
+        assert_eq!(model.product_name.as_deref(), Some(runtime.product_name()));
         assert_eq!(model.overflow, OverflowStrategy::Scroll);
         assert!(!model.collapsed);
         assert!(build_model(&runtime, true).collapsed);

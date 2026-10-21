@@ -7,6 +7,7 @@ use std::any::{Any, TypeId};
 use crate::command::CommandDef;
 use crate::documents::DocumentTypeDef;
 use crate::ids::WorkbenchId;
+use crate::settings::SettingSpec;
 use crate::workspace::{PanelDef, ToolbarGroup, ToolbarItem, ViewDef};
 
 /// 注册表：产品装配阶段由 Workbench.init 填充，运行期只读。
@@ -21,6 +22,9 @@ pub struct Registry {
     pub panels: Vec<PanelDef>,
     pub views: Vec<ViewDef>,
     pub doc_types: Vec<DocumentTypeDef>,
+    /// Registered setting specs (platform built-ins + plugin settings);
+    /// build 时转入 ServiceHost，设置面板按此渲染、`app.settings.set` 按此校验。
+    pub setting_specs: Vec<SettingSpec>,
     services: Vec<(TypeId, Box<dyn Any + Send + Sync>)>,
     /// 装配期间的诊断信息（重复注册、非法参数等）。
     pub errors: Vec<String>,
@@ -201,6 +205,16 @@ impl Registry {
             return;
         }
         self.panels.push(def);
+    }
+
+    /// Register a setting spec (platform built-in or plugin setting). Duplicate
+    /// keys are rejected with a registry error, keeping the first registration.
+    pub fn register_setting(&mut self, spec: SettingSpec) {
+        if self.setting_specs.iter().any(|s| s.key == spec.key) {
+            self.error(format!("设置项重复注册: {}", spec.key));
+            return;
+        }
+        self.setting_specs.push(spec);
     }
 
     pub fn register_view(&mut self, mut def: ViewDef) {

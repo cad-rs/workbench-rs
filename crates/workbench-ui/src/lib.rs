@@ -24,6 +24,9 @@ use workbench_core::AppRuntime;
 
 pub mod gpu_view;
 
+/// About dialog overlay (product brand: logo / name / version / links).
+pub(crate) mod about;
+
 /// Built-in platform panels (diagnostics / plugins).
 pub mod platform_panels;
 
@@ -129,10 +132,24 @@ struct RootView {
     mirror: dock_panel::SharedMirror,
     /// Ribbon 挂载点（ribbon crate 实体；首帧懒构建，模式同 dock）。
     ribbon: ribbon_bridge::RibbonHost,
+    /// Last-applied `ui.theme` / `ui.accent` settings: the render loop
+    /// re-applies the theme when either diverges from what is on screen
+    /// (settings panel writes land live).
+    applied_theme: String,
+    applied_accent: String,
 }
 
 impl RootView {
     fn new(core: SharedCore, pending_dock: Option<gpui_component::dock::DockAreaState>) -> Self {
+        // Seed the applied-theme trackers from the current settings so the
+        // first frame does not re-apply what launch_app already applied.
+        let (applied_theme, applied_accent) = {
+            let guard = core.lock().unwrap_or_else(|p| p.into_inner());
+            (
+                guard.host.settings.get_str("ui.theme", "dark"),
+                guard.host.settings.get_str("ui.accent", "#338CF2"),
+            )
+        };
         Self {
             core,
             last_render: web_time::Instant::now(),
@@ -146,6 +163,8 @@ impl RootView {
                 dock_panel::DockMirror::default(),
             )),
             ribbon: ribbon_bridge::RibbonHost::new(),
+            applied_theme,
+            applied_accent,
         }
     }
 }
@@ -363,6 +382,26 @@ impl Render for RootView {
         let weak = cx.entity().downgrade();
         let core = self.core.clone();
 
+        // ---- Theme/accent live sync: the settings panel writes through
+        // `app.settings.set`; re-apply whichever surface diverged. ----
+        {
+            let (theme_now, accent_now) = {
+                let guard = self.core.lock().unwrap_or_else(|p| p.into_inner());
+                (
+                    guard.host.settings.get_str("ui.theme", "dark"),
+                    guard.host.settings.get_str("ui.accent", "#338CF2"),
+                )
+            };
+            if theme_now != self.applied_theme {
+                theme::apply_theme(&theme_now, cx);
+                self.applied_theme = theme_now;
+            }
+            if accent_now != self.applied_accent {
+                theme::apply_accent(&accent_now);
+                self.applied_accent = accent_now;
+            }
+        }
+
         // ---- 核心状态读取（一次性） ----
         let (shell_snap, status) = {
             let core = self.core.lock().unwrap_or_else(|p| p.into_inner());
@@ -472,6 +511,7 @@ impl Render for RootView {
             .flex()
             .flex_col()
             .size_full()
+            .relative()
             .font_family("Segoe UI")
             .bg(col(theme::ui_theme().bg))
             .text_color(col(wb::Color::LIGHT_GRAY))
@@ -515,6 +555,11 @@ impl Render for RootView {
                     notify(&weak_k, cx);
                 }
             });
+
+        // ---- About 对话框 overlay（app.about 命令置位时渲染） ----
+        if let Some(overlay) = about::maybe_about_overlay(&core, cx) {
+            root_col = root_col.child(overlay);
+        }
 
         root_col
     }
@@ -741,8 +786,18 @@ fn launch_app(
         gpui_component::init(cx);
         gpui_rhai::install(cx);
         // 主题在组件初始化后、任何窗口打开前应用：shell 配色、ribbon tokens
-        // 与 gpui-component 全局主题一次切齐。
+        // 与 gpui-component 全局主题一次切齐。品牌强调色（ui.accent，来自
+        // product.toml 的 branding.accent）同时落到 ribbon tokens。
         theme::apply_theme(&theme_name, cx);
+        {
+            let accent = core
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .host
+                .settings
+                .get_str("ui.accent", "#338CF2");
+            theme::apply_accent(&accent);
+        }
         let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -939,7 +994,8 @@ mod tests {
                 "example.panel.tasks",
                 "example.panel.properties",
                 "app.panel.diagnostics",
-                "app.panel.plugins"
+                "app.panel.plugins",
+                "app.panel.settings"
             ]
         );
         assert_eq!(snap.right.active.as_deref(), Some("example.panel.tasks"));

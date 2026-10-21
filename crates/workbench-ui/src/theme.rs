@@ -77,3 +77,48 @@ pub fn apply_theme(name: &str, cx: &mut App) {
     };
     gpui_component::Theme::change(mode, None, cx);
 }
+
+/// Parse `#RRGGBB` (or `RRGGBB`) into gpui's packed `0xRRGGBBAA` form;
+/// None on malformed input.
+pub fn parse_hex_rgb(s: &str) -> Option<u32> {
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    if hex.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(hex, 16).ok()?;
+    Some((v << 8) | 0xFF)
+}
+
+/// Apply the `ui.accent` setting to the ribbon accent tokens (product brand).
+/// Malformed input restores the default accent.
+pub fn apply_accent(accent: &str) {
+    ribbon::set_accent(parse_hex_rgb(accent));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_hex_rgb_with_and_without_hash() {
+        assert_eq!(parse_hex_rgb("#3B82F6"), Some(0x3B82F6FF));
+        assert_eq!(parse_hex_rgb("3B82F6"), Some(0x3B82F6FF));
+        assert_eq!(parse_hex_rgb("#000000"), Some(0x000000FF));
+    }
+
+    #[test]
+    fn rejects_malformed_hex() {
+        assert_eq!(parse_hex_rgb("#3B82F"), None, "too short");
+        assert_eq!(parse_hex_rgb("#3B82F6FF"), None, "too long");
+        assert_eq!(parse_hex_rgb("#GGGGGG"), None, "non-hex");
+        assert_eq!(parse_hex_rgb(""), None);
+    }
+
+    #[test]
+    fn apply_accent_restores_default_on_garbage() {
+        apply_accent("#FF0000");
+        assert_eq!(ribbon::accent_override(), Some(0xFF0000FF));
+        apply_accent("not-a-color");
+        assert_eq!(ribbon::accent_override(), None, "garbage restores default");
+    }
+}

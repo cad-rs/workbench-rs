@@ -26,6 +26,7 @@ pub mod documents;
 pub mod geo;
 pub mod ids;
 pub mod log;
+pub mod product;
 pub mod registry;
 pub mod services;
 pub mod settings;
@@ -53,9 +54,10 @@ pub use ids::{
     ViewTypeId, WorkbenchId,
 };
 pub use log::{LogEntry, LogLevel, LogStore};
+pub use product::{ProductProfile, ProductToml};
 pub use registry::Registry;
 pub use services::{AppServices, PluginEntry, RuntimeStats, ServiceHost};
-pub use settings::Settings;
+pub use settings::{SettingKind, SettingScope, SettingSpec, Settings};
 pub use tasks::{
     task_channel, DocCommit, ProgressHandle, TaskCtx, TaskEvent, TaskEventRx, TaskFailure,
     TaskInfo, TaskJob, TaskKind, TaskManager, TaskOutcome, TaskSession, TaskSpec, TaskStatus,

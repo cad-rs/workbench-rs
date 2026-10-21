@@ -13,6 +13,7 @@ readme = "../../README.md"
 workbench-api = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 
 # 桌面专属：本地文件对话框（Web 为 stub）、async-io 计时器驱动共享执行器
 # （async-io 2.6 的 rustix/errno 链不支持 wasm32-unknown-unknown）

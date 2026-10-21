@@ -155,6 +155,7 @@ fn demo_model() -> RibbonModel {
 
     RibbonModel {
         logo: None,
+        product_name: Some("Ribbon Demo".to_string()),
         qat: vec![qat_icon("demo.save"), qat_icon("demo.undo"), qat_icon("demo.redo")],
         tabs: vec![
             RibbonTabVm {

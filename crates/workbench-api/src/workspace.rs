@@ -427,6 +427,8 @@ pub struct WorkspaceState {
     /// Ribbon 折叠能力开关（ribbon-bar.md §4.5）；默认 false（禁用），
     /// 产品经 builder 开启。门控折叠钮渲染、Tab 双击与 Ctrl+F1 快捷键。
     pub ribbon_collapse_enabled: bool,
+    /// About 对话框打开标志（`app.about` 命令置位；前端渲染对话框并负责关闭）。
+    pub about_open: bool,
     pub panels: Vec<PanelSlot>,
     pub tabs: Vec<TabSlot>,
     pub active_tab: usize,
@@ -451,6 +453,7 @@ impl WorkspaceState {
             qat: Vec::new(),
             ribbon_collapsed: false,
             ribbon_collapse_enabled: false,
+            about_open: false,
             panels: Vec::new(),
             tabs: Vec::new(),
             active_tab: 0,

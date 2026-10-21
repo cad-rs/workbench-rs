@@ -24,6 +24,8 @@ pub struct AppRuntime {
     pub host: ServiceHost,
     product_id: String,
     product_name: String,
+    /// 产品身份与品牌（product.toml；未提供时为 builder 的默认值）。
+    profile: api::ProductProfile,
     snapshot: CtxSnapshot,
     layout_path: PathBuf,
     /// 自动保存目录（`<配置目录>/autosave`）。
@@ -60,6 +62,11 @@ impl AppRuntime {
 
     pub fn product_name(&self) -> &str {
         &self.product_name
+    }
+
+    /// 产品身份与品牌（窗口标题、ribbon logo、About 对话框共用此源）。
+    pub fn profile(&self) -> &api::ProductProfile {
+        &self.profile
     }
 
     pub fn snapshot(&self) -> &CtxSnapshot {
@@ -908,6 +915,9 @@ pub type PluginStage = Box<dyn FnOnce(&mut Registry) + Send>;
 pub struct WorkbenchAppBuilder {
     product_id: String,
     product_name: String,
+    /// 产品身份与品牌（product.toml）。提供时覆盖 product_id/product_name，
+    /// 并作为窗口标题、ribbon logo、About 对话框的数据源。
+    profile: Option<api::ProductProfile>,
     workbenches: Vec<Box<dyn Workbench>>,
     plugin_stages: Vec<PluginStage>,
     default_mode: String,
@@ -946,6 +956,7 @@ impl WorkbenchAppBuilder {
         Self {
             product_id: product_id.into(),
             product_name: product_name.into(),
+            profile: None,
             workbenches: Vec::new(),
             plugin_stages: Vec::new(),
             default_mode: "常规".to_string(),
@@ -967,6 +978,15 @@ impl WorkbenchAppBuilder {
     /// 设置产品的模块解析器（插件启用的 Workbench 模块由它装配）。
     pub fn with_module_loader(mut self, loader: ModuleLoader) -> Self {
         self.module_loader = Some(loader);
+        self
+    }
+
+    /// 设置产品身份与品牌（`product.toml` 加载结果，见 [`crate::product`]）。
+    /// profile 的 id/name 覆盖 [`WorkbenchAppBuilder::new`] 的对应参数。
+    pub fn with_profile(mut self, profile: api::ProductProfile) -> Self {
+        self.product_id = profile.id.clone();
+        self.product_name = profile.name.clone();
+        self.profile = Some(profile);
         self
     }
 
@@ -1228,6 +1248,26 @@ impl WorkbenchAppBuilder {
                 .settings
                 .set("ui.theme", serde_json::Value::String(self.theme.clone()));
         }
+        // Brand accent: product.toml's branding.accent seeds ui.accent when
+        // the product ships one and the user has not customized it.
+        if let Some(accent) = &self.profile.as_ref().and_then(|p| p.accent.as_ref()) {
+            if host.settings.get("ui.accent").is_none() {
+                let _ = host
+                    .settings
+                    .set("ui.accent", serde_json::Value::String(accent.to_string()));
+            }
+        }
+        // Setting specs: registry (platform built-ins + plugins) → host, so
+        // the settings panel and `app.settings.set` see one list. Defaults
+        // that are not yet stored are seeded (in memory only — a fresh value
+        // persists on first write).
+        host.setting_specs = std::mem::take(&mut registry.setting_specs);
+        for spec in &host.setting_specs {
+            if host.settings.get(&spec.key).is_none() {
+                let default = spec.effective_default();
+                host.settings.seed(&spec.key, default);
+            }
+        }
         host.stats.backend = self.backend_label.clone();
 
         // 插件注册镜像（诊断/管理面板用）
@@ -1255,6 +1295,14 @@ impl WorkbenchAppBuilder {
             host,
             product_id: self.product_id.clone(),
             product_name: self.product_name.clone(),
+            profile: self
+                .profile
+                .clone()
+                .unwrap_or_else(|| api::ProductProfile {
+                    id: self.product_id.clone(),
+                    name: self.product_name.clone(),
+                    ..Default::default()
+                }),
             snapshot: CtxSnapshot::default(),
             layout_path,
             autosave_dir,

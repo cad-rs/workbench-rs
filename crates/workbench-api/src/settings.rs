@@ -2,11 +2,100 @@
 //!
 //! 第一阶段实现为扁平点分键（`autosave.interval_secs`、`plugin.<id>.enabled`）
 //! 的 JSON 持久化；写入立即落盘，读取走内存缓存。
+//!
+//! 设置项的**类型与元数据**由 [`SettingSpec`] 描述：平台与插件在装配期经
+//! [`crate::Registry::register_setting`] 登记，前端设置面板按 spec 渲染控件
+//! 并经 `app.settings.set` 命令写回（写入侧做类型校验与范围钳制）。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+
+/// A registered setting's value type (drives the control the settings panel
+/// renders and the validation `app.settings.set` performs).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingKind {
+    /// On/off; rendered as a toggle.
+    Bool,
+    /// Integer in `min..=max` with `step` increments; rendered as a stepper.
+    Int { min: i64, max: i64, step: i64 },
+    /// One of a fixed option list; rendered as a cycle/select control.
+    Enum(Vec<String>),
+    /// Free-form string (display-only until the text input lands).
+    Str,
+}
+
+/// Where a setting's value comes from (Phase 1: user only; product-scope
+/// read-only defaults arrive with the enterprise-policy milestone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingScope {
+    /// Editable by the user, persisted to `settings.json`.
+    #[default]
+    User,
+}
+
+/// Metadata for one setting key: type, label, default and group. Registered
+/// by the platform (built-ins) and by plugins; the settings panel renders one
+/// row per spec, the setter validates against it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingSpec {
+    /// Dotted key (`ui.theme`, `autosave.interval_secs`, `plugin.<id>.…`).
+    pub key: String,
+    /// Human-readable label for the settings panel.
+    pub label: String,
+    /// Panel group heading (`"常规"`, `"外观"`, …).
+    pub group: String,
+    pub kind: SettingKind,
+    /// Default applied when no user value is stored.
+    pub default: Value,
+    pub scope: SettingScope,
+}
+
+impl SettingSpec {
+    /// Validate `value` against this spec: type check, integer clamping into
+    /// `min..=max`, enum membership. Returns the normalized value.
+    pub fn validate(&self, value: Value) -> Result<Value, String> {
+        match &self.kind {
+            SettingKind::Bool => value
+                .as_bool()
+                .map(Value::Bool)
+                .ok_or_else(|| format!("{} 需要布尔值", self.key)),
+            SettingKind::Int { min, max, .. } => {
+                let n = value
+                    .as_i64()
+                    .ok_or_else(|| format!("{} 需要整数", self.key))?;
+                Ok(Value::Number(n.clamp(*min, *max).into()))
+            }
+            SettingKind::Enum(options) => {
+                let s = value
+                    .as_str()
+                    .ok_or_else(|| format!("{} 需要字符串", self.key))?;
+                if options.iter().any(|o| o == s) {
+                    Ok(Value::String(s.to_string()))
+                } else {
+                    Err(format!("{s} 不在 {} 的可选项 {options:?}", self.key))
+                }
+            }
+            SettingKind::Str => value
+                .as_str()
+                .map(|s| Value::String(s.to_string()))
+                .ok_or_else(|| format!("{} 需要字符串", self.key)),
+        }
+    }
+
+    /// The value to use when nothing is stored: the spec default, or the
+    /// first enum option when the default was not one of the options.
+    pub fn effective_default(&self) -> Value {
+        if let SettingKind::Enum(options) = &self.kind {
+            if !self.default.as_str().is_some_and(|s| options.iter().any(|o| o == s)) {
+                return Value::String(options[0].clone());
+            }
+        }
+        self.default.clone()
+    }
+}
+
 
 /// 产品设置存储（UI 线程所有）。
 #[derive(Default)]
@@ -68,6 +157,13 @@ impl Settings {
         self.save()
     }
 
+    /// Seed a default into memory only (no disk write): used at build time so
+    /// a registered spec's default is readable before the user ever changes
+    /// it, without polluting settings.json with untouched defaults.
+    pub fn seed(&mut self, key: &str, value: Value) {
+        self.values.entry(key.to_string()).or_insert(value);
+    }
+
     pub fn remove(&mut self, key: &str) -> Result<(), String> {
         self.values.remove(key);
         self.save()
@@ -87,5 +183,62 @@ impl Settings {
             let _ = std::fs::create_dir_all(dir);
         }
         std::fs::write(path, json).map_err(|e| format!("写入设置 {}: {e}", path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn spec(kind: SettingKind, default: Value) -> SettingSpec {
+        SettingSpec {
+            key: "test.key".into(),
+            label: "Test".into(),
+            group: "测试".into(),
+            kind,
+            default,
+            scope: SettingScope::User,
+        }
+    }
+
+    #[test]
+    fn validate_bool() {
+        let s = spec(SettingKind::Bool, json!(false));
+        assert_eq!(s.validate(json!(true)), Ok(json!(true)));
+        assert!(s.validate(json!("yes")).is_err());
+    }
+
+    #[test]
+    fn validate_int_clamps_into_range() {
+        let s = spec(SettingKind::Int { min: 5, max: 300, step: 5 }, json!(30));
+        assert_eq!(s.validate(json!(60)), Ok(json!(60)));
+        assert_eq!(s.validate(json!(1)), Ok(json!(5)), "clamped to min");
+        assert_eq!(s.validate(json!(9999)), Ok(json!(300)), "clamped to max");
+        assert!(s.validate(json!("30")).is_err());
+    }
+
+    #[test]
+    fn validate_enum_membership() {
+        let s = spec(
+            SettingKind::Enum(vec!["dark".into(), "light".into()]),
+            json!("dark"),
+        );
+        assert_eq!(s.validate(json!("light")), Ok(json!("light")));
+        assert!(s.validate(json!("blue")).is_err());
+    }
+
+    #[test]
+    fn effective_default_repairs_bad_enum_default() {
+        let s = spec(
+            SettingKind::Enum(vec!["dark".into(), "light".into()]),
+            json!("blue"),
+        );
+        assert_eq!(s.effective_default(), json!("dark"));
+        let ok = spec(
+            SettingKind::Enum(vec!["dark".into(), "light".into()]),
+            json!("light"),
+        );
+        assert_eq!(ok.effective_default(), json!("light"));
     }
 }

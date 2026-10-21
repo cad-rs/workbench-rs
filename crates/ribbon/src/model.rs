@@ -117,6 +117,8 @@ pub struct RibbonTabVm {
 pub struct RibbonModel {
     /// Logo icon resource path (svg), drawn at the left edge of the tab strip.
     pub logo: Option<String>,
+    /// Product display name, drawn beside the logo (left of the QAT).
+    pub product_name: Option<String>,
     /// Quick access toolbar items, always rendered as Icon tier buttons on the
     /// tab strip (also visible while collapsed).
     pub qat: Vec<RibbonItemVm>,

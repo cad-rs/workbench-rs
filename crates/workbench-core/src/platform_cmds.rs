@@ -3,7 +3,10 @@
 //! 命令通过 AppServices 门面操作平台，不触碰 GUI；快捷键绑定在这里集中登记。
 
 use workbench_api as api;
-use api::{CommandArgs, CommandCtx, CommandDef, CommandResult, Hotkey, KeyCode, Registry};
+use api::{
+    CommandArgs, CommandCtx, CommandDef, CommandResult, Hotkey, KeyCode, Registry, SettingKind,
+    SettingScope, SettingSpec,
+};
 
 pub const NEW_DOCUMENT: &str = "app.new_document";
 pub const OPEN_DOCUMENT: &str = "app.open_document";
@@ -13,6 +16,39 @@ pub const UNDO: &str = "app.undo";
 pub const REDO: &str = "app.redo";
 pub const CLOSE_ACTIVE_VIEW: &str = "app.close_active_view";
 pub const TOGGLE_PANEL_PREFIX: &str = "app.toggle_panel.";
+pub const ABOUT: &str = "app.about";
+pub const SETTINGS_SET: &str = "app.settings.set";
+
+/// Built-in setting specs: the settings panel renders rows from these and
+/// `app.settings.set` validates writes against them.
+fn register_builtin_settings(registry: &mut Registry) {
+    registry.register_setting(SettingSpec {
+        key: "ui.theme".into(),
+        label: "主题".into(),
+        group: "外观".into(),
+        kind: SettingKind::Enum(vec!["dark".into(), "light".into()]),
+        default: serde_json::json!("dark"),
+        scope: SettingScope::User,
+    });
+    // Brand accent (`#RRGGBB`), seeded from product.toml's branding.accent at
+    // build time when the product ships one.
+    registry.register_setting(SettingSpec {
+        key: "ui.accent".into(),
+        label: "强调色".into(),
+        group: "外观".into(),
+        kind: SettingKind::Str,
+        default: serde_json::json!("#338CF2"),
+        scope: SettingScope::User,
+    });
+    registry.register_setting(SettingSpec {
+        key: "autosave.interval_secs".into(),
+        label: "自动保存间隔（秒）".into(),
+        group: "常规".into(),
+        kind: SettingKind::Int { min: 5, max: 3600, step: 5 },
+        default: serde_json::json!(30),
+        scope: SettingScope::User,
+    });
+}
 
 fn all_extensions(ctx: &mut CommandCtx) -> Vec<String> {
     ctx.host()
@@ -35,6 +71,9 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
     // The built-in platform panels (diagnostics / plugins) are view
     // implementations, so the frontend registers them before this runs; their
     // ids therefore already appear in `panel_ids` below.
+
+    // ---- 平台内置设置项 ----
+    register_builtin_settings(registry);
 
     // ---- 插件管理命令 ----
     registry.register_command(
@@ -236,6 +275,63 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
         .hotkey(Hotkey::new(KeyCode::F1).ctrl(true)),
     );
 
+    // 设置写入：按注册的 spec 做类型校验与范围钳制，写入并立即落盘。
+    // CommandArgs 是字符串表；按 spec 的类型把字符串解析成 Value 再校验。
+    registry.register_command(
+        CommandDef::sync(
+            SETTINGS_SET,
+            "修改设置",
+            |ctx: &mut CommandCtx, args: &CommandArgs| {
+                let Some(key) = args.get("key") else {
+                    return CommandResult::failed("缺少参数 key");
+                };
+                let Some(raw) = args.get("value") else {
+                    return CommandResult::failed("缺少参数 value");
+                };
+                let host = ctx.host();
+                let Some(spec) = host.setting_specs.iter().find(|s| s.key == key).cloned() else {
+                    return CommandResult::failed(format!("未注册的设置项: {key}"));
+                };
+                let parsed = match &spec.kind {
+                    SettingKind::Bool => match raw {
+                        "true" => serde_json::Value::Bool(true),
+                        "false" => serde_json::Value::Bool(false),
+                        _ => return CommandResult::failed(format!("{raw} 不是布尔值")),
+                    },
+                    SettingKind::Int { .. } => match raw.parse::<i64>() {
+                        Ok(n) => serde_json::Value::Number(n.into()),
+                        Err(_) => return CommandResult::failed(format!("{raw} 不是整数")),
+                    },
+                    SettingKind::Enum(_) | SettingKind::Str => {
+                        serde_json::Value::String(raw.to_string())
+                    }
+                };
+                let normalized = match spec.validate(parsed) {
+                    Ok(v) => v,
+                    Err(e) => return CommandResult::failed(e),
+                };
+                let host = ctx.host();
+                match host.settings.set(&spec.key, normalized.clone()) {
+                    Ok(()) => {
+                        host.log.info(format!("[设置] {} = {normalized}", spec.key));
+                        CommandResult::done_with(format!("{} = {normalized}", spec.label))
+                    }
+                    Err(e) => CommandResult::failed(e),
+                }
+            },
+        )
+        .enabled_when(|_| true),
+    );
+
+    // About 对话框：置位 workspace 标志，前端（workbench-ui）渲染对话框。
+    registry.register_command(
+        CommandDef::sync(ABOUT, "关于", |ctx: &mut CommandCtx, _args: &CommandArgs| {
+            ctx.host().ws.about_open = true;
+            CommandResult::done()
+        })
+        .enabled_when(|_| true),
+    );
+
     // 每个面板的显示/隐藏命令 + “窗口”工具栏组（含平台自己的面板）
     let all_panels: Vec<(String, String)> = panel_ids.to_vec();
     let mut window_group = api::ToolbarGroup::new("app.window", "窗口");
@@ -258,6 +354,13 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
             .push(api::ToolbarItem::labeled(format!("{TOGGLE_PANEL_PREFIX}{id}"), title));
     }
     registry.add_toolbar_group(window_group);
+
+    // “帮助”工具栏组：About 对话框入口（产品品牌信息）。
+    let mut help_group = api::ToolbarGroup::new("app.help", "帮助");
+    help_group
+        .items
+        .push(api::ToolbarItem::labeled(ABOUT, "关于"));
+    registry.add_toolbar_group(help_group);
 }
 
 /// 打开文件路径（打开命令共用流程）。

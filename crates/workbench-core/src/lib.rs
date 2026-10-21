@@ -13,7 +13,9 @@ pub mod cli;
 pub mod dialog;
 pub mod executor;
 pub mod platform_cmds;
+pub mod product;
 pub mod selfcheck;
 
 pub use app::{AppRuntime, PluginStage, WorkbenchAppBuilder};
 pub use executor::AsyncExecutor;
+pub use product::{discover as discover_product, load_from_dirs as load_product_from};

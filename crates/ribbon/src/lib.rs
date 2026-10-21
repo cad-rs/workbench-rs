@@ -39,4 +39,4 @@ pub use model::{
     RibbonItemVm, RibbonModel, RibbonTabVm,
 };
 pub use state::RibbonState;
-pub use tokens::{set_theme, theme, ThemeKind};
+pub use tokens::{accent, accent_override, set_accent, set_theme, theme, ThemeKind};

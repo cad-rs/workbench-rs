@@ -32,9 +32,27 @@ impl ThemeKind {
 
 static ACTIVE_THEME: AtomicU8 = AtomicU8::new(0);
 
+/// Product accent override (`ui.accent`); None = the default blue. Stored as
+/// a packed RGBA u32 (8 bits per channel, matching gpui's `rgba` layout).
+static ACCENT_OVERRIDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Sets the process-wide ribbon theme.
 pub fn set_theme(kind: ThemeKind) {
     ACTIVE_THEME.store(kind as u8, Ordering::Relaxed);
+}
+
+/// Overrides the accent color (product brand, from `ui.accent`). Pass `None`
+/// to restore the default accent. Values are packed `0xRRGGBBAA`.
+pub fn set_accent(rgba: Option<u32>) {
+    // Packed value 0 marks "unset"; shift an opaque alpha in so a pure-black
+    // accent (#000000FF) is representable.
+    ACCENT_OVERRIDE.store(rgba.unwrap_or(0), Ordering::Relaxed);
+}
+
+/// The active accent override, if the product set one.
+pub fn accent_override() -> Option<u32> {
+    let v = ACCENT_OVERRIDE.load(Ordering::Relaxed);
+    (v != 0).then_some(v)
 }
 
 /// The active ribbon theme.
@@ -102,8 +120,18 @@ pub fn btn_checked_bg() -> Hsla {
 }
 
 /// Accent color used for the active tab bar, checked toggles and focus.
+/// Resolves the product override (`set_accent`, from `ui.accent`) first,
+/// falling back to the default blue.
 pub fn accent() -> Hsla {
-    rgb_to_hsla(rgb(0x338CF2))
+    match accent_override() {
+        Some(packed) => hsla_from_packed(packed),
+        None => rgb_to_hsla(rgb(0x338CF2)),
+    }
+}
+
+/// Decode a packed `0xRRGGBBAA` value into an [`Hsla`].
+fn hsla_from_packed(packed: u32) -> Hsla {
+    rgb_to_hsla(gpui::rgba(packed))
 }
 
 // Amber accent for contextual tab indicators is introduced together with

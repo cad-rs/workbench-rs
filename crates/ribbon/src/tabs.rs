@@ -42,6 +42,19 @@ pub(crate) fn render_tab_strip(state: &RibbonState, cx: &mut Context<RibbonState
         );
     }
 
+    // Product name beside the logo, before the QAT. Semi-bold 12.5px so the
+    // brand reads as a label rather than a ribbon tab.
+    if let Some(name) = &state.model.product_name {
+        strip = strip.child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(12.5))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(tokens::text())
+                .child(SharedString::from(name.clone())),
+        );
+    }
+
     // QAT: icon tier command buttons; the point of the QAT is that it stays
     // usable while the ribbon is collapsed.
     if has_qat {

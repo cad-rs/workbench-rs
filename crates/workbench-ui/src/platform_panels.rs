@@ -183,6 +183,191 @@ impl wb::ViewInstance for PluginsPanel {
     }
 }
 
+// ---------------------------------------------------------------- 设置 ----
+
+/// The settings panel: one row per registered [`wb::SettingSpec`], grouped by
+/// `spec.group`. Controls are self-drawn (the panel view has no gpui entity
+/// context for component inputs): bool → toggle, enum → cycle, int → stepper,
+/// str → read-only value (editing lands with the text-input wiring).
+pub struct SettingsPanel;
+
+impl wb::ViewInstance for SettingsPanel {
+    fn type_id(&self) -> wb::ViewTypeId {
+        wb::ViewTypeId::new("app.panel.settings")
+    }
+    fn title(&self) -> String {
+        "设置".to_string()
+    }
+    fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
+        let host = host.host();
+        let specs: Vec<wb::SettingSpec> = host.setting_specs.clone();
+
+        let mut rows: Vec<Div> = Vec::new();
+        let mut current_group = String::new();
+        for spec in &specs {
+            if spec.group != current_group {
+                current_group = spec.group.clone();
+                rows.push(section(&current_group));
+            }
+            rows.push(setting_row(spec, &host.settings));
+        }
+
+        let element: AnyElement = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .p_3()
+            .gap_1()
+            .children(rows)
+            .into_any_element();
+        Some(Box::new(element))
+    }
+}
+
+/// One `label  control` row for a setting spec.
+fn setting_row(spec: &wb::SettingSpec, settings: &wb::Settings) -> Div {
+    let value = settings
+        .get(&spec.key)
+        .cloned()
+        .unwrap_or_else(|| spec.effective_default());
+
+    let control: Div = match &spec.kind {
+        wb::SettingKind::Bool => {
+            let on = value.as_bool().unwrap_or(false);
+            cycle_button(
+                if on { "开" } else { "关" }.to_string(),
+                spec.key.clone(),
+                if on { "false".to_string() } else { "true".to_string() },
+            )
+        }
+        wb::SettingKind::Enum(options) => {
+            let current = value.as_str().unwrap_or_default().to_string();
+            let next = options
+                .iter()
+                .position(|o| *o == current)
+                .map(|i| options[(i + 1) % options.len()].clone())
+                .unwrap_or_else(|| options[0].clone());
+            let display = match current.as_str() {
+                "dark" => "深色".to_string(),
+                "light" => "浅色".to_string(),
+                other => other.to_string(),
+            };
+            cycle_button(display, spec.key.clone(), next)
+        }
+        wb::SettingKind::Int { min, max, step } => {
+            let n = value.as_i64().unwrap_or(0);
+            let mut row = div().flex().items_center().gap_1().child(
+                div()
+                    .w(px(56.))
+                    .text_align(gpui::TextAlign::Center)
+                    .text_color(col(Color::LIGHT_GRAY))
+                    .child(n.to_string()),
+            );
+            if n > *min {
+                row = row.child(step_button("−", spec.key.clone(), (n - step).max(*min)));
+            }
+            if n < *max {
+                row = row.child(step_button("+", spec.key.clone(), (n + step).min(*max)));
+            }
+            row
+        }
+        wb::SettingKind::Str => {
+            let s = value.as_str().unwrap_or_default().to_string();
+            if spec.key == "ui.accent" {
+                // Brand accent: swatch + hex value.
+                div().flex().items_center().gap_2().child(
+                    div()
+                        .w(px(14.))
+                        .h(px(14.))
+                        .rounded(px(3.))
+                        .bg(col(parse_hex_color(&s).unwrap_or(Color::GRAY)))
+                        .border_1()
+                        .border_color(col(Color::GRAY)),
+                ).child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(col(Color::LIGHT_GRAY))
+                        .child(s),
+                )
+            } else {
+                div()
+                    .text_size(px(12.))
+                    .text_color(col(Color::LIGHT_GRAY))
+                    .child(s)
+            }
+        }
+    };
+
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .px_1()
+        .py_0p5()
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(col(Color::GRAY))
+                .child(spec.label.clone()),
+        )
+        .child(control)
+}
+
+/// A small clickable button that dispatches `app.settings.set`.
+fn cycle_button(label: String, key: String, value: String) -> Div {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded(px(3.))
+        .bg(col(Color::rgb(0.30, 0.31, 0.36)))
+        .text_size(px(12.))
+        .text_color(col(Color::LIGHT_GRAY))
+        .child(label)
+        .on_mouse_down(gpui::MouseButton::Left, move |_ev, _window, _cx| {
+            wb::dispatch(
+                "app.settings.set",
+                wb::CommandArgs::new()
+                    .with("key", key.clone())
+                    .with("value", value.clone()),
+            );
+        })
+}
+
+/// Stepper `−`/`+` button for int settings.
+fn step_button(label: &str, key: String, value: i64) -> Div {
+    div()
+        .w(px(20.))
+        .h(px(18.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(3.))
+        .bg(col(Color::rgb(0.30, 0.31, 0.36)))
+        .text_size(px(12.))
+        .text_color(col(Color::LIGHT_GRAY))
+        .child(label.to_string())
+        .on_mouse_down(gpui::MouseButton::Left, move |_ev, _window, _cx| {
+            wb::dispatch(
+                "app.settings.set",
+                wb::CommandArgs::new()
+                    .with("key", key.clone())
+                    .with("value", value.to_string()),
+            );
+        })
+}
+
+/// Parse `#RRGGBB` (or `RRGGBB`) into a shell color; None on malformed input.
+fn parse_hex_color(s: &str) -> Option<Color> {
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
+    Some(Color::rgb(r, g, b))
+}
+
 /// Register the two platform panels into a product's registry.
 ///
 /// Called from the frontend's assembly stage, before `platform_cmds::register`
@@ -203,5 +388,13 @@ pub fn register(reg: &mut Registry) {
         320.0,
         3,
         || Box::new(PluginsPanel),
+    ));
+    reg.register_panel(PanelDef::new(
+        "app.panel.settings",
+        "设置",
+        wb::DockArea::Right,
+        320.0,
+        4,
+        || Box::new(SettingsPanel),
     ));
 }

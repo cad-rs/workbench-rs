@@ -42,6 +42,10 @@ pub struct ServiceHost {
     pub ws: WorkspaceState,
     pub log: LogStore,
     pub settings: Settings,
+    /// Registered setting specs (platform built-ins + plugin settings),
+    /// filled at build time; the settings panel renders from these and
+    /// `app.settings.set` validates against them.
+    pub setting_specs: Vec<crate::settings::SettingSpec>,
     pub stats: RuntimeStats,
     /// 插件注册表镜像（build 时填充，运行时禁用同步更新）。
     pub plugins: Vec<PluginEntry>,
@@ -63,6 +67,7 @@ impl ServiceHost {
             ws: WorkspaceState::new(default_mode),
             log: LogStore::new(1000),
             settings: Settings::in_memory(),
+            setting_specs: Vec::new(),
             stats: RuntimeStats::default(),
             plugins: Vec::new(),
             started: web_time::Instant::now(),
