@@ -46,6 +46,11 @@ pub struct ProductProfile {
     /// Default UI locale from `[i18n]` (e.g. `"zh-CN"` / `"en"`); seeds the
     /// `ui.locale` setting when the user has not chosen one.
     pub default_locale: Option<String>,
+    /// OIDC issuer URL from `[account]`; when present the product gets the
+    /// device-flow login (with `account_client_id`).
+    pub account_issuer: Option<String>,
+    /// OAuth client id for the device-flow login.
+    pub account_client_id: Option<String>,
 }
 
 impl Default for ProductProfile {
@@ -62,6 +67,8 @@ impl Default for ProductProfile {
             copyright: None,
             license_text: None,
             default_locale: None,
+            account_issuer: None,
+            account_client_id: None,
         }
     }
 }
@@ -88,6 +95,7 @@ pub struct ProductToml {
     pub branding: BrandingSection,
     pub about: AboutSection,
     pub i18n: I18nSection,
+    pub account: AccountSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,8 +139,17 @@ pub struct AboutSection {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct I18nSection {
-    /// Default UI locale (`"zh-CN"` / `"en"` / …); seeds `ui.locale`.
+    /// Default UI locale (`"zh-CN"` / `"en"`); seeds `ui.locale`.
     pub default_locale: Option<String>,
+}
+
+/// `[account]`: OIDC device-flow login (Phase 3). Both fields are required
+/// together; with neither set the login surface stays hidden.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct AccountSection {
+    pub issuer: Option<String>,
+    pub client_id: Option<String>,
 }
 
 impl From<ProductToml> for ProductProfile {
@@ -149,6 +166,8 @@ impl From<ProductToml> for ProductProfile {
             copyright: raw.about.copyright,
             license_text: raw.about.license_text,
             default_locale: raw.i18n.default_locale,
+            account_issuer: raw.account.issuer,
+            account_client_id: raw.account.client_id,
         }
     }
 }
@@ -179,6 +198,7 @@ mod tests {
             i18n: I18nSection {
                 default_locale: Some("en".into()),
             },
+            account: AccountSection::default(),
         };
         let profile: ProductProfile = raw.into();
         assert_eq!(profile.id, "com.acme.cad");

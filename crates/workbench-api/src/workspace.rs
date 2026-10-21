@@ -422,6 +422,22 @@ pub struct TextEdit {
     pub buffer: String,
 }
 
+/// The login/session state the UI renders (status bar account entry). The
+/// platform state machine transitions it via the `app.account.*` commands;
+/// the account service itself lives on the runtime.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum AccountPhase {
+    /// No session.
+    #[default]
+    LoggedOut,
+    /// Device auth in progress: show the user code + verification URI.
+    Pending(crate::account::DeviceAuthRequest),
+    /// Logged in.
+    LoggedIn(crate::account::AccountUser),
+    /// Login failed or was refused (message for the user).
+    Failed(String),
+}
+
 /// 工作区状态。UI 线程所有。
 pub struct WorkspaceState {
     /// RibbonBar：Tab 列表（§7.2）。
@@ -443,6 +459,9 @@ pub struct WorkspaceState {
     /// routes keystrokes into the buffer while this is Some; Enter commits
     /// via `app.settings.set`, Esc discards.
     pub text_edit: Option<TextEdit>,
+    /// Login/session state (Phase 3 account integration); the status bar
+    /// account entry renders from this.
+    pub account: AccountPhase,
     pub panels: Vec<PanelSlot>,
     pub tabs: Vec<TabSlot>,
     pub active_tab: usize,
@@ -469,6 +488,7 @@ impl WorkspaceState {
             ribbon_collapse_enabled: false,
             about_open: false,
             text_edit: None,
+            account: AccountPhase::default(),
             panels: Vec::new(),
             tabs: Vec::new(),
             active_tab: 0,

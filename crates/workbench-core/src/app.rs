@@ -228,6 +228,36 @@ impl AppRuntime {
         }
     }
 
+    // ---- 账号登录（Phase 3：device flow）----
+    // The login state machine lives on the ServiceHost (commands reach it via
+    // ctx.host()); the runtime only drains phase updates each frame.
+
+    /// Drain pending login-phase updates into `ws.account` (once per frame).
+    fn drain_account_login(&mut self) {
+        let Some(rx) = self.host.account_login_rx.as_ref() else {
+            return;
+        };
+        let mut updates = Vec::new();
+        while let Ok(phase) = rx.try_recv() {
+            updates.push(phase);
+        }
+        // A terminal phase (LoggedIn / Failed) closes the flow: drop the
+        // channel so the next login can start fresh.
+        let closed = updates
+            .last()
+            .is_some_and(|p| !matches!(p, api::AccountPhase::Pending(_)));
+        if closed {
+            self.host.account_login_rx = None;
+            self.host.account_login_cancel = None;
+        }
+        if let Some(phase) = updates.pop() {
+            if let api::AccountPhase::LoggedIn(user) = &phase {
+                self.host.log.info(format!("已登录为 {}", user.name));
+            }
+            self.host.ws.account = phase;
+        }
+    }
+
     /// 平台命令 → 对话框请求的映射；返回 None 的命令照常走命令分发。
     fn dialog_request_for_command(&self, id: &str) -> Option<DialogRequest> {
         match id {
@@ -300,6 +330,7 @@ impl AppRuntime {
     /// 每帧调用：泵任务事件、自动保存计时、同步活动文档/标签标题、刷新上下文快照。
     pub fn frame_tick(&mut self, dt_secs: f32) {
         self.drain_dialog_result();
+        self.drain_account_login();
         self.pump_task_events();
         // 自动保存（阶段 5：§18 生产级扩展）
         let interval = self
@@ -613,6 +644,34 @@ impl AppRuntime {
             self.note_invocation(seq, InvocationStatus::Succeeded, Some("已弹出文件对话框".into()));
             self.request_dialog(request);
             return CommandResult::done_with("已弹出文件对话框");
+        }
+        // Account commands run on the host directly (they manage the
+        // background login thread; same interception pattern as dialogs).
+        match id {
+            crate::platform_cmds::ACCOUNT_LOGIN => {
+                let result = match self.host.begin_account_login() {
+                    Ok(()) => CommandResult::done(),
+                    Err(e) => CommandResult::failed(e),
+                };
+                let status = if result.is_ok() {
+                    InvocationStatus::Succeeded
+                } else {
+                    InvocationStatus::Failed
+                };
+                self.note_invocation(seq, status, None);
+                return result;
+            }
+            crate::platform_cmds::ACCOUNT_CANCEL_LOGIN => {
+                self.host.cancel_account_login();
+                self.note_invocation(seq, InvocationStatus::Succeeded, None);
+                return CommandResult::done();
+            }
+            crate::platform_cmds::ACCOUNT_LOGOUT => {
+                self.host.account_logout();
+                self.note_invocation(seq, InvocationStatus::Succeeded, None);
+                return CommandResult::done();
+            }
+            _ => {}
         }
         let Some(mut def) = self.registry.take_command(id) else {
             let msg = format!("未注册的命令: {id}");
@@ -943,6 +1002,8 @@ pub struct WorkbenchAppBuilder {
     /// 插件是运行期单位——它启用产品已编译的模块，而不是携带代码。产品提供
     /// 这张 `模块 ID -> Workbench` 表，平台在插件装载之后调用它。
     module_loader: Option<ModuleLoader>,
+    /// Injected account capability (Phase 3); None = no login surface.
+    account: Option<Arc<dyn api::AccountService>>,
 }
 
 /// 产品的模块解析器：给定插件 ID 与它本次要装配的模块 ID，返回 Workbench。
@@ -972,6 +1033,7 @@ impl WorkbenchAppBuilder {
             ribbon_collapse_enabled: false,
             theme: "dark".to_string(),
             module_loader: None,
+            account: None,
         }
     }
 
@@ -987,6 +1049,14 @@ impl WorkbenchAppBuilder {
         self.product_id = profile.id.clone();
         self.product_name = profile.name.clone();
         self.profile = Some(profile);
+        self
+    }
+
+    /// Inject the account capability (Phase 3). None (the default) hides the
+    /// login surface; the reference implementation is
+    /// [`crate::account::DeviceFlowClient`].
+    pub fn with_account(mut self, service: Arc<dyn api::AccountService>) -> Self {
+        self.account = Some(service);
         self
     }
 
@@ -1280,6 +1350,9 @@ impl WorkbenchAppBuilder {
             }
         }
         host.stats.backend = self.backend_label.clone();
+        // Account capability (Phase 3): injected by the product; commands and
+        // the status bar render from host.account + ws.account.
+        host.account = self.account;
 
         // 插件注册镜像（诊断/管理面板用）；tier 为清单声明的 license 要求。
         for id in &registry.plugins_loaded {

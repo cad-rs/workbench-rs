@@ -22,6 +22,9 @@ rfd = { workspace = true }
 async-io = { workspace = true }
 async-executor = { workspace = true }
 futures-lite = { workspace = true }
+# OAuth device-flow HTTP (account integration; desktop only — the web build
+# gets a stub AccountService from its product, if any).
+ureq = { workspace = true }
 
 # Web (wasm32): async executor drives futures on the main thread
 [target.'cfg(target_arch = "wasm32")'.dependencies]

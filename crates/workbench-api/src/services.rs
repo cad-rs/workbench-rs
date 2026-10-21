@@ -52,6 +52,12 @@ pub struct ServiceHost {
     /// Merged locale tables (platform built-ins + plugin contributions),
     /// filled at build time; display sites go through [`ServiceHost::tr`].
     pub localizer: crate::i18n::Localizer,
+    /// Injected account capability (Phase 3); None = no login surface.
+    pub account: Option<std::sync::Arc<dyn crate::account::AccountService>>,
+    /// In-flight device-login poll thread: phase updates (drained each frame
+    /// into `ws.account` by the runtime) and the cancel flag.
+    pub account_login_rx: Option<std::sync::mpsc::Receiver<crate::workspace::AccountPhase>>,
+    pub account_login_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub stats: RuntimeStats,
     /// 插件注册表镜像（build 时填充，运行时禁用同步更新）。
     pub plugins: Vec<PluginEntry>,
@@ -75,6 +81,9 @@ impl ServiceHost {
             settings: Settings::in_memory(),
             setting_specs: Vec::new(),
             localizer: crate::i18n::Localizer::new(),
+            account: None,
+            account_login_rx: None,
+            account_login_cancel: None,
             stats: RuntimeStats::default(),
             plugins: Vec::new(),
             started: web_time::Instant::now(),
@@ -113,6 +122,113 @@ impl ServiceHost {
             .translate(&locale, key)
             .unwrap_or(key)
             .to_string()
+    }
+
+    // ---- 账号（Phase 3：device flow，后台线程轮询）----
+
+    /// Start the device login: `begin_login` + token polling run on a
+    /// background thread (network I/O must never touch the UI thread); phase
+    /// updates arrive via the channel and land in `ws.account` each frame
+    /// (drained by the runtime).
+    pub fn begin_account_login(&mut self) -> Result<(), String> {
+        let Some(service) = self.account.clone() else {
+            return Err("产品未配置账号服务".to_string());
+        };
+        if self.account_login_rx.is_some() {
+            return Err("登录已在进行中".to_string());
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = service;
+            Err("Web 端登录流程尚未实现".to_string())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::sync::atomic::AtomicBool;
+            use std::sync::Arc;
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let cancel = Arc::new(AtomicBool::new(false));
+            self.account_login_rx = Some(rx);
+            self.account_login_cancel = Some(cancel.clone());
+
+            std::thread::spawn(move || {
+                let req = match service.begin_login() {
+                    Ok(req) => req,
+                    Err(e) => {
+                        let _ = tx.send(crate::workspace::AccountPhase::Failed(format!(
+                            "无法开始登录: {e}"
+                        )));
+                        return;
+                    }
+                };
+                let mut interval = req.interval.max(1);
+                let _ = tx.send(crate::workspace::AccountPhase::Pending(req));
+                loop {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(interval));
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    // RFC 8628: the token endpoint wants the device code,
+                    // which the service remembers from begin_login — poll()
+                    // takes no argument so a user_code can never be sent by
+                    // mistake.
+                    match service.poll() {
+                        Ok(crate::account::PollResult::Pending) => continue,
+                        Ok(crate::account::PollResult::SlowDown) => {
+                            interval += crate::account::SLOW_DOWN_INTERVAL_SECS;
+                            continue;
+                        }
+                        Ok(crate::account::PollResult::Success(user)) => {
+                            let _ = tx.send(crate::workspace::AccountPhase::LoggedIn(user));
+                            return;
+                        }
+                        Ok(crate::account::PollResult::Denied) => {
+                            let _ = tx.send(crate::workspace::AccountPhase::Failed(
+                                "登录被拒绝".to_string(),
+                            ));
+                            return;
+                        }
+                        Ok(crate::account::PollResult::Expired) => {
+                            let _ = tx.send(crate::workspace::AccountPhase::Failed(
+                                "登录码已过期".to_string(),
+                            ));
+                            return;
+                        }
+                        Err(e) => {
+                            let _ = tx.send(crate::workspace::AccountPhase::Failed(format!(
+                                "登录失败: {e}"
+                            )));
+                            return;
+                        }
+                    }
+                }
+            });
+            Ok(())
+        }
+    }
+
+    /// Abort an in-flight device login (the poll thread exits on the flag;
+    /// the phase returns to LoggedOut).
+    pub fn cancel_account_login(&mut self) {
+        if let Some(flag) = self.account_login_cancel.take() {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.account_login_rx = None;
+        self.ws.account = crate::workspace::AccountPhase::LoggedOut;
+    }
+
+    /// End the session (Phase 3).
+    pub fn account_logout(&mut self) {
+        self.cancel_account_login();
+        if let Some(service) = &self.account {
+            service.logout();
+        }
+        self.ws.account = crate::workspace::AccountPhase::LoggedOut;
+        self.log.info("已登出");
     }
 
     /// 取出任务事件接收端的锁（核心 frame_tick 泵事件用）。

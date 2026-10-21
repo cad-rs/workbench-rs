@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    div, prelude::*, px, quad, relative, rgb_to_hsla, size, AnyElement, App, Bounds, Context, Corners, Edges,
+    div, prelude::*, px, quad, relative, rgb_to_hsla, size, AnyElement, App, Bounds, Context, Corners, Div, Edges,
     ElementId, GlobalElementId, InspectorElementId, Hsla, KeyDownEvent, LayoutId,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
     ScrollWheelEvent, SharedString, Style, StyleRefinement, TextAlign, TextRun, TitlebarOptions,
@@ -483,6 +483,29 @@ impl Render for RootView {
                     .log
                     .last()
                     .map(|e| (e.level, format!("{} {}", e.time, e.message))),
+                // Account entry (Phase 3): only present when the product
+                // injected an account service.
+                account: core.host.account.as_ref().map(|_| {
+                    let tr = |k: &str| core.host.tr(k);
+                    match &core.host.ws.account {
+                        wb::AccountPhase::LoggedOut => AccountChip::LoggedOut {
+                            login_label: tr("登录"),
+                        },
+                        wb::AccountPhase::Pending(req) => AccountChip::Pending {
+                            user_code: req.user_code.clone(),
+                            uri: req.verification_uri.clone(),
+                            cancel_label: tr("取消"),
+                        },
+                        wb::AccountPhase::LoggedIn(user) => AccountChip::LoggedIn {
+                            name: user.name.clone(),
+                            logout_label: tr("登出"),
+                        },
+                        wb::AccountPhase::Failed(msg) => AccountChip::Failed {
+                            message: msg.clone(),
+                            retry_label: tr("登录"),
+                        },
+                    }
+                }),
             };
             (shell_snap, status)
         };
@@ -624,6 +647,29 @@ struct StatusData {
     running: usize,
     task: Option<wb::TaskInfo>,
     last_log: Option<(wb::LogLevel, String)>,
+    /// Account chip (Phase 3); None when the product has no account service.
+    account: Option<AccountChip>,
+}
+
+/// What the status bar's account entry shows (pre-`tr`ed labels).
+#[derive(Clone)]
+enum AccountChip {
+    LoggedOut {
+        login_label: String,
+    },
+    Pending {
+        user_code: String,
+        uri: String,
+        cancel_label: String,
+    },
+    LoggedIn {
+        name: String,
+        logout_label: String,
+    },
+    Failed {
+        message: String,
+        retry_label: String,
+    },
 }
 
 fn render_status_bar(
@@ -632,6 +678,10 @@ fn render_status_bar(
     weak: gpui::WeakEntity<RootView>,
 ) -> gpui::AnyElement {
     let mut right_side = div().flex().flex_row().items_center().gap_2();
+    // Account chip (Phase 3): login / pending code / user + logout.
+    if let Some(chip) = &data.account {
+        right_side = right_side.child(render_account_chip(chip, core.clone(), weak.clone()));
+    }
     if let Some((level, msg)) = &data.last_log {
         let color = match level {
             wb::LogLevel::Error => wb::Color::RED,
@@ -734,6 +784,84 @@ fn render_status_bar(
         )
         .child(right_side)
         .into_any_element()
+}
+
+/// The status-bar account entry (Phase 3): a click-dispatch chip per phase.
+fn render_account_chip(
+    chip: &AccountChip,
+    _core: SharedCore,
+    weak: gpui::WeakEntity<RootView>,
+) -> gpui::AnyElement {
+    /// A small clickable chip dispatching an account command.
+    fn chip_button(
+        label: String,
+        command: &'static str,
+        weak: &gpui::WeakEntity<RootView>,
+    ) -> gpui::Stateful<Div> {
+        let weak = weak.clone();
+        div()
+            .id(SharedString::from(format!("account-chip-{command}")))
+            .px(px(6.0))
+            .py(px(1.0))
+            .rounded_sm()
+            .cursor_pointer()
+            .text_size(px(11.0))
+            .text_color(col(wb::Color::LIGHT_GRAY))
+            .bg(col(theme::ui_theme().toolbar))
+            .hover(|s| s.bg(col(wb::Color::rgb(0.30, 0.31, 0.36))))
+            .child(label)
+            .on_click(move |_ev: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
+                wb::dispatch(command, wb::CommandArgs::default());
+                notify(&weak, cx);
+            })
+    }
+
+    match chip {
+        AccountChip::LoggedOut { login_label } => div().child(chip_button(
+            login_label.clone(),
+            "app.account.login",
+            &weak,
+        )),
+        AccountChip::Pending {
+            user_code,
+            uri,
+            cancel_label,
+        } => div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .text_size(px(11.0))
+            .text_color(col(wb::Color::YELLOW))
+            .child(div().child(format!("{user_code} · {uri}")))
+            .child(chip_button(
+                cancel_label.clone(),
+                "app.account.cancel_login",
+                &weak,
+            )),
+        AccountChip::LoggedIn { name, logout_label } => div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .text_size(px(11.0))
+            .text_color(col(wb::Color::LIGHT_GRAY))
+            .child(div().child(name.clone()))
+            .child(chip_button(
+                logout_label.clone(),
+                "app.account.logout",
+                &weak,
+            )),
+        AccountChip::Failed {
+            message,
+            retry_label,
+        } => div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .text_size(px(11.0))
+            .child(div().text_color(col(wb::Color::RED)).child(message.clone()))
+            .child(chip_button(retry_label.clone(), "app.account.login", &weak)),
+    }
+    .into_any_element()
 }
 
 /// gpui 入口：构建产品并运行主循环。

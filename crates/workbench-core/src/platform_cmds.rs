@@ -19,6 +19,9 @@ pub const TOGGLE_PANEL_PREFIX: &str = "app.toggle_panel.";
 pub const ABOUT: &str = "app.about";
 pub const SETTINGS_SET: &str = "app.settings.set";
 pub const SETTINGS_EDIT_BEGIN: &str = "app.settings.edit_begin";
+pub const ACCOUNT_LOGIN: &str = "app.account.login";
+pub const ACCOUNT_CANCEL_LOGIN: &str = "app.account.cancel_login";
+pub const ACCOUNT_LOGOUT: &str = "app.account.logout";
 
 /// Built-in locale tables. Convention: the source-language string (the one
 /// hardcoded at the call site) is the key — `zh-CN` shows the original, `en`
@@ -107,6 +110,9 @@ fn register_builtin_locales(registry: &mut Registry) {
             (" · 修订 r", " · rev r"),
             ("模式：", "Mode: "),
             ("取消", "Cancel"),
+            // Account chip (Phase 3).
+            ("登录", "Sign in"),
+            ("登出", "Sign out"),
         ],
     );
 }

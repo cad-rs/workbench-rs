@@ -7,6 +7,7 @@
 //!   `--selfcheck-crash` / `--smoke`);
 //! - [`selfcheck`]: headless selfcheck (probe-based; unrelated items SKIP).
 
+pub mod account;
 pub mod app;
 pub mod assets;
 pub mod cli;
