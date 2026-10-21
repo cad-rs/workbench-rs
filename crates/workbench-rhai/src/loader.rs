@@ -157,6 +157,15 @@ fn load_one(registry: &mut Registry, dir: &Path) {
     registry
         .plugin_modules
         .push((plugin_id.clone(), manifest.plugin.modules.clone()));
+    // License tier requirement (manifest `tier`); validated at parse time.
+    if let Some(tier) = manifest
+        .plugin
+        .tier
+        .as_deref()
+        .and_then(workbench_api::LicenseTier::parse)
+    {
+        registry.plugin_tiers.push((plugin_id.clone(), tier));
+    }
     registry.plugins_loaded.push(plugin_id);
 }
 

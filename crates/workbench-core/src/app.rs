@@ -1281,12 +1281,18 @@ impl WorkbenchAppBuilder {
         }
         host.stats.backend = self.backend_label.clone();
 
-        // 插件注册镜像（诊断/管理面板用）
+        // 插件注册镜像（诊断/管理面板用）；tier 为清单声明的 license 要求。
         for id in &registry.plugins_loaded {
+            let tier = registry
+                .plugin_tiers
+                .iter()
+                .find(|(pid, _)| pid == id)
+                .map(|(_, tier)| *tier);
             host.plugins.push(api::PluginEntry {
                 id: id.clone(),
                 state: "Loaded",
                 detail: None,
+                tier,
             });
         }
         for (id, reason) in &registry.plugins_rejected {
@@ -1294,6 +1300,7 @@ impl WorkbenchAppBuilder {
                 id: id.clone(),
                 state: "Rejected",
                 detail: Some(reason.clone()),
+                tier: None,
             });
         }
 

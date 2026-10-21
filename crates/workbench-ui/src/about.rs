@@ -6,7 +6,7 @@
 //! Modal.
 
 use gpui::{
-    App, ClickEvent, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
+    ClickEvent, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};

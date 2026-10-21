@@ -33,6 +33,9 @@ pub struct PluginEntry {
     pub state: &'static str,
     /// Rejected/Disabled 的原因。
     pub detail: Option<String>,
+    /// License tier the plugin requires (manifest `tier`); None = no
+    /// requirement. The licensing milestone gates loading on this.
+    pub tier: Option<crate::licensing::LicenseTier>,
 }
 
 /// 平台服务聚合。UI 线程所有。

@@ -26,6 +26,7 @@ pub mod documents;
 pub mod geo;
 pub mod ids;
 pub mod i18n;
+pub mod licensing;
 pub mod log;
 pub mod product;
 pub mod registry;
@@ -51,6 +52,7 @@ pub use dispatch::{clear_dispatcher, dispatch, publish_dispatcher};
 pub use documents::{Document, DocumentContent, DocumentService, DocumentTypeDef, UndoHooks};
 pub use geo::{Color, Point, Rect, Size};
 pub use i18n::Localizer;
+pub use licensing::LicenseTier;
 pub use ids::{
     CommandId, DocumentId, DocumentTypeId, PanelId, StableId, TabInstanceId, TaskId, ToolbarGroupId,
     ViewTypeId, WorkbenchId,
@@ -68,5 +70,5 @@ pub use view::ViewInstance;
 pub use workbench::{boxed, Workbench};
 pub use workspace::{
     DockArea, ItemSize, LayoutFile, PanelDef, PanelSlot, RibbonItemKind, RibbonTab, SavedPanel,
-    SavedTab, TabSlot, ToolbarGroup, ToolbarItem, ViewDef, ViewFactory, WorkspaceState,
+    SavedTab, TabSlot, TextEdit, ToolbarGroup, ToolbarItem, ViewDef, ViewFactory, WorkspaceState,
 };

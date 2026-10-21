@@ -413,6 +413,15 @@ pub struct LayoutFile {
     pub dock: Option<serde_json::Value>,
 }
 
+/// One in-progress settings text edit (see [`WorkspaceState::text_edit`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextEdit {
+    /// Setting key being edited (`ui.accent`, …).
+    pub key: String,
+    /// Edit buffer (what the user has typed so far).
+    pub buffer: String,
+}
+
 /// 工作区状态。UI 线程所有。
 pub struct WorkspaceState {
     /// RibbonBar：Tab 列表（§7.2）。
@@ -429,6 +438,11 @@ pub struct WorkspaceState {
     pub ribbon_collapse_enabled: bool,
     /// About 对话框打开标志（`app.about` 命令置位；前端渲染对话框并负责关闭）。
     pub about_open: bool,
+    /// Active settings text edit (`app.settings.edit_begin`): the key being
+    /// edited and the edit buffer. Frontend renders an input overlay and
+    /// routes keystrokes into the buffer while this is Some; Enter commits
+    /// via `app.settings.set`, Esc discards.
+    pub text_edit: Option<TextEdit>,
     pub panels: Vec<PanelSlot>,
     pub tabs: Vec<TabSlot>,
     pub active_tab: usize,
@@ -454,6 +468,7 @@ impl WorkspaceState {
             ribbon_collapsed: false,
             ribbon_collapse_enabled: false,
             about_open: false,
+            text_edit: None,
             panels: Vec::new(),
             tabs: Vec::new(),
             active_tab: 0,

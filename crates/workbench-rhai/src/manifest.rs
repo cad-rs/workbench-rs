@@ -29,6 +29,10 @@ pub struct PluginInfo {
     /// leaves this out.
     #[serde(default)]
     pub modules: Vec<String>,
+    /// License tier this plugin requires ("trial" / "pro" / "oem"); omitted
+    /// = no requirement. The licensing milestone gates loading on it — for
+    /// now it is parsed, validated and displayed only.
+    pub tier: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +96,13 @@ fn validate(manifest: &PluginManifest) -> Result<(), String> {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
         {
             return Err(format!("模块 ID 含非法字符: {module}"));
+        }
+    }
+    if let Some(tier) = &manifest.plugin.tier {
+        if workbench_api::LicenseTier::parse(tier).is_none() {
+            return Err(format!(
+                "tier 取值未知: {tier}（可选 trial/pro/oem）"
+            ));
         }
     }
     Ok(())

@@ -18,6 +18,7 @@ pub const CLOSE_ACTIVE_VIEW: &str = "app.close_active_view";
 pub const TOGGLE_PANEL_PREFIX: &str = "app.toggle_panel.";
 pub const ABOUT: &str = "app.about";
 pub const SETTINGS_SET: &str = "app.settings.set";
+pub const SETTINGS_EDIT_BEGIN: &str = "app.settings.edit_begin";
 
 /// Built-in locale tables. Convention: the source-language string (the one
 /// hardcoded at the call site) is the key — `zh-CN` shows the original, `en`
@@ -425,6 +426,43 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
         .enabled_when(|_| true),
     );
 
+    // Settings text edit: seed the buffer from the current value and open
+    // the frontend's input overlay (Enter commits via app.settings.set).
+    registry.register_command(
+        CommandDef::sync(
+            SETTINGS_EDIT_BEGIN,
+            "编辑设置",
+            |ctx: &mut CommandCtx, args: &CommandArgs| {
+                let Some(key) = args.get("key") else {
+                    return CommandResult::failed("缺少参数 key");
+                };
+                let host = ctx.host();
+                let Some(spec) = host.setting_specs.iter().find(|s| s.key == key).cloned() else {
+                    return CommandResult::failed(format!("未注册的设置项: {key}"));
+                };
+                // Free-form strings are the only editable-by-hand kind for
+                // now (bool/enum/int have dedicated controls).
+                if !matches!(spec.kind, SettingKind::Str) {
+                    return CommandResult::failed(format!("{} 不是文本设置项", spec.key));
+                }
+                let buffer = host
+                    .settings
+                    .get(&spec.key)
+                    .cloned()
+                    .unwrap_or_else(|| spec.effective_default())
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                host.ws.text_edit = Some(api::TextEdit {
+                    key: spec.key.clone(),
+                    buffer,
+                });
+                CommandResult::done()
+            },
+        )
+        .enabled_when(|_| true),
+    );
+
     // About 对话框：置位 workspace 标志，前端（workbench-ui）渲染对话框。
     registry.register_command(
         CommandDef::sync(ABOUT, "关于", |ctx: &mut CommandCtx, _args: &CommandArgs| {
@@ -533,5 +571,81 @@ fn save_as_flow(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResult 
             CommandResult::done()
         }
         Err(e) => CommandResult::failed(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use api::CommandArgs;
+
+    /// A minimal runtime (no product workbench): build() registers the
+    /// platform commands and built-in setting specs.
+    fn runtime() -> crate::AppRuntime {
+        crate::WorkbenchAppBuilder::new("test.settings", "Settings test")
+            .build()
+            .expect("runtime builds")
+    }
+
+    #[test]
+    fn edit_begin_opens_buffer_for_string_settings() {
+        let mut rt = runtime();
+        rt.host
+            .settings
+            .set("ui.accent", serde_json::json!("#112233"))
+            .unwrap();
+        let result = rt.execute_command(
+            SETTINGS_EDIT_BEGIN,
+            &CommandArgs::new().with("key", "ui.accent"),
+        );
+        assert!(result.is_ok(), "command succeeds: {result:?}");
+        let edit = rt.host.ws.text_edit.as_ref().expect("edit open");
+        assert_eq!(edit.key, "ui.accent");
+        assert_eq!(edit.buffer, "#112233", "buffer seeded from current value");
+    }
+
+    #[test]
+    fn edit_begin_rejects_non_string_settings() {
+        let mut rt = runtime();
+        let result = rt.execute_command(
+            SETTINGS_EDIT_BEGIN,
+            &CommandArgs::new().with("key", "ui.theme"),
+        );
+        assert!(rt.host.ws.text_edit.is_none(), "enum has its own control");
+        let _ = result;
+    }
+
+    #[test]
+    fn settings_set_validates_and_persists() {
+        let mut rt = runtime();
+        // Enum membership is validated.
+        let bad = rt.execute_command(
+            SETTINGS_SET,
+            &CommandArgs::new()
+                .with("key", "ui.theme")
+                .with("value", "blue"),
+        );
+        assert!(!bad.is_ok(), "invalid enum rejected: {bad:?}");
+        // Int values are clamped into the spec range.
+        rt.execute_command(
+            SETTINGS_SET,
+            &CommandArgs::new()
+                .with("key", "autosave.interval_secs")
+                .with("value", "1"),
+        );
+        assert_eq!(
+            rt.host.settings.get_f64("autosave.interval_secs", 0.0),
+            5.0,
+            "clamped to spec min"
+        );
+    }
+
+    #[test]
+    fn plugin_tier_gate_rules() {
+        use api::LicenseTier;
+        // No license service yet: satisfies() is the gate Phase 4 wires in.
+        assert!(LicenseTier::Trial.satisfies(None));
+        assert!(!LicenseTier::Trial.satisfies(Some(LicenseTier::Pro)));
+        assert!(LicenseTier::OEM.satisfies(Some(LicenseTier::Pro)));
     }
 }

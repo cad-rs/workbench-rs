@@ -154,6 +154,19 @@ impl wb::ViewInstance for PluginsPanel {
                                 .text_color(col(color))
                                 .child(tr(state_key)),
                         );
+                    // License tier requirement badge (e.g. "Pro"); only
+                    // shown when the manifest declared one.
+                    if let Some(tier) = entry.tier {
+                        row = row.child(
+                            div()
+                                .px_1p5()
+                                .rounded(px(3.))
+                                .bg(col(Color::ACCENT))
+                                .text_size(px(10.))
+                                .text_color(col(Color::WHITE))
+                                .child(tier.as_str().to_string()),
+                        );
+                    }
                     if let Some(detail) = &entry.detail {
                         row = row.child(
                             div()
@@ -297,7 +310,10 @@ fn setting_row(
         }
         wb::SettingKind::Str => {
             let s = value.as_str().unwrap_or_default().to_string();
-            if spec.key == "ui.accent" {
+            // String settings are hand-edited: clicking the value opens the
+            // root-level Input overlay (app.settings.edit_begin).
+            let edit_key = spec.key.clone();
+            let mut value_row = if spec.key == "ui.accent" {
                 // Brand accent: swatch + hex value.
                 div().flex().items_center().gap_2().child(
                     div()
@@ -318,7 +334,17 @@ fn setting_row(
                     .text_size(px(12.))
                     .text_color(col(Color::LIGHT_GRAY))
                     .child(s)
-            }
+            };
+            value_row = value_row.cursor_pointer().on_mouse_down(
+                gpui::MouseButton::Left,
+                move |_ev, _window, _cx| {
+                    wb::dispatch(
+                        "app.settings.edit_begin",
+                        wb::CommandArgs::new().with("key", edit_key.clone()),
+                    );
+                },
+            );
+            value_row
         }
     };
 

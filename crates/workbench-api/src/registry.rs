@@ -42,6 +42,9 @@ pub struct Registry {
     /// 插件是运行期单位，不"包含"代码——它启用产品已编译的模块。产品用
     /// [`Registry::plugin_module_ids`] 拿到去重后的集合去装配。
     pub plugin_modules: Vec<(String, Vec<String>)>,
+    /// Each loaded plugin's required license tier (manifest `tier`);
+    /// build 时转入 ServiceHost::plugins 条目，Licensing 里程碑按此门控装载。
+    pub plugin_tiers: Vec<(String, crate::licensing::LicenseTier)>,
     /// 被拒绝/失败的插件：(插件 ID 或目录, 原因)。
     pub plugins_rejected: Vec<(String, String)>,
     /// 运行时被禁用的插件 ID（阶段 5）。

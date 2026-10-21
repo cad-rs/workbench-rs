@@ -27,6 +27,9 @@ pub mod gpu_view;
 /// About dialog overlay (product brand: logo / name / version / links).
 pub(crate) mod about;
 
+/// Settings text-edit overlay (gpui-component Input hosted at root level).
+pub(crate) mod text_edit;
+
 /// Built-in platform panels (diagnostics / plugins).
 pub mod platform_panels;
 
@@ -137,6 +140,11 @@ struct RootView {
     /// (settings panel writes land live).
     applied_theme: String,
     applied_accent: String,
+    /// Settings text edit (Phase 1.5): the Input entity for the open edit,
+    /// its Enter subscription, and the key it was mounted for.
+    edit_input: Option<gpui::Entity<gpui_component::input::InputState>>,
+    edit_subscription: Option<gpui::Subscription>,
+    edit_key: Option<String>,
 }
 
 impl RootView {
@@ -165,6 +173,9 @@ impl RootView {
             ribbon: ribbon_bridge::RibbonHost::new(),
             applied_theme,
             applied_accent,
+            edit_input: None,
+            edit_subscription: None,
+            edit_key: None,
         }
     }
 }
@@ -532,6 +543,12 @@ impl Render for RootView {
                 let weak_k = weak.clone();
                 move |ev: &KeyDownEvent, _w: &mut Window, cx: &mut App| {
                     let ks = &ev.keystroke;
+                    // While a settings text edit is open the Input owns the
+                    // keystrokes; hotkeys stay disabled so typing a key that
+                    // is also a shortcut does not fire the shortcut.
+                    if text_edit::is_active(&core_k) {
+                        return;
+                    }
                     let Some(code) = wb::KeyCode::from_name(&ks.key) else {
                         return;
                     };
@@ -561,6 +578,38 @@ impl Render for RootView {
 
         // ---- About 对话框 overlay（app.about 命令置位时渲染） ----
         if let Some(overlay) = about::maybe_about_overlay(&core, cx) {
+            root_col = root_col.child(overlay);
+        }
+
+        // ---- Settings text-edit overlay (gpui-component Input) ----
+        // Mount when an edit opens (or its key changes); drop when it closes.
+        if let Some(mount) = text_edit::mount_for(&core, self.edit_key.as_deref()) {
+            let input = text_edit::create_input(&mount.seed, window, cx);
+            let sub = text_edit::subscribe_enter(core.clone(), input.clone(), mount.key.clone(), cx);
+            self.edit_input = Some(input);
+            self.edit_subscription = Some(sub);
+            self.edit_key = Some(mount.key);
+        } else if self.edit_key.is_some()
+            && core
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .host
+                .ws
+                .text_edit
+                .is_none()
+        {
+            self.edit_input = None;
+            self.edit_subscription = None;
+            self.edit_key = None;
+        }
+        if let Some(input) = &self.edit_input {
+            let key = self.edit_key.clone().unwrap_or_default();
+            let input_slot = div()
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(col(theme::ui_theme().placeholder))
+                .child(gpui_component::input::Input::new(input));
+            let overlay = text_edit::overlay_shell(&key, &core, input_slot, cx);
             root_col = root_col.child(overlay);
         }
 
