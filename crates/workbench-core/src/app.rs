@@ -1268,6 +1268,17 @@ impl WorkbenchAppBuilder {
                 host.settings.seed(&spec.key, default);
             }
         }
+        // Locale tables: registry (platform + plugins) → host localizer.
+        for (locale, key, text) in std::mem::take(&mut registry.locale_entries) {
+            host.localizer.add_table(&locale, [(key, text)]);
+        }
+        // Default locale from product.toml [i18n]; the user's saved choice wins.
+        if let Some(locale) = self.profile.as_ref().and_then(|p| p.default_locale.as_ref()) {
+            if host.settings.get("ui.locale").is_none() {
+                host.settings
+                    .seed("ui.locale", serde_json::Value::String(locale.clone()));
+            }
+        }
         host.stats.backend = self.backend_label.clone();
 
         // 插件注册镜像（诊断/管理面板用）

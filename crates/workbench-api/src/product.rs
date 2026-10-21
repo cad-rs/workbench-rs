@@ -39,6 +39,9 @@ pub struct ProductProfile {
     pub copyright: Option<String>,
     /// License text (short) for the About dialog.
     pub license_text: Option<String>,
+    /// Default UI locale from `[i18n]` (e.g. `"zh-CN"` / `"en"`); seeds the
+    /// `ui.locale` setting when the user has not chosen one.
+    pub default_locale: Option<String>,
 }
 
 impl Default for ProductProfile {
@@ -53,6 +56,7 @@ impl Default for ProductProfile {
             support_url: None,
             copyright: None,
             license_text: None,
+            default_locale: None,
         }
     }
 }
@@ -78,6 +82,7 @@ pub struct ProductToml {
     pub product: ProductSection,
     pub branding: BrandingSection,
     pub about: AboutSection,
+    pub i18n: I18nSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +121,13 @@ pub struct AboutSection {
     pub license_text: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct I18nSection {
+    /// Default UI locale (`"zh-CN"` / `"en"` / …); seeds `ui.locale`.
+    pub default_locale: Option<String>,
+}
+
 impl From<ProductToml> for ProductProfile {
     fn from(raw: ProductToml) -> Self {
         Self {
@@ -128,6 +140,7 @@ impl From<ProductToml> for ProductProfile {
             support_url: raw.branding.support_url,
             copyright: raw.about.copyright,
             license_text: raw.about.license_text,
+            default_locale: raw.i18n.default_locale,
         }
     }
 }
@@ -154,6 +167,9 @@ mod tests {
                 copyright: Some("(c) 2026 Acme".into()),
                 license_text: Some("Licensed to Acme Corp".into()),
             },
+            i18n: I18nSection {
+                default_locale: Some("en".into()),
+            },
         };
         let profile: ProductProfile = raw.into();
         assert_eq!(profile.id, "com.acme.cad");
@@ -165,6 +181,7 @@ mod tests {
         assert_eq!(profile.support_url.as_deref(), Some("https://acme.example/support"));
         assert_eq!(profile.copyright.as_deref(), Some("(c) 2026 Acme"));
         assert_eq!(profile.license_text.as_deref(), Some("Licensed to Acme Corp"));
+        assert_eq!(profile.default_locale.as_deref(), Some("en"));
         assert_eq!(profile.display_version(), "2.1.0");
     }
 

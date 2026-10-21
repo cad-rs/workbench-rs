@@ -448,19 +448,22 @@ impl Render for RootView {
             };
             let snap = core.snapshot().clone();
             let (running, last_task) = core.host.tasks.summary();
+            let doc_prefix = core.host.tr("文档：");
+            let doc_none = core.host.tr("（无）");
+            let rev_fmt = core.host.tr(" · 修订 r");
             let status = StatusData {
                 doc: snap
                     .active_document
                     .as_ref()
                     .map(|d| {
                         format!(
-                            "文档：{}{} · 修订 r{}",
+                            "{doc_prefix}{}{}{rev_fmt}{}",
                             d.title,
                             if d.dirty { " •" } else { "" },
                             d.revision
                         )
                     })
-                    .unwrap_or_else(|| "文档：（无）".to_string()),
+                    .unwrap_or_else(|| format!("{doc_prefix}{doc_none}")),
                 mode: snap.work_mode.clone(),
                 running,
                 task: last_task.cloned(),
@@ -633,7 +636,7 @@ fn render_status_bar(
                         .cursor_pointer()
                         .bg(col(theme::ui_theme().cancel_rest))
                         .hover(|s| s.bg(col(wb::Color::RED)))
-                        .child("取消")
+                        .child(core.lock().unwrap_or_else(|p| p.into_inner()).host.tr("取消"))
                         .on_click(move |_ev: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
                             core_c
                                 .lock()
@@ -673,7 +676,11 @@ fn render_status_bar(
                     div()
                         .text_size(px(11.5))
                         .text_color(col(wb::Color::GRAY))
-                        .child(format!("模式：{}", data.mode)),
+                        .child(format!(
+                            "{}{}",
+                            core.lock().unwrap_or_else(|p| p.into_inner()).host.tr("模式："),
+                            data.mode
+                        )),
                 ),
         )
         .child(right_side)

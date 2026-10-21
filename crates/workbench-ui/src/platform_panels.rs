@@ -50,9 +50,10 @@ impl wb::ViewInstance for DiagnosticsPanel {
     }
     fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
         let host = host.host();
+        let tr = |k: &str| host.tr(k);
 
         let backend = if host.stats.backend.is_empty() {
-            "（未标注）".to_string()
+            tr("（未标注）")
         } else {
             host.stats.backend.clone()
         };
@@ -66,27 +67,39 @@ impl wb::ViewInstance for DiagnosticsPanel {
         let interval = host.settings.get_f64("autosave.interval_secs", 30.0);
 
         let rows: Vec<Div> = vec![
-            section("运行时"),
-            kv("产品", "（见窗口标题）".to_string()),
-            kv("GUI 后端", backend),
-            kv("运行时长", format!("{:.1} 秒", host.uptime_secs())),
+            section(&tr("运行时")),
+            kv(&tr("产品"), tr("（见窗口标题）")),
+            kv(&tr("GUI 后端"), backend),
+            kv(&tr("运行时长"), format!("{:.1} {}", host.uptime_secs(), tr("秒"))),
             kv(
-                "帧统计",
+                &tr("帧统计"),
                 format!(
-                    "{:.1} ms/帧（最近 {:.1}）× {}",
-                    host.stats.avg_frame_ms, host.stats.last_frame_ms, host.stats.frames
+                    "{:.1} {}{:.1}）× {}",
+                    host.stats.avg_frame_ms,
+                    tr("ms/帧（最近 "),
+                    host.stats.last_frame_ms,
+                    host.stats.frames
                 ),
             ),
-            section("文档与任务"),
-            kv("文档数", format!("{}", docs.len())),
-            kv("未保存", format!("{dirty} 个")),
-            kv("后台任务", format!("运行 {running} / 累计 {total}")),
-            section("自动保存"),
+            section(&tr("文档与任务")),
+            kv(&tr("文档数"), format!("{}", docs.len())),
+            kv(&tr("未保存"), format!("{dirty} {}", tr("个"))),
             kv(
-                "间隔",
-                format!("{interval:.0} 秒（settings.json 可调）"),
+                &tr("后台任务"),
+                format!("{}{running} {}{total}", tr("运行 "), tr(" / 累计 ")),
             ),
-            kv("已自动保存", format!("{} 次", host.stats.autosaves)),
+            section(&tr("自动保存")),
+            kv(
+                &tr("间隔"),
+                format!(
+                    "{interval:.0} {}",
+                    tr("秒（settings.json 可调）")
+                ),
+            ),
+            kv(
+                &tr("已自动保存"),
+                format!("{} {}", host.stats.autosaves, tr("次")),
+            ),
         ];
 
         let element: AnyElement = div()
@@ -112,18 +125,20 @@ impl wb::ViewInstance for PluginsPanel {
         "插件".to_string()
     }
     fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
-        let plugins: Vec<wb::PluginEntry> = host.host().plugins.clone();
+        let host = host.host();
+        let plugins: Vec<wb::PluginEntry> = host.plugins.clone();
+        let tr = |k: &str| host.tr(k);
 
         let rows: Vec<Div> = if plugins.is_empty() {
             vec![div()
                 .text_size(px(13.))
                 .text_color(col(Color::GRAY))
-                .child("没有已注册的插件".to_string())]
+                .child(tr("没有已注册的插件"))]
         } else {
             plugins
                 .iter()
                 .map(|entry| {
-                    let (color, state_text) = match entry.state {
+                    let (color, state_key) = match entry.state {
                         "Loaded" => (Color::GREEN, "已装载"),
                         "Disabled" => (Color::YELLOW, "已禁用"),
                         _ => (Color::RED, "已拒绝"),
@@ -137,7 +152,7 @@ impl wb::ViewInstance for PluginsPanel {
                             div()
                                 .w(px(72.))
                                 .text_color(col(color))
-                                .child(state_text.to_string()),
+                                .child(tr(state_key)),
                         );
                     if let Some(detail) = &entry.detail {
                         row = row.child(
@@ -149,6 +164,7 @@ impl wb::ViewInstance for PluginsPanel {
                     }
                     if entry.state == "Loaded" {
                         let id = entry.id.clone();
+                        let disable_label = tr("禁用");
                         row.child(
                             div()
                                 .px_2()
@@ -156,7 +172,7 @@ impl wb::ViewInstance for PluginsPanel {
                                 .rounded(px(3.))
                                 .bg(col(Color::rgb(0.30, 0.31, 0.36)))
                                 .text_size(px(11.))
-                                .child("禁用".to_string())
+                                .child(disable_label)
                                 .on_mouse_down(gpui::MouseButton::Left, move |_ev, _window, _cx| {
                                     wb::dispatch(
                                         "app.plugins.disable",
@@ -201,15 +217,16 @@ impl wb::ViewInstance for SettingsPanel {
     fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
         let host = host.host();
         let specs: Vec<wb::SettingSpec> = host.setting_specs.clone();
+        let tr = |k: &str| host.tr(k);
 
         let mut rows: Vec<Div> = Vec::new();
         let mut current_group = String::new();
         for spec in &specs {
             if spec.group != current_group {
                 current_group = spec.group.clone();
-                rows.push(section(&current_group));
+                rows.push(section(&tr(&current_group)));
             }
-            rows.push(setting_row(spec, &host.settings));
+            rows.push(setting_row(spec, &host.settings, &tr));
         }
 
         let element: AnyElement = div()
@@ -224,8 +241,13 @@ impl wb::ViewInstance for SettingsPanel {
     }
 }
 
-/// One `label  control` row for a setting spec.
-fn setting_row(spec: &wb::SettingSpec, settings: &wb::Settings) -> Div {
+/// One `label  control` row for a setting spec. `tr` translates display
+/// strings (labels and enum/bool display names).
+fn setting_row(
+    spec: &wb::SettingSpec,
+    settings: &wb::Settings,
+    tr: &dyn Fn(&str) -> String,
+) -> Div {
     let value = settings
         .get(&spec.key)
         .cloned()
@@ -235,7 +257,7 @@ fn setting_row(spec: &wb::SettingSpec, settings: &wb::Settings) -> Div {
         wb::SettingKind::Bool => {
             let on = value.as_bool().unwrap_or(false);
             cycle_button(
-                if on { "开" } else { "关" }.to_string(),
+                tr(if on { "开" } else { "关" }),
                 spec.key.clone(),
                 if on { "false".to_string() } else { "true".to_string() },
             )
@@ -247,9 +269,11 @@ fn setting_row(spec: &wb::SettingSpec, settings: &wb::Settings) -> Div {
                 .position(|o| *o == current)
                 .map(|i| options[(i + 1) % options.len()].clone())
                 .unwrap_or_else(|| options[0].clone());
+            // Known enum values get friendly display names; anything else
+            // (plugin-defined options) shows the raw value.
             let display = match current.as_str() {
-                "dark" => "深色".to_string(),
-                "light" => "浅色".to_string(),
+                "dark" => tr("深色"),
+                "light" => tr("浅色"),
                 other => other.to_string(),
             };
             cycle_button(display, spec.key.clone(), next)
@@ -308,7 +332,7 @@ fn setting_row(spec: &wb::SettingSpec, settings: &wb::Settings) -> Div {
             div()
                 .text_size(px(12.))
                 .text_color(col(Color::GRAY))
-                .child(spec.label.clone()),
+                .child(tr(&spec.label)),
         )
         .child(control)
 }

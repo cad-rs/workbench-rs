@@ -21,24 +21,43 @@ pub(crate) fn maybe_about_overlay(
     core: &SharedCore,
     cx: &mut Context<crate::RootView>,
 ) -> Option<gpui::AnyElement> {
-    let (profile, product_name) = {
+    // Snapshot everything the dialog needs while holding the lock: the
+    // profile, the product name and the handful of translated labels.
+    let snap = {
         let guard = core.lock().unwrap_or_else(|p| p.into_inner());
         if !guard.host.ws.about_open {
             return None;
         }
-        (guard.profile().clone(), guard.product_name().to_string())
+        AboutSnap {
+            profile: guard.profile().clone(),
+            product_name: guard.product_name().to_string(),
+            version_label: guard.host.tr("版本"),
+            home_label: guard.host.tr("主页"),
+            support_label: guard.host.tr("支持"),
+            close_label: guard.host.tr("关闭"),
+        }
     };
-    Some(render_about(&profile, &product_name, core, cx).into_any_element())
+    Some(render_about(&snap, core, cx).into_any_element())
+}
+
+/// Everything the About overlay renders, snapshotted under the runtime lock.
+struct AboutSnap {
+    profile: workbench_api::ProductProfile,
+    product_name: String,
+    version_label: String,
+    home_label: String,
+    support_label: String,
+    close_label: String,
 }
 
 fn render_about(
-    profile: &wb::ProductProfile,
-    product_name: &str,
+    snap: &AboutSnap,
     core: &SharedCore,
     cx: &mut Context<crate::RootView>,
 ) -> gpui::Stateful<Div> {
+    let profile = &snap.profile;
     let theme = theme::ui_theme();
-    let version = format!("版本 {}", profile.display_version());
+    let version = format!("{} {}", snap.version_label, profile.display_version());
 
     // Backdrop: click closes the dialog (same as the close button).
     let core_bg = core.clone();
@@ -96,7 +115,7 @@ fn render_about(
                     div()
                         .text_size(px(16.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(SharedString::from(product_name.to_string())),
+                        .child(SharedString::from(snap.product_name.clone())),
                 )
                 .child(
                     div()
@@ -121,17 +140,21 @@ fn render_about(
 
     // Footer: optional links + close button.
     let mut footer = div().flex().items_center().justify_end().gap(px(8.0));
-    for (url, label) in [(&profile.about_url, "主页"), (&profile.support_url, "支持")] {
+    for (url, label) in [
+        (&profile.about_url, snap.home_label.as_str()),
+        (&profile.support_url, snap.support_label.as_str()),
+    ] {
         if let Some(url) = url {
             footer = footer.child(link_label(label, url));
         }
     }
     let core_btn = core.clone();
+    let close_label = snap.close_label.clone();
     footer = footer.child(
         Button::new("about-close")
             .primary()
             .small()
-            .child("关闭")
+            .child(close_label)
             .on_click(cx.listener(
                 move |_: &mut crate::RootView, _: &ClickEvent, _: &mut Window, cx| {
                     set_about_open(&core_btn, false);

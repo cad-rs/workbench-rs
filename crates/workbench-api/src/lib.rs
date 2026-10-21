@@ -25,6 +25,7 @@ pub mod dispatch;
 pub mod documents;
 pub mod geo;
 pub mod ids;
+pub mod i18n;
 pub mod log;
 pub mod product;
 pub mod registry;
@@ -49,12 +50,13 @@ pub use command::{
 pub use dispatch::{clear_dispatcher, dispatch, publish_dispatcher};
 pub use documents::{Document, DocumentContent, DocumentService, DocumentTypeDef, UndoHooks};
 pub use geo::{Color, Point, Rect, Size};
+pub use i18n::Localizer;
 pub use ids::{
     CommandId, DocumentId, DocumentTypeId, PanelId, StableId, TabInstanceId, TaskId, ToolbarGroupId,
     ViewTypeId, WorkbenchId,
 };
 pub use log::{LogEntry, LogLevel, LogStore};
-pub use product::{ProductProfile, ProductToml};
+pub use product::{I18nSection, ProductProfile, ProductToml};
 pub use registry::Registry;
 pub use services::{AppServices, PluginEntry, RuntimeStats, ServiceHost};
 pub use settings::{SettingKind, SettingScope, SettingSpec, Settings};

@@ -19,9 +19,108 @@ pub const TOGGLE_PANEL_PREFIX: &str = "app.toggle_panel.";
 pub const ABOUT: &str = "app.about";
 pub const SETTINGS_SET: &str = "app.settings.set";
 
+/// Built-in locale tables. Convention: the source-language string (the one
+/// hardcoded at the call site) is the key — `zh-CN` shows the original, `en`
+/// maps it to English (Qt tr() style). Display sites call `host.tr(key)`;
+/// a missing key renders the key itself, so untranslated strings degrade to
+/// the source text instead of blanking the UI.
+fn register_builtin_locales(registry: &mut Registry) {
+    registry.register_locales(
+        "en",
+        [
+            // Document lifecycle commands.
+            ("新建文档", "New Document"),
+            ("打开文档…", "Open Document…"),
+            ("保存文档", "Save Document"),
+            ("另存为…", "Save As…"),
+            ("撤销", "Undo"),
+            ("重做", "Redo"),
+            ("关闭当前标签", "Close Tab"),
+            ("折叠/展开 Ribbon", "Collapse/Expand Ribbon"),
+            // Plugin & settings commands.
+            ("禁用插件", "Disable Plugin"),
+            ("立即自动保存", "Save All Now"),
+            ("修改设置", "Change Setting"),
+            ("关于", "About"),
+            ("显示/隐藏 ", "Show/Hide "),
+            // Ribbon groups & tabs.
+            ("窗口", "View"),
+            ("帮助", "Help"),
+            ("主页", "Home"),
+            ("常规", "General"),
+            ("外观", "Appearance"),
+            // Panel titles.
+            ("诊断", "Diagnostics"),
+            ("插件", "Plugins"),
+            ("设置", "Settings"),
+            ("欢迎", "Welcome"),
+            // Settings panel rows.
+            ("语言", "Language"),
+            ("主题", "Theme"),
+            ("深色", "Dark"),
+            ("浅色", "Light"),
+            ("强调色", "Accent color"),
+            ("自动保存间隔（秒）", "Autosave interval (s)"),
+            // Settings values / controls.
+            ("开", "On"),
+            ("关", "Off"),
+            // Diagnostics panel.
+            ("运行时", "Runtime"),
+            ("产品", "Product"),
+            ("（见窗口标题）", "(see window title)"),
+            ("GUI 后端", "GUI backend"),
+            ("（未标注）", "(unlabeled)"),
+            ("运行时长", "Uptime"),
+            ("秒", "s"),
+            ("帧统计", "Frame stats"),
+            ("ms/帧（最近 ", "ms/frame (recent "),
+            ("文档与任务", "Documents & tasks"),
+            ("文档数", "Documents"),
+            ("未保存", "Unsaved"),
+            ("个", ""),
+            ("后台任务", "Background tasks"),
+            ("运行 ", "running "),
+            (" / 累计 ", " / total "),
+            ("自动保存", "Autosave"),
+            ("间隔", "Interval"),
+            ("秒（settings.json 可调）", "s (tunable in settings.json)"),
+            ("已自动保存", "Autosaved"),
+            ("次", ""),
+            // Plugins panel.
+            ("没有已注册的插件", "No plugins registered"),
+            ("已装载", "Loaded"),
+            ("已禁用", "Disabled"),
+            ("已拒绝", "Rejected"),
+            ("禁用", "Disable"),
+            // About dialog.
+            ("版本", "Version"),
+            ("主页", "Home"),
+            ("支持", "Support"),
+            ("关闭", "Close"),
+            // Window-state log lines.
+            ("已折叠", "Collapsed"),
+            ("已展开", "Expanded"),
+            // Status bar.
+            ("文档：", "Doc: "),
+            ("（无）", "(none)"),
+            (" · 修订 r", " · rev r"),
+            ("模式：", "Mode: "),
+            ("取消", "Cancel"),
+        ],
+    );
+}
+
 /// Built-in setting specs: the settings panel renders rows from these and
 /// `app.settings.set` validates writes against them.
 fn register_builtin_settings(registry: &mut Registry) {
+    registry.register_setting(SettingSpec {
+        key: "ui.locale".into(),
+        label: "语言".into(),
+        group: "外观".into(),
+        kind: SettingKind::Enum(vec!["zh-CN".into(), "en".into()]),
+        default: serde_json::json!("zh-CN"),
+        scope: SettingScope::User,
+    });
     registry.register_setting(SettingSpec {
         key: "ui.theme".into(),
         label: "主题".into(),
@@ -74,6 +173,9 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
 
     // ---- 平台内置设置项 ----
     register_builtin_settings(registry);
+
+    // ---- 平台内置文案资源表（en） ----
+    register_builtin_locales(registry);
 
     // ---- 插件管理命令 ----
     registry.register_command(

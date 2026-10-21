@@ -25,6 +25,9 @@ pub struct Registry {
     /// Registered setting specs (platform built-ins + plugin settings);
     /// build 时转入 ServiceHost，设置面板按此渲染、`app.settings.set` 按此校验。
     pub setting_specs: Vec<SettingSpec>,
+    /// Locale table entries `(locale, key, text)` from the platform and
+    /// plugins; build 时合并进 ServiceHost 的 Localizer。
+    pub locale_entries: Vec<(String, String, String)>,
     services: Vec<(TypeId, Box<dyn Any + Send + Sync>)>,
     /// 装配期间的诊断信息（重复注册、非法参数等）。
     pub errors: Vec<String>,
@@ -215,6 +218,20 @@ impl Registry {
             return;
         }
         self.setting_specs.push(spec);
+    }
+
+    /// Contribute one locale's translation entries (`key`, `text`). Products
+    /// and plugins call this at assembly time; later entries win.
+    pub fn register_locales(
+        &mut self,
+        locale: &str,
+        entries: impl IntoIterator<Item = (&'static str, &'static str)>,
+    ) {
+        let locale = locale.to_string();
+        for (key, text) in entries {
+            self.locale_entries
+                .push((locale.clone(), key.to_string(), text.to_string()));
+        }
     }
 
     pub fn register_view(&mut self, mut def: ViewDef) {

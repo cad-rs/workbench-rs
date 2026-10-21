@@ -231,6 +231,8 @@ impl WbPanel {
 
 /// The panel's title and icon, read live from the model (also used by the
 /// writeback tests, which drive the same logic without a dock panel entity).
+/// Titles are i18n keys (source string = key): translated here, the single
+/// place dock tabs read them.
 fn model_title(r: &PanelRef, core: &SharedCore) -> (String, Option<String>) {
     let core = core.lock().unwrap_or_else(|p| p.into_inner());
     match r {
@@ -240,7 +242,7 @@ fn model_title(r: &PanelRef, core: &SharedCore) -> (String, Option<String>) {
             .panels
             .iter()
             .find(|p| &p.id.0 == panel_id)
-            .map(|p| (p.title.clone(), p.icon.clone()))
+            .map(|p| (core.host.tr(&p.title), p.icon.clone()))
             .unwrap_or_default(),
         PanelRef::Central { instance_id } => core
             .host
@@ -248,7 +250,7 @@ fn model_title(r: &PanelRef, core: &SharedCore) -> (String, Option<String>) {
             .tabs
             .iter()
             .find(|t| t.instance_id.0 == *instance_id)
-            .map(|t| (t.title.clone(), t.icon.clone()))
+            .map(|t| (core.host.tr(&t.title), t.icon.clone()))
             .unwrap_or_default(),
         PanelRef::Empty => (EMPTY_CENTER_TITLE.to_string(), None),
     }

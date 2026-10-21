@@ -66,14 +66,15 @@ fn qat_item_vm(core: &AppRuntime, item: &wb::ToolbarItem) -> RibbonItemVm {
 fn tab_vm(core: &AppRuntime, tab: &wb::RibbonTab) -> RibbonTabVm {
     RibbonTabVm {
         id: tab.id.0.clone(),
-        title: tab.title.clone(),
+        // Tab and group titles are i18n keys (source-language string as key).
+        title: core.host.tr(&tab.title),
         contextual: !tab.contexts.is_empty(),
         groups: tab
             .groups
             .iter()
             .map(|group| RibbonGroupVm {
                 id: group.id.0.clone(),
-                title: group.title.clone(),
+                title: core.host.tr(&group.title),
                 items: group.items.iter().map(|item| item_vm(core, item)).collect(),
             })
             .collect(),
@@ -85,10 +86,13 @@ fn tab_vm(core: &AppRuntime, tab: &wb::RibbonTab) -> RibbonTabVm {
 /// matching the retired inline implementation.
 fn item_vm(core: &AppRuntime, item: &wb::ToolbarItem) -> RibbonItemVm {
     let command = item.command.0.clone();
-    let label = item
-        .label
-        .clone()
-        .unwrap_or_else(|| fallback_label(core, &command));
+    // Explicit labels and command-title fallbacks are both i18n keys.
+    let label = core.host.tr(
+        &item
+            .label
+            .clone()
+            .unwrap_or_else(|| fallback_label(core, &command)),
+    );
     let enabled = core.is_enabled(&command);
     let icon = core.command_icon(&command);
     let size = match item.size {

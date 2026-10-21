@@ -46,6 +46,9 @@ pub struct ServiceHost {
     /// filled at build time; the settings panel renders from these and
     /// `app.settings.set` validates against them.
     pub setting_specs: Vec<crate::settings::SettingSpec>,
+    /// Merged locale tables (platform built-ins + plugin contributions),
+    /// filled at build time; display sites go through [`ServiceHost::tr`].
+    pub localizer: crate::i18n::Localizer,
     pub stats: RuntimeStats,
     /// 插件注册表镜像（build 时填充，运行时禁用同步更新）。
     pub plugins: Vec<PluginEntry>,
@@ -68,6 +71,7 @@ impl ServiceHost {
             log: LogStore::new(1000),
             settings: Settings::in_memory(),
             setting_specs: Vec::new(),
+            localizer: crate::i18n::Localizer::new(),
             stats: RuntimeStats::default(),
             plugins: Vec::new(),
             started: web_time::Instant::now(),
@@ -91,6 +95,21 @@ impl ServiceHost {
     /// 平台运行时长（秒）。
     pub fn uptime_secs(&self) -> f32 {
         self.started.elapsed().as_secs_f32()
+    }
+
+    /// 当前 locale（`ui.locale` 设置，未设置时 `zh-CN`）。
+    pub fn locale(&self) -> String {
+        self.settings.get_str("ui.locale", "zh-CN")
+    }
+
+    /// 翻译一个文案键：按当前 locale 查表，找不到回退 `en`，再回退键本身。
+    /// 键本身作回退值保证未翻译文案原样显示、UI 不出现空洞。
+    pub fn tr(&self, key: &str) -> String {
+        let locale = self.locale();
+        self.localizer
+            .translate(&locale, key)
+            .unwrap_or(key)
+            .to_string()
     }
 
     /// 取出任务事件接收端的锁（核心 frame_tick 泵事件用）。
