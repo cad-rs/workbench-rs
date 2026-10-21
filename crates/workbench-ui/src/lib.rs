@@ -722,6 +722,17 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
             .and_then(|restored| restored.dock)
             .and_then(|dock| serde_json::from_value(dock).ok())
     };
+    // Window/taskbar icon from the product profile (`window_icon` PNG asset).
+    // Decode failure is non-fatal: the exe's embedded icon stays the fallback.
+    let window_icon = {
+        let path = core
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .profile()
+            .window_icon
+            .clone();
+        path.and_then(|p| decode_window_icon(&assets, &p))
+    };
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -744,7 +755,7 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
                 component: gpui_component_assets::Assets::new(""),
             });
             let handle =
-                app.run_embedded(launch_app(core, title, smoke, fonts, gpu_requirements, dock, theme_name));
+                app.run_embedded(launch_app(core, title, smoke, fonts, gpu_requirements, dock, theme_name, window_icon));
             // Web 平台的 run 立即返回，应用状态由句柄保持；
             // 与页面共存亡，故意泄漏句柄。
             std::mem::forget(handle);
@@ -767,9 +778,31 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
             gpu_requirements,
             dock,
             theme_name,
+            window_icon,
         ));
         Ok(())
     }
+}
+
+/// Decode the product's window/taskbar icon (PNG asset path) into an
+/// `RgbaImage` for `WindowOptions::icon`. Returns None on a missing asset or
+/// decode failure — the exe's embedded icon stays the fallback.
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_window_icon(
+    assets: &std::sync::Arc<dyn wb::AssetSource>,
+    path: &str,
+) -> Option<std::sync::Arc<image::RgbaImage>> {
+    let bytes = assets.load(path)?;
+    let img = image::load_from_memory(&bytes).ok()?;
+    Some(std::sync::Arc::new(img.into_rgba8()))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn decode_window_icon(
+    _assets: &std::sync::Arc<dyn wb::AssetSource>,
+    _path: &str,
+) -> Option<std::sync::Arc<image::RgbaImage>> {
+    None
 }
 
 /// 构建应用启动闭包：注册组件、打开主窗口、挂任务泵与字体注入。
@@ -781,6 +814,7 @@ fn launch_app(
     gpu_requirements: Option<Box<dyn std::any::Any>>,
     dock: Option<gpui_component::dock::DockAreaState>,
     theme_name: String,
+    window_icon: Option<std::sync::Arc<image::RgbaImage>>,
 ) -> impl FnOnce(&mut App) {
     move |cx: &mut App| {
         if !fonts.is_empty() {
@@ -813,6 +847,9 @@ fn launch_app(
                 appears_transparent: false,
                 ..Default::default()
             }),
+            // Product window icon (product.toml `window_icon`); None keeps
+            // the platform default (exe resource on Windows).
+            icon: window_icon,
             ..Default::default()
         };
         let core_window = core.clone();

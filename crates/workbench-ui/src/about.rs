@@ -6,7 +6,7 @@
 //! Modal.
 
 use gpui::{
-    ClickEvent, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
+    App, ClickEvent, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -145,7 +145,7 @@ fn render_about(
         (&profile.support_url, snap.support_label.as_str()),
     ] {
         if let Some(url) = url {
-            footer = footer.child(link_label(label, url));
+            footer = footer.child(link_label(label, url, cx));
         }
     }
     let core_btn = core.clone();
@@ -167,13 +167,23 @@ fn render_about(
     overlay.child(card)
 }
 
-/// A plain styled text "link": the About dialog only needs to *show* the URL
-/// (click-to-open lands with the shell-integration milestone).
-fn link_label(label: &str, url: &str) -> Div {
+/// A clickable text link: opens the URL in the system browser via gpui's
+/// platform `open_url` (ShellExecute on Windows, `open` on macOS, xdg-open
+/// on Linux).
+fn link_label(label: &str, url: &str, cx: &mut Context<crate::RootView>) -> gpui::Stateful<Div> {
+    let url = url.to_string();
     div()
+        .id(format!("about-link-{url}"))
+        .cursor_pointer()
         .text_size(px(12.0))
         .text_color(col(wb::Color::ACCENT))
+        .hover(|s| s.underline())
         .child(SharedString::from(format!("{label} ({url})")))
+        .on_click(cx.listener(
+            move |_: &mut crate::RootView, _: &ClickEvent, _: &mut Window, cx: &mut Context<'_, crate::RootView>| {
+                cx.open_url(&url);
+            },
+        ))
 }
 
 fn set_about_open(core: &SharedCore, open: bool) {

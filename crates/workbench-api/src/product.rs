@@ -28,6 +28,10 @@ pub struct ProductProfile {
     /// Logo icon resource path (svg), drawn in the ribbon tab strip and the
     /// About dialog. Resolved through the product [`crate::AssetSource`].
     pub logo: Option<String>,
+    /// Window/taskbar icon resource path (PNG, raster — the OS window icon
+    /// cannot use SVG). Resolved through the product [`crate::AssetSource`];
+    /// falls back to the exe's embedded icon when absent.
+    pub window_icon: Option<String>,
     /// Brand accent color (`#RRGGBB`); consumed by the theme (Phase 1 keeps
     /// the current hardcoded accent until the theme API takes this over).
     pub accent: Option<String>,
@@ -51,6 +55,7 @@ impl Default for ProductProfile {
             name: "Workbench".to_string(),
             version: String::new(),
             logo: None,
+            window_icon: None,
             accent: None,
             about_url: None,
             support_url: None,
@@ -92,6 +97,7 @@ pub struct ProductSection {
     pub name: String,
     pub version: String,
     pub logo: Option<String>,
+    pub window_icon: Option<String>,
 }
 
 impl Default for ProductSection {
@@ -102,6 +108,7 @@ impl Default for ProductSection {
             name: d.name,
             version: d.version,
             logo: d.logo,
+            window_icon: d.window_icon,
         }
     }
 }
@@ -135,6 +142,7 @@ impl From<ProductToml> for ProductProfile {
             name: raw.product.name,
             version: raw.product.version,
             logo: raw.product.logo,
+            window_icon: raw.product.window_icon,
             accent: raw.branding.accent,
             about_url: raw.branding.about_url,
             support_url: raw.branding.support_url,
@@ -157,6 +165,7 @@ mod tests {
                 name: "Acme CAD".into(),
                 version: "2.1.0".into(),
                 logo: Some("icons/acme-logo.svg".into()),
+                window_icon: Some("icons/acme-icon.png".into()),
             },
             branding: BrandingSection {
                 accent: Some("#FF6600".into()),

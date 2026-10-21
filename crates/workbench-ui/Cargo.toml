@@ -39,6 +39,8 @@ wgpu = { workspace = true, features = ["webgpu"] }
 # Windows：同样复用 GPUI 渲染器的共享 wgpu 设备（DX12）
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui-wgpu = { workspace = true }
+# Window/taskbar icon decode (product.toml window_icon PNG).
+image = { workspace = true }
 
 # 其余桌面（macOS/Linux）：独立 wgpu 设备 + 离屏回读（不与 gpui 共享设备）
 [target.'cfg(not(any(target_family = "wasm", target_os = "windows")))'.dependencies]
