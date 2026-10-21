@@ -4,7 +4,9 @@
 //! - (default) run the GUI;
 //! - `--selfcheck`: headless selfcheck, process exit code 0/1;
 //! - `--selfcheck-crash`: crash-recovery probe (invoked by the selfcheck as a
-//!   subprocess; requires the `WB_CRASH_DIR` environment variable);
+//!   subprocess, twice: `WB_CRASH_PHASE=A` crashes without running `Drop`,
+//!   `WB_CRASH_PHASE=B` recovers; requires the `WB_CRASH_DIR` environment
+//!   variable);
 //! - `--smoke [secs]`: run for the given seconds and exit (default 2.5),
 //!   for automated smoke tests.
 //!
@@ -23,7 +25,7 @@
 //!
 //!     match cli.mode {
 //!         CliMode::Selfcheck => workbench_core::selfcheck::exit_with(&mut builder.build().unwrap()),
-//!         CliMode::CrashProbe => workbench_core::cli::crash_probe_exit(|| make_builder()),
+//!         CliMode::CrashProbe => std::process::exit(workbench_core::cli::crash_probe_exit(make_builder)),
 //!         CliMode::Run => { my_frontend::run(builder, "My Product").unwrap(); std::process::exit(0); }
 //!     }
 //! }
@@ -85,21 +87,45 @@ pub fn selfcheck_exit(builder: WorkbenchAppBuilder) -> ! {
     std::process::exit(crate::selfcheck::run(&mut app));
 }
 
-/// Run the crash-recovery probe and exit the process (the phase-5 selfcheck's subprocess mode).
+/// Run one phase of the crash-recovery probe (the phase-5 selfcheck's
+/// subprocess mode) and return the process exit code.
 ///
-/// `make_builder` is called twice (session A produces the autosave, session B
-/// verifies the recovery) and must use an isolated config directory (given by
-/// the `WB_CRASH_DIR` environment variable).
-pub fn crash_probe_exit(make_builder: impl Fn() -> WorkbenchAppBuilder) -> ! {
+/// The probe is a real crash simulation split across three subprocess launches:
+///
+/// - phase A (`WB_CRASH_PHASE=A`, the default): session A gives the product's
+///   own default document a probe title, makes it dirty, autosaves it, then
+///   exits **without running `Drop`** — so the `session.clean` marker is never
+///   written.
+/// - phase B (`WB_CRASH_PHASE=B`): session B builds, which detects the missing
+///   marker and recovers the autosaved document, then verifies the recovered
+///   document's content against what phase A persisted. It leaves a fresh dirty
+///   document behind and returns normally, so `Drop` writes the marker.
+/// - phase C (`WB_CRASH_PHASE=C`): the marker is present, so `build()` must not
+///   recover even though the autosave directory still holds files.
+///
+/// `make_builder` must assemble the product normally (so its document types are
+/// registered) with an isolated config directory given by `WB_CRASH_DIR`.
+pub fn crash_probe_exit(make_builder: impl Fn() -> WorkbenchAppBuilder) -> i32 {
     let dir = PathBuf::from(
         std::env::var("WB_CRASH_DIR").expect("the WB_CRASH_DIR environment variable is required"),
     );
-    let code = crate::selfcheck::crash_probe(
-        make_builder().build().expect("session A assembly failed"),
-        || make_builder().build().expect("session B assembly failed"),
-        &dir.join("result.json"),
-    );
-    std::process::exit(code);
+    let phase = std::env::var("WB_CRASH_PHASE").unwrap_or_default();
+    match phase.as_str() {
+        "B" => crate::selfcheck::crash_probe_recover(
+            make_builder().build().expect("session B assembly failed"),
+            &dir,
+        ),
+        "C" => crate::selfcheck::crash_probe_clean(
+            make_builder().build().expect("session C assembly failed"),
+            &dir,
+        ),
+        // Session A: the runtime is dropped by `std::process::exit`, i.e. not at
+        // all — no clean marker is written.
+        _ => crate::selfcheck::crash_probe_crash(
+            make_builder().build().expect("session A assembly failed"),
+            &dir,
+        ),
+    }
 }
 
 /// 插件发现目录的通用约定：当前工作目录的 `plugins/`（内置插件）

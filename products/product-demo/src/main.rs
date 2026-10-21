@@ -45,15 +45,17 @@ fn main() {
 
     match cli.mode {
         CliMode::Selfcheck => workbench_core::selfcheck::exit_with(&mut builder.build().unwrap()),
-        CliMode::CrashProbe => workbench_core::cli::crash_probe_exit(|| {
-            workbench_core::WorkbenchAppBuilder::new("selfcheck.crash", "Crash selfcheck")
-                .with_workbench(wb_example::ExampleWorkbench)
-                .create_default_document(true)
-                .with_layout_path(
-                    std::path::PathBuf::from(std::env::var("WB_CRASH_DIR").unwrap_or_default())
-                        .join("layout.json"),
-                )
-        }),
+        CliMode::CrashProbe => {
+            std::process::exit(workbench_core::cli::crash_probe_exit(|| {
+                workbench_core::WorkbenchAppBuilder::new("selfcheck.crash", "Crash selfcheck")
+                    .with_workbench(wb_example::ExampleWorkbench)
+                    .create_default_document(true)
+                    .with_layout_path(
+                        std::path::PathBuf::from(std::env::var("WB_CRASH_DIR").unwrap_or_default())
+                            .join("layout.json"),
+                    )
+            }))
+        }
         CliMode::Run => {
             if let Err(e) = workbench_ui::run(builder, "Workbench Demo") {
                 eprintln!("run failed: {e}");

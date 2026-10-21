@@ -955,11 +955,11 @@ impl Drop for AppRuntime {
     fn drop(&mut self) {
         // 通知异步执行器工作线程退出
         self.shutdown.store(true, Ordering::Relaxed);
-        // 会话干净退出标记（阶段 5：崩溃恢复）
-        if let Some(dir) = self.layout_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-            let _ = std::fs::write(dir.join("session.clean"), b"ok");
-        }
+        // 会话干净退出标记（阶段 5：崩溃恢复）。必须与 `build()` 检查的
+        // `autosave_marker_path()` 同路径，否则标记永远读不到，每次启动都会
+        // 被判为异常退出而重跑恢复。
+        let _ = std::fs::create_dir_all(&self.autosave_dir);
+        let _ = std::fs::write(self.autosave_dir.join("session.clean"), b"ok");
         let _ = self.host.settings.save();
     }
 }

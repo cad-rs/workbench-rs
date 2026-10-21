@@ -27,83 +27,288 @@ impl Check {
     }
 }
 
-/// Runs the full selfcheck suite; returns the process exit code.
-/// Crash-recovery probe (phase 5, invoked in the `--selfcheck-crash` mode):
-/// session A opens the canvas and adds shapes (dirty document) -> autosave ->
-/// drop removes the clean marker (simulating an abnormal exit) -> `reopen`
-/// builds session B (which should auto-recover).
-/// Writes the recovered document titles to `out` (a JSON array); returns 0 on success.
-pub fn crash_probe(
-    session_a: AppRuntime,
-    mut reopen: impl FnMut() -> AppRuntime,
-    out: &std::path::Path,
-) -> i32 {
-    let mut a = session_a;
-    a.frame_tick(0.0);
-    let _ = a.execute_command("example.open_canvas", &api::CommandArgs::default());
-    a.frame_tick(0.0);
-    let added = a.execute_command("example.add_shape", &api::CommandArgs::default());
-    let saved = a.autosave_now().unwrap_or(0);
-    let marker = a
-        .layout_path()
-        .parent()
-        .map(|d| d.join("session.clean"))
-        .expect("布局路径应有父目录");
-    drop(a); // Drop 会写 clean 标记
-    let _ = std::fs::remove_file(&marker); // 模拟异常退出
+/// Recovered-document title prefix (`recover_autosaves` renames to
+/// `[恢复] <title>`), so a probe can identify what recovery produced.
+const RECOVERED_PREFIX: &str = "[恢复]";
 
-    let mut b = reopen();
-    b.frame_tick(0.0);
-    let recovered: Vec<String> = b
+/// Session A of the crash-recovery probe (phase 5, `--selfcheck-crash` with
+/// `WB_CRASH_PHASE=A`): give the product's own default document a probe title,
+/// make it dirty, autosave it, then exit **without running `Drop`** — so the
+/// `session.clean` marker is never written and the next launch must recover.
+///
+/// The probe is product-agnostic: it only uses the platform's document service
+/// (rename + commit a type-erased content duplicate), never domain commands.
+pub fn crash_probe_crash(mut session_a: AppRuntime, dir: &std::path::Path) -> ! {
+    session_a.frame_tick(0.0);
+    let title = format!("crash-probe-{}", std::process::id());
+    let prepared = prepare_probe_document(&mut session_a, &title);
+    let saved = session_a.autosave_now().unwrap_or(0);
+    // Recovery deletes the autosave directory, so snapshot the persisted bytes
+    // here for session B's content-consistency check.
+    let expected = read_autosaved_bytes(&session_a, &title);
+    let _ = std::fs::create_dir_all(dir);
+    if let Some(bytes) = &expected {
+        let _ = std::fs::write(dir.join("expected.bin"), bytes);
+    }
+    let _ = std::fs::write(
+        dir.join("probe.json"),
+        serde_json::json!({ "title": title, "prepared": prepared, "saved": saved }).to_string(),
+    );
+    println!("[crash-probe] session A: prepared={prepared} saved={saved} title={title:?}");
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    // Abnormal exit: no Drop, therefore no `session.clean` marker.
+    std::process::exit(if prepared && saved > 0 && expected.is_some() { 0 } else { 1 });
+}
+
+/// Session B of the crash-recovery probe (`WB_CRASH_PHASE=B`): the launch after
+/// the simulated crash. `build()` has already run recovery (the marker is
+/// absent); verify the recovered document exists and that its content matches
+/// what session A persisted.
+///
+/// It then prepares a *fresh* dirty document and autosaves it again, so that
+/// session C can tell "recovery suppressed by the clean marker" apart from
+/// "nothing left to recover". The runtime is dropped on return, which writes
+/// the marker — that clean exit is exactly what session C checks.
+pub fn crash_probe_recover(mut session_b: AppRuntime, dir: &std::path::Path) -> i32 {
+    session_b.frame_tick(0.0);
+    let expected = std::fs::read(dir.join("expected.bin")).ok();
+    let recovered_id = session_b
         .host
         .docs
         .docs()
-        .filter(|d| d.title.starts_with("[恢复]"))
+        .find(|d| d.title.starts_with(RECOVERED_PREFIX))
+        .map(|d| d.id);
+    let content_ok = match (recovered_id, expected.as_deref()) {
+        (Some(id), Some(bytes)) => serialize_doc(&session_b, id)
+            .map(|b| b == bytes)
+            .unwrap_or(false),
+        _ => false,
+    };
+    let recovered: Vec<String> = session_b
+        .host
+        .docs
+        .docs()
+        .filter(|d| d.title.starts_with(RECOVERED_PREFIX))
         .map(|d| d.title.clone())
         .collect();
     let _ = std::fs::write(
-        out,
+        dir.join("result.json"),
         serde_json::to_string(&recovered).unwrap_or_else(|_| "[]".to_string()),
     );
-    let ok = added.is_ok() && saved > 0 && !recovered.is_empty();
-    println!("[crash-probe] saved={saved} recovered={recovered:?}");
-    if ok {
+    let ok = !recovered.is_empty() && content_ok;
+    println!("[crash-probe] session B: recovered={recovered:?} content_ok={content_ok}");
+
+    // Leave a fresh dirty document behind, then exit cleanly (Drop writes the
+    // marker). Session C must see the marker and recover nothing.
+    let title = format!("crash-probe-clean-{}", std::process::id());
+    let prepared = prepare_probe_document(&mut session_b, &title);
+    let saved = session_b.autosave_now().unwrap_or(0);
+    let left = count_autosave_files(&session_b);
+    let _ = std::fs::write(
+        dir.join("clean-input.json"),
+        serde_json::json!({ "prepared": prepared, "saved": saved, "autosave_files": left })
+            .to_string(),
+    );
+    println!("[crash-probe] session B clean exit: saved={saved} autosave_files={left}");
+    if ok && prepared && saved > 0 && left > 0 {
         0
     } else {
         1
     }
 }
 
+/// Session C of the crash-recovery probe (`WB_CRASH_PHASE=C`): the launch after
+/// a *clean* exit, so the marker is present and `build()` must not recover —
+/// even though session B left autosave files behind. Writes `clean.json`.
+pub fn crash_probe_clean(mut session_c: AppRuntime, dir: &std::path::Path) -> i32 {
+    session_c.frame_tick(0.0);
+    let recovered: Vec<String> = session_c
+        .host
+        .docs
+        .docs()
+        .filter(|d| d.title.starts_with(RECOVERED_PREFIX))
+        .map(|d| d.title.clone())
+        .collect();
+    let suppressed = recovered.is_empty();
+    let _ = std::fs::write(
+        dir.join("clean.json"),
+        serde_json::to_string(&serde_json::json!({
+            "recovered": recovered,
+            "suppressed": suppressed,
+        }))
+        .unwrap_or_else(|_| "{}".to_string()),
+    );
+    println!("[crash-probe] session C: recovered={recovered:?} suppressed={suppressed}");
+    if suppressed {
+        0
+    } else {
+        1
+    }
+}
+
+/// Give the active document a probe-specific title and commit a duplicate of
+/// its content so it becomes dirty (autosave only persists dirty documents).
+/// The commit is type-erased: the platform never touches domain content.
+fn prepare_probe_document(app: &mut AppRuntime, title: &str) -> bool {
+    let Some(id) = app.host.docs.active_id() else {
+        return false;
+    };
+    if let Some(doc) = app.host.docs.get_mut(id) {
+        doc.title = title.to_string();
+    }
+    let content = app.host.docs.get(id).map(|d| d.content.dup());
+    match content {
+        Some(c) => app.host.docs.commit(id, "crash probe", true, c).is_ok(),
+        None => false,
+    }
+}
+
+/// The bytes `autosave_now` persisted for `title` (the `<title>_.<ext>` file).
+fn read_autosaved_bytes(app: &AppRuntime, title: &str) -> Option<Vec<u8>> {
+    let dir = app.layout_path().parent()?.join("autosave");
+    let safe: String = title
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().map(|x| x == "json").unwrap_or(false) {
+            continue;
+        }
+        let Some(stem) = path.file_stem() else { continue };
+        if stem.to_string_lossy().starts_with(&safe) {
+            return std::fs::read(&path).ok();
+        }
+    }
+    None
+}
+
+/// How many content files the autosave directory currently holds (metadata
+/// `.json` sidecars excluded).
+fn count_autosave_files(app: &AppRuntime) -> usize {
+    let Some(dir) = app.layout_path().parent() else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(dir.join("autosave")) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            let p = e.path();
+            !p.extension().map(|x| x == "json").unwrap_or(false)
+                && p.file_stem().is_some()
+        })
+        .count()
+}
+
+/// Serialize a document through its registered type (platform-agnostic read).
+fn serialize_doc(app: &AppRuntime, id: api::DocumentId) -> Option<Vec<u8>> {
+    let doc = app.host.docs.get(id)?;
+    let def = app.host.docs.type_of(&doc.type_id)?;
+    (def.serialize)(doc.content.as_ref()).ok()
+}
+
+/// Launch one crash-probe phase as a subprocess. Times out instead of hanging
+/// when a product does not implement the `--selfcheck-crash` mode.
+fn run_probe_phase(
+    exe: &std::path::Path,
+    dir: &std::path::Path,
+    phase: &str,
+) -> Result<std::process::Output, String> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(exe)
+        .arg("--selfcheck-crash")
+        .env("WB_CRASH_DIR", dir)
+        .env("WB_CRASH_PHASE", phase)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("无法启动子进程: {e}"))?;
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {
+                if start.elapsed() > Duration::from_secs(30) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("子进程超时（phase {phase}）"));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => return Err(format!("等待子进程失败: {e}")),
+        }
+    };
+    let mut out = child
+        .wait_with_output()
+        .map_err(|e| format!("读取子进程输出失败: {e}"))?;
+    out.status = status;
+    Ok(out)
+}
+
 /// 崩溃恢复子进程自举检查（返回 (是否通过, 详情)）。
+///
+/// 三次子进程启动覆盖机制的两个方向：
+/// - A：准备脏文档 + 自动保存，随后不跑 Drop 直接退出（无 clean 标记）；
+/// - B：启动时恢复，回读内容一致性；再留一份脏文档并正常退出（写标记）；
+/// - C：标记存在 → 必须不恢复（即便自动保存目录里仍有文件）。
 fn crash_probe_check() -> (bool, String) {
-    use std::process::Command;
     let dir = std::env::temp_dir().join("workbench-rs-crash-test");
     let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
     let mut ok = false;
-    let detail = if let Ok(exe) = std::env::current_exe() {
-        match Command::new(exe)
-            .arg("--selfcheck-crash")
-            .env("WB_CRASH_DIR", &dir)
-            .output()
-        {
-            Ok(o) if o.status.success() => {
-                let result = std::fs::read_to_string(dir.join("result.json")).unwrap_or_default();
-                let recovered: Vec<String> = serde_json::from_str(&result).unwrap_or_default();
-                ok = recovered.iter().any(|t| t.contains("[恢复]"));
-                format!("recovered={recovered:?}")
+    let detail = match std::env::current_exe() {
+        Err(_) => "无法定位当前 exe".to_string(),
+        Ok(exe) => {
+            let mut outcome: Result<(), String> = Ok(());
+            for phase in ["A", "B", "C"] {
+                outcome = match run_probe_phase(&exe, &dir, phase) {
+                    Err(e) => Err(e),
+                    Ok(o) if !o.status.success() => Err(format!(
+                        "会话 {phase} 失败 status={:?} stdout={} stderr={}",
+                        o.status,
+                        String::from_utf8_lossy(&o.stdout),
+                        String::from_utf8_lossy(&o.stderr)
+                    )),
+                    Ok(_) => Ok(()),
+                };
+                if outcome.is_err() {
+                    break;
+                }
             }
-            Ok(o) => format!(
-                "子进程失败 status={:?} stdout={} stderr={}",
-                o.status,
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            ),
-            Err(e) => format!("无法启动子进程: {e}"),
+            match outcome {
+                Err(e) => e,
+                Ok(()) => {
+                    let recovered: Vec<String> =
+                        read_json_vec(&dir.join("result.json"));
+                    let clean = read_json_value(&dir.join("clean.json"));
+                    ok = recovered.iter().any(|t| t.contains(RECOVERED_PREFIX))
+                        && clean.get("suppressed").and_then(|v| v.as_bool()) == Some(true);
+                    format!(
+                        "recovered={recovered:?} clean_exit_suppressed={}",
+                        clean.get("suppressed").and_then(|v| v.as_bool()).unwrap_or(false)
+                    )
+                }
+            }
         }
-    } else {
-        "无法定位当前 exe".to_string()
     };
     (ok, detail)
+}
+
+fn read_json_value(path: &std::path::Path) -> serde_json::Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn read_json_vec(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
+        .unwrap_or_default()
 }
 
 /// 无头自检并退出进程（供产品 main 的 `--selfcheck` 模式）。
@@ -114,6 +319,9 @@ pub fn exit_with(app: &mut AppRuntime) -> ! {
 pub fn run(app: &mut AppRuntime) -> i32 {
     let mut checks: Vec<Check> = Vec::new();
     app.frame_tick(0.0);
+    // 装配时的插件清单：阶段 18 会禁用插件（此后 `plugins_loaded()` 为空），
+    // 因此装配探针（阶段 19）必须用这份早期快照。
+    let plugins_at_assembly: Vec<String> = app.plugins_loaded().to_vec();
 
     let has_cmd = |app: &AppRuntime, id: &str| app.command_title(id).is_some();
     let has_plugin = |app: &AppRuntime, id: &str| app.plugins_loaded().contains(&id.to_string());
@@ -457,10 +665,13 @@ pub fn run(app: &mut AppRuntime) -> i32 {
         format!("settings_ok={settings_ok}"),
     ));
 
-    // 17.（阶段 5）自动保存 + 崩溃恢复：子进程自举——
-    //     会话 A 写脏文档 → 自动保存 → 模拟崩溃（删 clean 标记）→ 会话 B 启动自动恢复
-    //     （前置：产品支持 --selfcheck-crash 模式，当前由示例 Workbench 提供）
-    if has_cmd(app, "example.add_shape") {
+    // 17.（阶段 5）自动保存 + 崩溃恢复：两次子进程启动构成一次真实崩溃——
+    //     会话 A 把产品自己的默认文档改脏并自动保存，随后不跑 Drop 直接退出
+    //     （无 clean 标记）→ 会话 B 启动时恢复，并校验恢复文档的内容与 A 落盘
+    //     的字节一致。探针只走平台文档服务（改标题 + 提交内容副本），与领域无关，
+    //     因此任何注册了文档类型的产品都会执行（未实现 --selfcheck-crash 的产品
+    //     由子进程超时兜住，判 FAIL 而非挂起）。
+    if !app.host.docs.types().is_empty() {
         let crash_ok = crash_probe_check();
         checks.push(Check::new(
             "阶段5: 自动保存 + 崩溃恢复",
@@ -468,7 +679,7 @@ pub fn run(app: &mut AppRuntime) -> i32 {
             crash_ok.1,
         ));
     } else {
-        checks.push(Check::skip("阶段5: 自动保存 + 崩溃恢复", "产品未实现 --selfcheck-crash 探针"));
+        checks.push(Check::skip("阶段5: 自动保存 + 崩溃恢复", "产品没有注册文档类型"));
     }
 
     // 18.（阶段 5）插件运行时禁用：命令移除 + Ribbon 清理 + 状态镜像
@@ -534,11 +745,10 @@ pub fn run(app: &mut AppRuntime) -> i32 {
         format!("doc_types={doc_types:?}"),
     ));
 
-    let plugins = app.plugins_loaded().to_vec();
     checks.push(Check::new(
         "装配: 插件已装载",
-        !plugins.is_empty(),
-        format!("plugins={plugins:?}"),
+        !plugins_at_assembly.is_empty(),
+        format!("plugins={plugins_at_assembly:?}"),
     ));
 
     // 汇总
