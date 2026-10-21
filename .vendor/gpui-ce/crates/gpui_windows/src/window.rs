@@ -1510,8 +1510,17 @@ const WINDOW_CLASS_NAME: PCWSTR = w!("Zed::Window");
 /// transparency on Vista+.
 fn create_icon_from_rgba(rgba: &image::RgbaImage) -> Result<HICON> {
     use windows::Win32::Graphics::Gdi::{
-        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, HGDIOBJ,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, HGDIOBJ, RGBQUAD,
     };
+
+    /// 1bpp `BI_RGB` DIBs with `biClrUsed == 0` need a two-entry (black +
+    /// white) palette after the header; `BITMAPINFO` only carries storage for
+    /// one `RGBQUAD`, so this layout hands GDI the full palette it reads.
+    #[repr(C)]
+    struct MaskBitmapInfo {
+        header: BITMAPINFOHEADER,
+        palette: [RGBQUAD; 2],
+    }
 
     let width = rgba.width() as i32;
     let height = rgba.height() as i32;
@@ -1560,8 +1569,8 @@ fn create_icon_from_rgba(rgba: &image::RgbaImage) -> Result<HICON> {
     // AND mask: 1bpp, DWORD-aligned rows, all zero (alpha alone decides).
     let mask_row_bytes = ((width + 31) / 32) * 4;
     let mask_bits = vec![0u8; (mask_row_bytes * height) as usize];
-    let mask_info = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
+    let mask_info = MaskBitmapInfo {
+        header: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width,
             biHeight: -height,
@@ -1570,20 +1579,37 @@ fn create_icon_from_rgba(rgba: &image::RgbaImage) -> Result<HICON> {
             biCompression: BI_RGB.0,
             ..Default::default()
         },
-        ..Default::default()
+        // Black (all-zero) and white (all-one) entries; the mask bits above
+        // index only black, but GDI reads both on creation.
+        palette: [
+            RGBQUAD::default(),
+            RGBQUAD {
+                rgbBlue: 0xFF,
+                rgbGreen: 0xFF,
+                rgbRed: 0xFF,
+                rgbReserved: 0,
+            },
+        ],
     };
     let mut mask_dest: *mut std::ffi::c_void = std::ptr::null_mut();
     let mask = unsafe {
         CreateDIBSection(
             None,
-            &mask_info,
+            &mask_info as *const MaskBitmapInfo as *const BITMAPINFO,
             DIB_RGB_COLORS,
             &mut mask_dest,
             None,
             0,
         )
     }
-    .context("CreateDIBSection for icon mask bitmap")?;
+    // A failed mask DIB must not leak the color bitmap (GDI handles have no
+    // RAII here).
+    .map_err(|e| {
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(color.0));
+        }
+        anyhow::anyhow!("CreateDIBSection for icon mask bitmap: {e}")
+    })?;
     unsafe {
         std::ptr::copy_nonoverlapping(mask_bits.as_ptr(), mask_dest as *mut u8, mask_bits.len());
     }
@@ -1595,8 +1621,15 @@ fn create_icon_from_rgba(rgba: &image::RgbaImage) -> Result<HICON> {
         hbmMask: mask,
         hbmColor: color,
     };
-    // CreateIconIndirect copies both bitmaps; ours can go.
-    let icon = unsafe { CreateIconIndirect(&icon_info) }.context("CreateIconIndirect")?;
+    // CreateIconIndirect copies both bitmaps; ours can go. A failure here
+    // must release both (same no-RAII rule).
+    let icon = unsafe { CreateIconIndirect(&icon_info) }.map_err(|e| {
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(color.0));
+            let _ = DeleteObject(HGDIOBJ(mask.0));
+        }
+        anyhow::anyhow!("CreateIconIndirect: {e}")
+    })?;
     unsafe {
         let _ = DeleteObject(HGDIOBJ(color.0));
         let _ = DeleteObject(HGDIOBJ(mask.0));
