@@ -12,8 +12,11 @@
 
 mod camera;
 mod gpu;
-mod mesh;
-mod scene;
+// 产品注入契约（设计文档「gpu 视口注入 API」）：mesh/scene 公开，产品可
+// 自建着色网格（Scene::from_mesh）并经 GpuViewportView::new3d_with_scene
+// 注入轨道视口；camera 仍由框架驱动（Orbit3d 交互复用）。
+pub mod mesh;
+pub mod scene;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -177,6 +180,9 @@ struct GpuViewportInner {
     dirty: bool,
     #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
     image: Option<std::sync::Arc<gpui::RenderImage>>,
+    /// 注入场景的每视图缓存：(provider, common)——provider 指针同一性
+    /// 变化（产品换了场景源）即重建；demo 视口不经此路径。
+    injected: Option<(Rc<SceneProvider>, Rc<ViewportCommon>)>,
 }
 
 impl GpuViewportInner {
@@ -196,6 +202,7 @@ impl GpuViewportInner {
             dirty: true,
             #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
             image: None,
+            injected: None,
         }
     }
 
@@ -368,14 +375,55 @@ impl GpuViewportInner {
     }
 
     /// Draw one frame into the view area. Draws a placeholder background until
-    /// the process-wide GPU context is available.
-    fn paint_into(&mut self, kind: ViewKind, window: &mut Window, bounds: Bounds<Pixels>) {
+    /// the process-wide GPU context is available. `scene_provider` 存在时走
+    /// 产品注入路径（每视图缓存，provider 指针同一性变化即重建）。
+    fn paint_into(
+        &mut self,
+        kind: ViewKind,
+        scene_provider: Option<Rc<SceneProvider>>,
+        window: &mut Window,
+        bounds: Bounds<Pixels>,
+    ) {
         let scale = window.scale_factor();
         let (w, h) = device_size(&bounds, scale);
 
-        let Some(common) = demo_viewport(window) else {
-            crate::paint_placeholder(window, bounds);
-            return;
+        let common: Rc<ViewportCommon> = match &scene_provider {
+            Some(provider) => {
+                let cached_same = self
+                    .injected
+                    .as_ref()
+                    .is_some_and(|(p, _)| Rc::ptr_eq(p, provider));
+                if !cached_same {
+                    let Some(gpu) = shared_gpu(window) else {
+                        crate::paint_placeholder(window, bounds);
+                        return;
+                    };
+                    let Some(scene) = provider(&gpu.device) else {
+                        crate::paint_placeholder(window, bounds);
+                        return;
+                    };
+                    let pipes = Rc::new(scene::Pipelines::new(&gpu.device, gpu.target_format));
+                    self.injected = Some((
+                        provider.clone(),
+                        Rc::new(ViewportCommon {
+                            gpu,
+                            scene,
+                            pipes,
+                        }),
+                    ));
+                }
+                self.injected
+                    .as_ref()
+                    .map(|(_, c)| c.clone())
+                    .expect("just built")
+            }
+            None => match demo_viewport(window) {
+                Some(c) => c,
+                None => {
+                    crate::paint_placeholder(window, bounds);
+                    return;
+                }
+            },
         };
 
         #[cfg(any(target_family = "wasm", target_os = "windows"))]
@@ -414,12 +462,18 @@ fn device_size(bounds: &Bounds<Pixels>, scale: f32) -> (u32, u32) {
     (w.min(4096), h.min(4096))
 }
 
+/// 产品场景提供者：每次 paint 调用，返回注入场景（`None` → 占位符）。
+/// 实现方自缓存（按内容身份判定重建），返回 `Rc` 保证与注入缓存指针
+/// 同一性对比成立（避免每帧重建上传缓冲）。
+pub type SceneProvider = dyn Fn(&wgpu::Device) -> Option<Rc<Scene>>;
+
 /// A GPU viewport view instance (central tab content).
-struct GpuViewportView {
+pub struct GpuViewportView {
     kind: ViewKind,
     type_id: &'static str,
     title: &'static str,
     inner: Rc<RefCell<GpuViewportInner>>,
+    scene_provider: Option<Rc<SceneProvider>>,
 }
 
 impl GpuViewportView {
@@ -437,6 +491,24 @@ impl GpuViewportView {
             type_id,
             title,
             inner: Rc::new(RefCell::new(GpuViewportInner::new())),
+            scene_provider: None,
+        }
+    }
+
+    /// 产品注入场景的 3D 轨道视口（注入 API）：`type_id`/`title` 由产品
+    /// 指定；`scene_provider` 每次 paint 调用（实现方自缓存），`None` 时
+    /// 显示占位符。相机交互（轨道/平移/缩放）复用框架实现。
+    pub fn new3d_with_scene(
+        type_id: &'static str,
+        title: &'static str,
+        scene_provider: Rc<SceneProvider>,
+    ) -> Self {
+        Self {
+            kind: ViewKind::Orbit3d,
+            type_id,
+            title,
+            inner: Rc::new(RefCell::new(GpuViewportInner::new())),
+            scene_provider: Some(scene_provider),
         }
     }
 }
@@ -454,6 +526,7 @@ impl wb::ViewInstance for GpuViewportView {
         let element: AnyElement = GpuViewportElement {
             kind: self.kind,
             inner: self.inner.clone(),
+            scene_provider: self.scene_provider.clone(),
         }
         .into_any_element();
         Some(Box::new(element))
@@ -467,6 +540,7 @@ impl wb::ViewInstance for GpuViewportView {
 struct GpuViewportElement {
     kind: ViewKind,
     inner: Rc<RefCell<GpuViewportInner>>,
+    scene_provider: Option<Rc<SceneProvider>>,
 }
 
 impl IntoElement for GpuViewportElement {
@@ -522,7 +596,10 @@ impl Element for GpuViewportElement {
         _cx: &mut App,
     ) {
         self.register_input(window, bounds);
-        self.inner.borrow_mut().paint_into(self.kind, window, bounds);
+        let provider = self.scene_provider.clone();
+        self.inner
+            .borrow_mut()
+            .paint_into(self.kind, provider, window, bounds);
     }
 }
 
