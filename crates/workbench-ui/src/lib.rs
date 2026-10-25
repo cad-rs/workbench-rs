@@ -323,7 +323,13 @@ fn view_canvas(
 
     // The view reads the host while building its element tree, so the model
     // lock is held for the duration of `element`; the published dispatcher lets
-    // its event handlers reach the same runtime.
+    // its event handlers reach the same runtime. Published per frame and kept
+    // until the next frame's publish (round-191: clearing it here made every
+    // view-content button dead — gpui fires click handlers between frames,
+    // after the clear, so wb::dispatch silently failed with
+    // "视图元素不在渲染上下文中"). The handle points at the same live runtime
+    // the view was built from; a new frame always replaces it before any
+    // further handler runs.
     let element = {
         let Ok(mut guard) = core.lock() else {
             return slot_placeholder();
@@ -336,7 +342,6 @@ fn view_canvas(
         let built = instance
             .borrow_mut()
             .element(&mut *guard as &mut dyn wb::AppServices);
-        wb::clear_dispatcher();
         built
     };
 
