@@ -70,6 +70,14 @@ pub(in crate::wgpu_renderer) fn draw_customs(
         }
         pass.set_scissor_rect(clip.0, clip.1, clip.2, clip.3);
         (draw.draw)(&mut *pass, &CustomDrawEnv { clip, ..env.clone() });
+        // 恢复帧不变量：回调可能重绑组 0 / 换 scissor，而 gpui 的绘制只在
+        // pass 开始时绑一次 globals、帧内不重绑——不恢复则后续所有绘制
+        // 拿着回调的 bind group 撞自己的管线（校验错误、绘制全灭）。
+        pass.set_bind_group(
+            gpui_render::shaders::interface::GLOBAL_BIND_GROUP,
+            &resources.globals_bind_group,
+            &[],
+        );
     }
     Ok(())
 }
