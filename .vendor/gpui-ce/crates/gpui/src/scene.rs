@@ -1187,6 +1187,7 @@ impl From<PaintSurface> for Primitive {
 /// support skip the primitive with a log line — the same contract as
 /// `SurfaceSource::Texture` on non-wgpu renderers.
 #[derive(Clone)]
+#[allow(missing_docs)]
 pub struct PaintCustom {
     pub order: DrawOrder,
     pub bounds: Bounds<ScaledPixels>,
