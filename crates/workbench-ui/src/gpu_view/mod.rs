@@ -17,6 +17,10 @@ mod gpu;
 // 注入轨道视口；camera 仍由框架驱动（Orbit3d 交互复用）。
 pub mod mesh;
 pub mod scene;
+// 通用视口宿主 Element（workbench-render 渲染核心的壳：裸输入转发 +
+// surface/readback 双路径；产品递 RenderScene + 基准视角）。
+pub mod host;
+pub use host::RenderViewportElement;
 
 use std::cell::RefCell;
 use std::rc::Rc;
