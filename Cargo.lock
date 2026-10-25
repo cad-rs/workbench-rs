@@ -8244,6 +8244,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "workbench-render"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "pollster 0.4.0",
+ "wgpu",
+]
+
+[[package]]
 name = "workbench-rhai"
 version = "0.1.0"
 dependencies = [
@@ -8278,6 +8287,7 @@ dependencies = [
  "workbench-api",
  "workbench-core",
  "workbench-example",
+ "workbench-render",
 ]
 
 [[package]]

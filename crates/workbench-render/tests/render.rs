@@ -1,0 +1,258 @@
+//! workbench-render 渲染核心测试（headless——无窗口跑 GPU 管线；无可用
+//! 适配器的环境静默跳过）。渲染核心的设备由宿主递入（生产契约）：测试
+//! 自建本地设备，`render_readback` 回读位图断言像素。
+
+use workbench_render::{
+    CamOffset, LineVertexGpu, OrthoCamera, RenderScene, RenderVertex, Renderer,
+    cam_offset_for_test, reset_cam_offset,
+};
+
+/// 自建本地 headless 设备 + 渲染器（等价生产壳递共享设备的契约）。
+fn headless_renderer() -> Option<Renderer> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::LowPower,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .ok()?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("wb-render-test"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::default(),
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        memory_hints: Default::default(),
+        trace: wgpu::Trace::Off,
+    }))
+    .ok()?;
+    Some(Renderer::new(device, queue, wgpu::TextureFormat::Bgra8Unorm))
+}
+
+fn cam() -> OrthoCamera {
+    // 俯视（相机在 +z 上方）：正对 x-y 平面的被测几何。
+    OrthoCamera {
+        yaw_deg: 0.0,
+        pitch_deg: 90.0,
+        center: [0.0, 0.0, 0.0],
+        radius: 1.0,
+    }
+}
+
+/// 红色三角形占满视口中心：中心像素红色、角落背景色；尺寸/padding 去除。
+#[test]
+fn renders_triangle_headless() {
+    let Some(mut r) = headless_renderer() else {
+        eprintln!("skip: 无可用 wgpu 适配器");
+        return;
+    };
+    let red = [1.0, 0.0, 0.0];
+    let v = |x: f32, y: f32| RenderVertex {
+        pos: [x, y, 0.0],
+        normal: [0.0, 0.0, 1.0],
+        color: red,
+    };
+    let scene = RenderScene {
+        // 中等三角形（NDC ±0.42）：中心在内、四角在外。
+        tris: vec![v(-0.5, -0.5), v(0.5, -0.5), v(0.0, 0.5)],
+        lines: vec![],
+        camera: cam(),
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: 1.5,
+    };
+    let (w, h) = (64u32, 64u32);
+    let bytes = r.render_readback(&scene, w, h).expect("render");
+    assert_eq!(bytes.len(), (w * h * 4) as usize, "no row padding");
+    // readback 是 BGRA（纹理 Bgra8Unorm，与 gpui RenderImage 对齐）。
+    let px = |x: u32, y: u32| {
+        let i = ((y * w + x) * 4) as usize;
+        (bytes[i + 2], bytes[i + 1], bytes[i]) // (R, G, B)
+    };
+    let (r_, g, b) = px(32, 32);
+    // 头灯明暗：法线正对相机 → shade ≈ 1.0，红色近满。
+    assert!(r_ > 150, "center red, got {r_} {g} {b}");
+    assert!(g < 60 && b < 60, "center not green/blue");
+    // 角落在三角形外（顶点 (0,2) 只到屏幕上缘中部）→ 背景。
+    let (br, bg, bb) = px(2, 2);
+    assert!(br < 30 && bg < 30 && bb < 30, "corner bg, got {br} {bg} {bb}");
+    // MSAA 4x：斜边必有半覆盖像素（红与背景的混合）——抗锯齿生效。
+    let mixed = (0..(w * h) as usize)
+        .filter(|&i| {
+            let r = bytes[i * 4 + 2];
+            r > 1 && r < 254 && bytes[i * 4 + 1] < 60
+        })
+        .count();
+    assert!(mixed > 0, "MSAA blends edge pixels, got {mixed} mixed");
+}
+
+/// 线段管线：pitch=90 俯视下 x 轴线段 → 屏幕竖线（right=+y → x_screen 恒
+/// 中列；线长 ±1.5 超出半高 1.2 → 贯穿全屏）——列 32 各行绿、列 2 无绿。
+/// 1.5px 展开四边形跨列 31/32 各 75% 覆盖（MSAA 解析后 g≈191）。
+#[test]
+fn renders_line_headless() {
+    let Some(mut r) = headless_renderer() else {
+        eprintln!("skip: 无可用 wgpu 适配器");
+        return;
+    };
+    let lv = |x: f32| LineVertexGpu {
+        pos: [x, 0.0, 0.0],
+        color: [0.0, 1.0, 0.0],
+    };
+    let scene = RenderScene {
+        tris: vec![],
+        lines: vec![lv(-1.5), lv(1.5)],
+        camera: cam(),
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: 1.5,
+    };
+    let (w, h) = (64u32, 64u32);
+    let bytes = r.render_readback(&scene, w, h).expect("render");
+    // 列 c 的绿像素数（竖线判定）。
+    let green_in_column = |c: usize| -> usize {
+        (0..h as usize)
+            .filter(|&y| bytes[(y * w as usize + c) * 4 + 1] > 100)
+            .count()
+    };
+    // 竖线在视口正中（NDC x=0 恰在像素 31/32 边界，1.5px 宽跨两列各
+    // 75%）；旁列零。
+    let n_mid = green_in_column(31) + green_in_column(32);
+    assert!(n_mid > 30, "center column has the line, got {n_mid}");
+    assert_eq!(green_in_column(2), 0, "side column stays background");
+}
+
+/// 屏幕空间线宽：8px 线段四边形在 64px 与 128px 视口下均保持 8 列物理
+/// 厚度（px 语义而非 NDC 拉伸——分辨率加倍厚度不变）。
+#[test]
+fn line_screen_space_width_headless() {
+    let Some(mut r) = headless_renderer() else {
+        eprintln!("skip: 无可用 wgpu 适配器");
+        return;
+    };
+    let scene = |width: f32| RenderScene {
+        tris: vec![],
+        lines: vec![
+            LineVertexGpu { pos: [-1.5, 0.0, 0.0], color: [0.0, 1.0, 0.0] },
+            LineVertexGpu { pos: [1.5, 0.0, 0.0], color: [0.0, 1.0, 0.0] },
+        ],
+        camera: cam(),
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: width,
+    };
+    // 64px：NDC x=0 在像素 31/32 边界，8px 宽 → 列 28..35 覆盖。
+    let bytes = r.render_readback(&scene(8.0), 64, 64).expect("render 64");
+    let col64 = |bytes: &[u8], x: usize| {
+        (0..64usize)
+            .filter(|&y| bytes[(y * 64 + x) * 4 + 1] > 100)
+            .count()
+    };
+    for c in [30usize, 33] {
+        assert!(col64(&bytes, c) > 50, "64px: col {c} inside thick line");
+    }
+    assert_eq!(col64(&bytes, 24), 0, "64px: outside band background");
+    // 128px：中心在 63/64 边界，仍 8 物理像素 → 列 60..67。
+    let bytes = r.render_readback(&scene(8.0), 128, 128).expect("render 128");
+    let col128 = |x: usize| {
+        (0..128usize)
+            .filter(|&y| bytes[(y * 128 + x) * 4 + 1] > 100)
+            .count()
+    };
+    for c in [62usize, 65] {
+        assert!(col128(c) > 100, "128px: col {c} inside thick line");
+    }
+    assert_eq!(col128(50), 0, "128px: outside band background");
+}
+
+/// 线段深度正确性：四边形角点深度按段参数线性插值——不透明墙遮挡墙后
+/// 部分；斜穿深度分界的线段「墙后隐、墙前显」（角点插值错则分界错位）。
+#[test]
+fn line_depth_occlusion_headless() {
+    let Some(mut r) = headless_renderer() else {
+        eprintln!("skip: 无可用 wgpu 适配器");
+        return;
+    };
+    // 「前」视（yaw 0 pitch 0）：视线沿 -x，屏幕右 = +y，深度 = 世界 x
+    // （越大越近相机）。
+    let cam = OrthoCamera {
+        yaw_deg: 0.0,
+        pitch_deg: 0.0,
+        center: [0.0, 0.0, 0.0],
+        radius: 1.0,
+    };
+    let rv = |x: f32, y: f32, z: f32| RenderVertex {
+        pos: [x, y, z],
+        normal: [1.0, 0.0, 0.0],
+        color: [1.0, 0.0, 0.0],
+    };
+    // 覆盖全视口的红墙（±3 覆盖 NDC ±1.2），位于给定深度 x。
+    let wall = |x: f32| vec![rv(x, -3.0, -3.0), rv(x, 3.0, -3.0), rv(x, 0.0, 3.0)];
+    let lv = |x: f32, y: f32| LineVertexGpu {
+        pos: [x, y, 0.0],
+        color: [0.0, 1.0, 0.0],
+    };
+    let greens = |bytes: &[u8]| {
+        (0..(64 * 64) as usize)
+            .filter(|&i| bytes[i * 4 + 1] > 100)
+            .count()
+    };
+    // 场景 A：线整体在墙后（x=-0.5 恒 < 0）→ 全帧无绿。
+    let behind = RenderScene {
+        tris: wall(0.0),
+        lines: vec![lv(-0.5, -1.5), lv(-0.5, 1.5)],
+        camera: cam,
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: 4.0,
+    };
+    let bytes = r.render_readback(&behind, 64, 64).expect("render behind");
+    assert_eq!(greens(&bytes), 0, "line fully behind the wall is occluded");
+    // 场景 B：线斜穿深度（t=0 端 x=-1 在墙后、t=1 端 x=+1 在墙前），
+    // 墙 x=0.3 → 深度分界在段参数 0.65（列 ≈44）；其右可见、其左被墙
+    // 挡住。若角点深度未按 t 插值（整段取端点深度），分界会错到全隐。
+    let crossing = RenderScene {
+        tris: wall(0.3),
+        lines: vec![lv(-1.0, -1.5), lv(1.0, 1.5)],
+        camera: cam,
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: 4.0,
+    };
+    let bytes = r.render_readback(&crossing, 64, 64).expect("render crossing");
+    let col = |x: usize| {
+        (0..64usize)
+            .filter(|&y| bytes[(y * 64 + x) * 4 + 1] > 100)
+            .count()
+    };
+    assert_eq!(col(10), 0, "behind-wall part occluded");
+    assert!(col(52) > 0, "in-front part visible through wall zone");
+    // 墙未覆盖的右缘（列 61+，NDC x > 0.833）线也可见。
+    assert!(col(62) > 0, "beyond wall edge visible");
+}
+
+/// 交互相机偏移：轨道累加（度/像素）、缩放乘子 clamp、重置。
+#[test]
+fn cam_offset_semantics() {
+    let mut c = CamOffset::default();
+    assert_eq!((c.yaw, c.pitch, c.zoom), (0.0, 0.0, 1.0));
+    c.orbit_by(100.0, -50.0);
+    assert_eq!((c.yaw, c.pitch), (40.0, -20.0), "0.4°/px");
+    c.zoom_by(0.5);
+    c.zoom_by(0.5);
+    c.zoom_by(0.5);
+    c.zoom_by(0.5); // 1.0 × 0.5⁴ = 0.0625 → clamp 0.15
+    assert!((c.zoom - 0.15).abs() < 1e-12, "zoom floor");
+    c.zoom_by(8.0);
+    c.zoom_by(8.0); // 0.15 × 64 = 9.6 → clamp 6.0
+    assert!((c.zoom - 6.0).abs() < 1e-12, "zoom ceiling");
+    // 重置语义（视角预设按钮）。
+    reset_cam_offset();
+    assert_eq!(cam_offset_for_test(), CamOffset::default());
+    // 平移累计与 clamp（±4000px 防迷失）。
+    let mut c = CamOffset::default();
+    c.pan_by(100.0, -200.0);
+    assert_eq!(c.pan, [100.0, -200.0]);
+    c.pan_by(9000.0, -9000.0);
+    assert_eq!(c.pan, [4000.0, -4000.0], "pan clamps");
+}
+
+/// 适配器诊断信息可取得（无 GPU 环境为 None，不 panic）。
+#[test]
+fn adapter_info_does_not_panic() {
+    let _ = workbench_render::adapter_info();
+}
