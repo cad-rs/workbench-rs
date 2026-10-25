@@ -570,8 +570,13 @@ impl Element for GpuViewportElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        // No children: the viewport fills whatever its parent gives it.
-        (window.request_layout(Style::default(), [], cx), ())
+        // 自绘 Element 必须显式满尺寸：auto 尺寸在 flex 容器里得 0 高，
+        // paint 空转（实测视口 900×1 全黑；同 mulphy round-182 e070835 教训）。
+        let style = Style {
+            size: gpui::Size::full(),
+            ..Default::default()
+        };
+        (window.request_layout(style, [], cx), ())
     }
 
     fn prepaint(
