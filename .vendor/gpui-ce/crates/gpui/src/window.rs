@@ -5001,6 +5001,35 @@ impl Window {
         );
     }
 
+    /// Paint a backend-specific custom draw into the scene for the next
+    /// frame at the current z-index.
+    ///
+    /// The payload is type-erased (`Arc<dyn Any + Send + Sync>`); the wgpu
+    /// backend downcasts it to `gpui_wgpu::CustomDraw` and executes the
+    /// callback inside the main render pass, in draw order, with this
+    /// primitive's clip rect applied as scissor. Backends without support
+    /// skip it with a log line.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_custom(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        data: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    ) {
+        use crate::PaintCustom;
+
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintCustom {
+            order: 0,
+            bounds,
+            content_mask,
+            data,
+        });
+    }
+
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
         for frame_index in 0..data.frame_count() {

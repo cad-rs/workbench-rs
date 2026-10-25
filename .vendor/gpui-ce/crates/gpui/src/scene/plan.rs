@@ -183,6 +183,9 @@ impl ScenePlanRequirements {
                 self.instance_batch_count += usize::from(!range.is_empty());
             }
             PrimitiveBatch::Surfaces(range) => self.surface_count += range.len(),
+            // Custom draws manage their own GPU resources; the renderer
+            // preallocates nothing for them.
+            PrimitiveBatch::Custom(_) => {}
             PrimitiveBatch::BackdropFilters(range) => {
                 self.backdrop_filter_count += range.len();
                 self.uses_offscreen_target |= !range.is_empty();
@@ -204,6 +207,7 @@ struct SceneLengths {
     subpixel_sprites: usize,
     polychrome_sprites: usize,
     surfaces: usize,
+    customs: usize,
     backdrop_filters: usize,
     filter_boundaries: usize,
 }
@@ -219,6 +223,7 @@ impl SceneLengths {
             subpixel_sprites: scene.subpixel_sprites.len(),
             polychrome_sprites: scene.polychrome_sprites.len(),
             surfaces: scene.surfaces.len(),
+            customs: scene.customs.len(),
             backdrop_filters: scene.backdrop_filters.len(),
             filter_boundaries: scene.filter_boundaries.len(),
         }
@@ -257,6 +262,9 @@ pub enum PrimitiveBatch {
         smoothed: bool,
     },
     Surfaces(Range<usize>),
+    /// Backend-specific custom draws (see `PaintCustom`); executed inline in
+    /// the main pass by the wgpu backend, skipped elsewhere.
+    Custom(Range<usize>),
     BackdropFilters(Range<usize>),
     FilterBoundary(usize),
 }
@@ -352,6 +360,7 @@ impl PrimitiveBatch {
                 texture_id.index
             ),
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
+            Self::Custom(range) => format!("custom draws ({})", range.len()),
             Self::BackdropFilters(range) => format!("backdrop filters ({})", range.len()),
             Self::FilterBoundary(index) => format!("filter boundary ({index})"),
         }

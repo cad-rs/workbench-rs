@@ -291,6 +291,7 @@ impl FrameRequirements {
                 }
                 PrimitiveBatch::Paths { .. }
                 | PrimitiveBatch::Surfaces(_)
+                | PrimitiveBatch::Custom(_)
                 | PrimitiveBatch::BackdropFilters(_)
                 | PrimitiveBatch::FilterBoundary(_) => {}
             }
@@ -617,6 +618,9 @@ fn encode_inline_batch(
             &scene.surface_opacities()[range.clone()],
             pass,
         ),
+        PrimitiveBatch::Custom(range) => {
+            super::customs::draw_customs(renderer, &scene.customs[range.clone()], pass)
+        }
         PrimitiveBatch::Paths { .. }
         | PrimitiveBatch::BackdropFilters(_)
         | PrimitiveBatch::FilterBoundary(_) => {

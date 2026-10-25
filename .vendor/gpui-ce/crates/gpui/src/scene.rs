@@ -72,6 +72,7 @@ pub struct Scene {
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
     surface_opacities: Vec<f32>,
+    pub customs: Vec<PaintCustom>,
     pub backdrop_filters: Vec<BackdropFilter>,
     pub filter_boundaries: Vec<FilterBoundary>,
     render_plan: ScenePlan,
@@ -93,6 +94,7 @@ impl Scene {
         self.polychrome_sprites.clear();
         self.surfaces.clear();
         self.surface_opacities.clear();
+        self.customs.clear();
         self.backdrop_filters.clear();
         self.filter_boundaries.clear();
         self.render_plan.clear();
@@ -211,6 +213,10 @@ impl Scene {
                 self.surfaces.push(surface.clone());
                 self.surface_opacities.push(surface_opacity.unwrap_or(1.0));
             }
+            Primitive::Custom(custom) => {
+                custom.order = order;
+                self.customs.push(custom.clone());
+            }
             Primitive::BackdropFilter(filter) => {
                 filter.order = order;
                 self.backdrop_filters.push(filter.clone());
@@ -276,6 +282,7 @@ impl Scene {
             surfaces_with_opacity.into_iter().unzip();
         self.surfaces = surfaces;
         self.surface_opacities = surface_opacities;
+        self.customs.sort_by_key(|custom| custom.order);
         self.backdrop_filters.sort_by_key(|filter| filter.order);
         // Markers normally get distinct, monotonically-increasing orders (children overlap
         // their group bounds and so sort strictly between the start and end). The `!is_start`
@@ -390,6 +397,7 @@ pub(crate) enum PrimitiveKind {
     SubpixelSprite,
     PolychromeSprite,
     Surface,
+    Custom,
     BackdropFilter,
     // Highest discriminant: at an equal order, a group-end is emitted after the group's content
     // so the renderer composites the filtered group only once every child has been drawn.
@@ -414,6 +422,11 @@ pub enum Primitive {
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
+    /// Backend-specific custom draw: the payload is type-erased here; the
+    /// wgpu backend downcasts it to `gpui_wgpu::CustomDraw` and executes it
+    /// inside the main render pass, in draw order. Backends without support
+    /// skip the primitive with a log line.
+    Custom(PaintCustom),
     BackdropFilter(BackdropFilter),
     FilterBoundary(FilterBoundary),
 }
@@ -430,6 +443,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
+            Primitive::Custom(custom) => &custom.bounds,
             Primitive::BackdropFilter(filter) => &filter.bounds,
             Primitive::FilterBoundary(boundary) => &boundary.bounds,
         }
@@ -445,6 +459,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
+            Primitive::Custom(custom) => &custom.content_mask,
             Primitive::BackdropFilter(filter) => &filter.content_mask,
             Primitive::FilterBoundary(boundary) => &boundary.content_mask,
         }
@@ -476,6 +491,8 @@ struct BatchIterator<'a> {
     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
     surfaces_start: usize,
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
+    customs_start: usize,
+    customs_iter: Peekable<slice::Iter<'a, PaintCustom>>,
     backdrop_filters_start: usize,
     backdrop_filters_iter: Peekable<slice::Iter<'a, BackdropFilter>>,
     filter_boundaries_start: usize,
@@ -502,6 +519,8 @@ impl<'a> BatchIterator<'a> {
             polychrome_sprites_iter: scene.polychrome_sprites.iter().peekable(),
             surfaces_start: 0,
             surfaces_iter: scene.surfaces.iter().peekable(),
+            customs_start: 0,
+            customs_iter: scene.customs.iter().peekable(),
             backdrop_filters_start: 0,
             backdrop_filters_iter: scene.backdrop_filters.iter().peekable(),
             filter_boundaries_start: 0,
@@ -552,6 +571,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.surfaces_iter.peek().map(|s| s.order),
                 PrimitiveKind::Surface,
+            ),
+            (
+                self.customs_iter.peek().map(|c| c.order),
+                PrimitiveKind::Custom,
             ),
             (
                 self.backdrop_filters_iter.peek().map(|f| f.order),
@@ -758,6 +781,22 @@ impl<'a> Iterator for BatchIterator<'a> {
                 }
                 self.surfaces_start = surfaces_end;
                 Some(PrimitiveBatch::Surfaces(surfaces_start..surfaces_end))
+            }
+            PrimitiveKind::Custom => {
+                let customs_start = self.customs_start;
+                let mut customs_end = customs_start + 1;
+                self.customs_iter.next();
+                while self
+                    .customs_iter
+                    .next_if(|custom| {
+                        precedes_limit(custom.order, batch_kind, max_order_and_kind)
+                    })
+                    .is_some()
+                {
+                    customs_end += 1;
+                }
+                self.customs_start = customs_end;
+                Some(PrimitiveBatch::Custom(customs_start..customs_end))
             }
             PrimitiveKind::BackdropFilter => {
                 let backdrop_filters_start = self.backdrop_filters_start;
@@ -1135,6 +1174,40 @@ pub struct PaintSurface {
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {
         Primitive::Surface(surface)
+    }
+}
+
+/// A backend-specific custom draw, inserted via [`Window::paint_custom`].
+///
+/// The payload is deliberately type-erased: gpui carries it opaquely, and
+/// each GPU backend decides what it can execute. The wgpu backend
+/// (`gpui_wgpu`) downcasts `data` to its own [`CustomDraw`](https://docs.rs)
+/// payload and runs the callback inside the main render pass, in draw order
+/// with the primitive's clip rect applied as scissor. Backends without
+/// support skip the primitive with a log line — the same contract as
+/// `SurfaceSource::Texture` on non-wgpu renderers.
+#[derive(Clone)]
+pub struct PaintCustom {
+    pub order: DrawOrder,
+    pub bounds: Bounds<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
+    /// Type-erased draw payload (wgpu backend: `Arc<gpui_wgpu::CustomDraw>`).
+    pub data: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl std::fmt::Debug for PaintCustom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PaintCustom")
+            .field("order", &self.order)
+            .field("bounds", &self.bounds)
+            .field("content_mask", &self.content_mask)
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<PaintCustom> for Primitive {
+    fn from(custom: PaintCustom) -> Self {
+        Primitive::Custom(custom)
     }
 }
 
