@@ -55,6 +55,7 @@ fn renders_triangle_headless() {
         // 中等三角形（NDC ±0.42）：中心在内、四角在外。
         tris: vec![v(-0.5, -0.5), v(0.5, -0.5), v(0.0, 0.5)],
         tris_alpha: vec![],
+        sort_alpha: false,
         lines: vec![],
         camera: cam(),
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -101,6 +102,7 @@ fn renders_line_headless() {
     let scene = RenderScene {
         tris: vec![],
         tris_alpha: vec![],
+        sort_alpha: false,
         lines: vec![lv(-1.5), lv(1.5)],
         camera: cam(),
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -132,6 +134,7 @@ fn line_screen_space_width_headless() {
     let scene = |width: f32| RenderScene {
         tris: vec![],
         tris_alpha: vec![],
+        sort_alpha: false,
         lines: vec![
             LineVertexGpu { pos: [-1.5, 0.0, 0.0], color: [0.0, 1.0, 0.0, 1.0] },
             LineVertexGpu { pos: [1.5, 0.0, 0.0], color: [0.0, 1.0, 0.0, 1.0] },
@@ -199,6 +202,7 @@ fn line_depth_occlusion_headless() {
     // 场景 A：线整体在墙后（x=-0.5 恒 < 0）→ 全帧无绿。
     let behind = RenderScene {
         tris_alpha: vec![],
+        sort_alpha: false,
         tris: wall(0.0),
         lines: vec![lv(-0.5, -1.5), lv(-0.5, 1.5)],
         camera: cam,
@@ -212,6 +216,7 @@ fn line_depth_occlusion_headless() {
     // 挡住。若角点深度未按 t 插值（整段取端点深度），分界会错到全隐。
     let crossing = RenderScene {
         tris_alpha: vec![],
+        sort_alpha: false,
         tris: wall(0.3),
         lines: vec![lv(-1.0, -1.5), lv(1.0, 1.5)],
         camera: cam,
@@ -262,6 +267,128 @@ fn adapter_info_does_not_panic() {
     let _ = workbench_render::adapter_info();
 }
 
+/// 透明桶质心排序（round-206 P1，`sort_alpha` 声明式开关）：①开关关 =
+/// P0 语义——数组序 = 混合序，近面先声明时被远面主导（组内 artifact
+/// 实测编码：中心 b=128 ≈ 近绿 g=64 两倍，theory (64,64,128)）；②开关
+/// 开 = 质心 far-to-near 重排，近面后画主导（(63,128,64)）；③声明序互
+/// 换后逐字节一致——排序消灭声明序语义（凸双三角排序正确性强断言）。
+/// 前视（yaw 0 pitch 0）：深度 = 世界 x，越大越近相机。
+#[test]
+fn alpha_centroid_sort_headless() {
+    let Some(mut r) = headless_renderer() else {
+        eprintln!("skip: 无可用 wgpu 适配器");
+        return;
+    };
+    let cam = OrthoCamera {
+        yaw_deg: 0.0,
+        pitch_deg: 0.0,
+        center: [0.0, 0.0, 0.0],
+        radius: 1.0,
+    };
+    const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+    const GREEN05: [f32; 4] = [0.0, 1.0, 0.0, 0.5];
+    const BLUE05: [f32; 4] = [0.0, 0.0, 1.0, 0.5];
+    let rv = |x: f32, y: f32, z: f32, c: [f32; 4]| RenderVertex {
+        pos: [x, y, z],
+        normal: [1.0, 0.0, 0.0],
+        color: c,
+    };
+    let wall = |x: f32| vec![rv(x, -3.0, -3.0, RED), rv(x, 3.0, -3.0, RED), rv(x, 0.0, 3.0, RED)];
+    let tq = |x: f32, c: [f32; 4]| {
+        vec![rv(x, -0.5, -0.5, c), rv(x, 0.5, -0.5, c), rv(x, 0.0, 0.5, c)]
+    };
+    let px = |bytes: &[u8]| {
+        let i = ((32 * 64 + 32) * 4) as usize;
+        (bytes[i + 2], bytes[i + 1], bytes[i])
+    };
+    // 近绿（x=0.5）先声明、远蓝（x=0.25）后声明 vs 互换。红墙 x=0 在两
+    // 支透明面之后（只读深不剔除墙前混合）。
+    let near_first = [tq(0.5, GREEN05), tq(0.25, BLUE05)].concat();
+    let far_first = [tq(0.25, BLUE05), tq(0.5, GREEN05)].concat();
+    let base = |tris_alpha: Vec<RenderVertex>, sort_alpha: bool| RenderScene {
+        tris: wall(0.0),
+        tris_alpha,
+        sort_alpha,
+        lines: vec![],
+        camera: cam,
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: 1.0,
+    };
+    // ① 开关关：远蓝主导（P0 组内 artifact 的框架级语义编码）。
+    let bytes_a = r
+        .render_readback(&base(near_first.clone(), false), 64, 64)
+        .expect("render off");
+    let (ar, ag, ab) = px(&bytes_a);
+    assert!(
+        ab > 100 && ab > ag,
+        "off: later-declared far blue dominates: {ar} {ag} {ab}"
+    );
+    // ② 开关开（同一声明序）：重排后近绿后画主导。
+    let bytes_b = r
+        .render_readback(&base(near_first.clone(), true), 64, 64)
+        .expect("render on");
+    let (br, bg, bb) = px(&bytes_b);
+    assert!(
+        bg > 100 && bg > bb,
+        "on: near green dominates after sort: {br} {bg} {bb}"
+    );
+    // ③ 声明序互换 + 排序开：输出逐字节一致（最终顶点序相同）。
+    let bytes_c = r
+        .render_readback(&base(far_first, true), 64, 64)
+        .expect("render on swapped");
+    assert_eq!(bytes_b, bytes_c, "sorted output independent of declaration order");
+}
+
+/// 质心排序纯逻辑（无 GPU，无适配器环境也跑）：距离降序重排、等距
+/// stable（保声明序）、开关关/单三角返回 None。「前」视相机眼点在
+/// center + (3r, 0, 0)。
+#[test]
+fn alpha_centroid_sort_helper_pure() {
+    let v = |x: f32, tag: f32| RenderVertex {
+        pos: [x, 0.0, 0.0],
+        normal: [1.0, 0.0, 0.0],
+        color: [tag, 0.0, 0.0, 0.5],
+    };
+    let cam = OrthoCamera {
+        yaw_deg: 0.0,
+        pitch_deg: 0.0,
+        center: [0.0, 0.0, 0.0],
+        radius: 1.0,
+    };
+    let mut scene = RenderScene {
+        tris: vec![],
+        // 质心 x = 1 / 3 / 2 → 眼点 (3,0,0)，距离升序 = x 降序 → 远的先画。
+        tris_alpha: vec![
+            v(1.0, 0.1), v(1.0, 0.1), v(1.0, 0.1), // t0: 最远
+            v(3.0, 0.3), v(3.0, 0.3), v(3.0, 0.3), // t1: 最近
+            v(2.0, 0.2), v(2.0, 0.2), v(2.0, 0.2), // t2: 中间
+        ],
+        sort_alpha: true,
+        lines: vec![],
+        camera: cam,
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: 1.0,
+    };
+    let sorted = scene.alpha_sorted().expect("sorted");
+    assert_eq!(sorted[0].pos[0], 1.0, "farthest first");
+    assert_eq!(sorted[3].pos[0], 2.0, "middle second");
+    assert_eq!(sorted[6].pos[0], 3.0, "nearest last");
+    // 等距 stable：同 x 全组 → 声明序保持（tag 0.1..0.6 原序）。
+    scene.tris_alpha = (0..6).map(|k| v(1.0, 0.1 + k as f32 * 0.1)).collect();
+    let sorted = scene.alpha_sorted().unwrap();
+    for (k, vtx) in sorted.iter().enumerate() {
+        let expect = 0.1 + k as f32 * 0.1;
+        assert!((vtx.color[0] - expect).abs() < 1e-6, "stable order at {k}");
+    }
+    // 开关关 → None；单三角 → None（无可排序的顺序问题）。
+    scene.sort_alpha = false;
+    assert!(scene.alpha_sorted().is_none());
+    scene.sort_alpha = true;
+    scene.tris_alpha.truncate(3);
+    assert!(scene.alpha_sorted().is_none());
+}
+
+
 /// 透明桶（round-205 P0）：ALPHA_BLENDING + depth write OFF——①墙前透
 /// 明面正常混合（0.5 绿 over 红墙 → r≈g）；②墙后透明面被只读深剔除
 /// （像素保持墙色）；③同屏两支透明面按声明序混合（后声明者主导重叠
@@ -300,6 +427,7 @@ fn transparent_tris_blend_order_and_depth() {
     let s1 = RenderScene {
         tris: wall(0.0),
         tris_alpha: tq(0.5, GREEN05),
+        sort_alpha: false,
         lines: vec![],
         camera: cam,
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -315,6 +443,7 @@ fn transparent_tris_blend_order_and_depth() {
     let s2 = RenderScene {
         tris: wall(0.0),
         tris_alpha: tq(-0.5, BLUE05),
+        sort_alpha: false,
         lines: vec![],
         camera: cam,
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -329,6 +458,7 @@ fn transparent_tris_blend_order_and_depth() {
     let s3 = RenderScene {
         tris: wall(0.0),
         tris_alpha: [tq(0.5, GREEN05), tq(0.25, BLUE05)].concat(),
+        sort_alpha: false,
         lines: vec![],
         camera: cam,
         bg: [0.0, 0.0, 0.0, 1.0],

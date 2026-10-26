@@ -85,6 +85,14 @@ pub struct RenderScene {
     /// 品侧领域知识，桶内逐三角排序是 P1）。头灯着色照旧作用于 rgb，
     /// alpha 只承载透明度。
     pub tris_alpha: Vec<RenderVertex>,
+    /// 透明桶质心排序开关（round-206 P1）：true 时绘制前按三角形质心
+    /// 到相机距离 far-to-near 重排 `tris_alpha` 顶点（stable——等距保
+    /// 持声明序）。排序在 [`Renderer::render`] 内做：最终相机（视角预
+    /// 设 + 交互相机偏移）此刻已知，排序与最终视向一致——这是机械几
+    /// 何归框架、领域分组归产品的分层（诉求书 §6-5）。凸不交叉三角形
+    /// 下即正确混合序；交叉/凹形仍逐层近似（不承诺逐像素 OIT）。
+    /// false = P0 语义（数组序 = 混合序）。
+    pub sort_alpha: bool,
     /// 不透明线（保持）。
     pub lines: Vec<LineVertexGpu>,
     pub camera: OrthoCamera,
@@ -92,6 +100,44 @@ pub struct RenderScene {
     /// 屏幕空间线宽（px）：线段展开四边形的整体宽度，随视口分辨率
     /// 保持物理厚度不变。
     pub line_width_px: f32,
+}
+
+impl RenderScene {
+    /// 透明桶质心 far-to-near 排序（[`RenderScene::sort_alpha`] 开时的
+    /// 绘制前重排）：逐三角形质心到相机眼点距离降序（远的先画），键
+    /// 预计算 O(n) + stable sort——等距保持声明序（组级发射序的残余语
+    /// 义）。返回 None = 开关关或不足两个三角形（无可排序的顺序问题），
+    /// 调用方回落数组序。
+    pub fn alpha_sorted(&self) -> Option<Vec<RenderVertex>> {
+        if !self.sort_alpha || self.tris_alpha.len() < 6 {
+            return None;
+        }
+        let eye = eye_pos(&self.camera);
+        let n_tris = self.tris_alpha.len() / 3;
+        let centroid_d2 = |t: usize| -> f32 {
+            let v = &self.tris_alpha[t * 3..t * 3 + 3];
+            let d = [
+                (v[0].pos[0] + v[1].pos[0] + v[2].pos[0]) / 3.0 - eye[0],
+                (v[0].pos[1] + v[1].pos[1] + v[2].pos[1]) / 3.0 - eye[1],
+                (v[0].pos[2] + v[1].pos[2] + v[2].pos[2]) / 3.0 - eye[2],
+            ];
+            d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+        };
+        let mut order: Vec<(u32, f32)> = (0..n_tris as u32)
+            .map(|t| {
+                let t = t as usize;
+                (t as u32, centroid_d2(t))
+            })
+            .collect();
+        order.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Some(
+            order
+                .iter()
+                .flat_map(|&(t, _)| self.tris_alpha[t as usize * 3..t as usize * 3 + 3].iter())
+                .copied()
+                .collect(),
+        )
+    }
 }
 
 // ---- 交互相机（视口语义归属渲染核心；GUI 壳只转发裸输入） ----
@@ -230,6 +276,18 @@ fn mat_mul(a: &Mat4, b: &Mat4) -> Mat4 {
     o
 }
 
+/// 相机眼点（正交相机位于中心 + 视向 × 3r——`ortho_mvp` 与透明桶质心
+/// 排序共用，保证排序距离与投影视向同源）。
+fn eye_pos(cam: &OrthoCamera) -> [f32; 3] {
+    let (yaw, pitch) = (cam.yaw_deg.to_radians(), cam.pitch_deg.to_radians());
+    let d = [yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin()];
+    [
+        cam.center[0] + d[0] * cam.radius * 3.0,
+        cam.center[1] + d[1] * cam.radius * 3.0,
+        cam.center[2] + d[2] * cam.radius * 3.0,
+    ]
+}
+
 /// 正交 MVP（view-lookat + ortho；相机在 (0,0,3r) 看向中心，先转 yaw/pitch）。
 fn ortho_mvp(cam: &OrthoCamera, aspect: f32) -> Mat4 {
     let (yaw, pitch) = (cam.yaw_deg.to_radians(), cam.pitch_deg.to_radians());
@@ -238,11 +296,7 @@ fn ortho_mvp(cam: &OrthoCamera, aspect: f32) -> Mat4 {
     let d = [cp * cy, cp * sy, sp];
     let r = [-sy, cy, 0.0];
     let u = [-sp * cy, -sp * sy, cp];
-    let eye = [
-        cam.center[0] + d[0] * cam.radius * 3.0,
-        cam.center[1] + d[1] * cam.radius * 3.0,
-        cam.center[2] + d[2] * cam.radius * 3.0,
-    ];
+    let eye = eye_pos(cam);
     // view = [r; u; -d] 平移（行主序构造后转列主序）。
     let view_rows: [[f32; 4]; 4] = [
         [r[0], r[1], r[2], -(r[0] * eye[0] + r[1] * eye[1] + r[2] * eye[2])],
@@ -716,7 +770,12 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.tri_buf, 0, bytemuck::cast_slice(&scene.tris));
         }
-        let need_tri_alpha = (scene.tris_alpha.len() * size_of::<RenderVertex>()) as u64;
+        // 透明桶上传：`sort_alpha` 开 = 绘制前质心 far-to-near 重排（最
+        // 终相机此刻已知——交互相机偏移已叠加，排序与最终视向一致）；
+        // 关 = 数组序（P0 语义）。
+        let alpha_sorted = scene.alpha_sorted();
+        let alpha_src: &[RenderVertex] = alpha_sorted.as_deref().unwrap_or(&scene.tris_alpha);
+        let need_tri_alpha = size_of_val(alpha_src) as u64;
         if need_tri_alpha > self.tri_alpha_buf.size() {
             self.tri_alpha_buf = self
                 .device
@@ -727,12 +786,9 @@ impl Renderer {
                     mapped_at_creation: false,
                 });
         }
-        if !scene.tris_alpha.is_empty() {
-            self.queue.write_buffer(
-                &self.tri_alpha_buf,
-                0,
-                bytemuck::cast_slice(&scene.tris_alpha),
-            );
+        if !alpha_src.is_empty() {
+            self.queue
+                .write_buffer(&self.tri_alpha_buf, 0, bytemuck::cast_slice(alpha_src));
         }
         let need_line = (scene.lines.len() * size_of::<LineVertexGpu>()) as u64;
         if need_line > self.line_buf.size() {
