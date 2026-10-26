@@ -45,7 +45,7 @@ fn renders_triangle_headless() {
         eprintln!("skip: 无可用 wgpu 适配器");
         return;
     };
-    let red = [1.0, 0.0, 0.0];
+    let red = [1.0, 0.0, 0.0, 1.0];
     let v = |x: f32, y: f32| RenderVertex {
         pos: [x, y, 0.0],
         normal: [0.0, 0.0, 1.0],
@@ -54,6 +54,7 @@ fn renders_triangle_headless() {
     let scene = RenderScene {
         // 中等三角形（NDC ±0.42）：中心在内、四角在外。
         tris: vec![v(-0.5, -0.5), v(0.5, -0.5), v(0.0, 0.5)],
+        tris_alpha: vec![],
         lines: vec![],
         camera: cam(),
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -95,10 +96,11 @@ fn renders_line_headless() {
     };
     let lv = |x: f32| LineVertexGpu {
         pos: [x, 0.0, 0.0],
-        color: [0.0, 1.0, 0.0],
+        color: [0.0, 1.0, 0.0, 1.0],
     };
     let scene = RenderScene {
         tris: vec![],
+        tris_alpha: vec![],
         lines: vec![lv(-1.5), lv(1.5)],
         camera: cam(),
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -129,9 +131,10 @@ fn line_screen_space_width_headless() {
     };
     let scene = |width: f32| RenderScene {
         tris: vec![],
+        tris_alpha: vec![],
         lines: vec![
-            LineVertexGpu { pos: [-1.5, 0.0, 0.0], color: [0.0, 1.0, 0.0] },
-            LineVertexGpu { pos: [1.5, 0.0, 0.0], color: [0.0, 1.0, 0.0] },
+            LineVertexGpu { pos: [-1.5, 0.0, 0.0], color: [0.0, 1.0, 0.0, 1.0] },
+            LineVertexGpu { pos: [1.5, 0.0, 0.0], color: [0.0, 1.0, 0.0, 1.0] },
         ],
         camera: cam(),
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -180,13 +183,13 @@ fn line_depth_occlusion_headless() {
     let rv = |x: f32, y: f32, z: f32| RenderVertex {
         pos: [x, y, z],
         normal: [1.0, 0.0, 0.0],
-        color: [1.0, 0.0, 0.0],
+        color: [1.0, 0.0, 0.0, 1.0],
     };
     // 覆盖全视口的红墙（±3 覆盖 NDC ±1.2），位于给定深度 x。
     let wall = |x: f32| vec![rv(x, -3.0, -3.0), rv(x, 3.0, -3.0), rv(x, 0.0, 3.0)];
     let lv = |x: f32, y: f32| LineVertexGpu {
         pos: [x, y, 0.0],
-        color: [0.0, 1.0, 0.0],
+        color: [0.0, 1.0, 0.0, 1.0],
     };
     let greens = |bytes: &[u8]| {
         (0..(64 * 64) as usize)
@@ -195,6 +198,7 @@ fn line_depth_occlusion_headless() {
     };
     // 场景 A：线整体在墙后（x=-0.5 恒 < 0）→ 全帧无绿。
     let behind = RenderScene {
+        tris_alpha: vec![],
         tris: wall(0.0),
         lines: vec![lv(-0.5, -1.5), lv(-0.5, 1.5)],
         camera: cam,
@@ -207,6 +211,7 @@ fn line_depth_occlusion_headless() {
     // 墙 x=0.3 → 深度分界在段参数 0.65（列 ≈44）；其右可见、其左被墙
     // 挡住。若角点深度未按 t 插值（整段取端点深度），分界会错到全隐。
     let crossing = RenderScene {
+        tris_alpha: vec![],
         tris: wall(0.3),
         lines: vec![lv(-1.0, -1.5), lv(1.0, 1.5)],
         camera: cam,
@@ -255,4 +260,84 @@ fn cam_offset_semantics() {
 #[test]
 fn adapter_info_does_not_panic() {
     let _ = workbench_render::adapter_info();
+}
+
+/// 透明桶（round-205 P0）：ALPHA_BLENDING + depth write OFF——①墙前透
+/// 明面正常混合（0.5 绿 over 红墙 → r≈g）；②墙后透明面被只读深剔除
+/// （像素保持墙色）；③同屏两支透明面按声明序混合（后声明者主导重叠
+/// 区）。前视（yaw 0 pitch 0）：深度 = 世界 x，越大越近相机。
+#[test]
+fn transparent_tris_blend_order_and_depth() {
+    let Some(mut r) = headless_renderer() else {
+        eprintln!("skip: 无可用 wgpu 适配器");
+        return;
+    };
+    let cam = OrthoCamera {
+        yaw_deg: 0.0,
+        pitch_deg: 0.0,
+        center: [0.0, 0.0, 0.0],
+        radius: 1.0,
+    };
+    const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+    const GREEN05: [f32; 4] = [0.0, 1.0, 0.0, 0.5];
+    const BLUE05: [f32; 4] = [0.0, 0.0, 1.0, 0.5];
+    let rv = |x: f32, y: f32, z: f32, c: [f32; 4]| RenderVertex {
+        pos: [x, y, z],
+        normal: [1.0, 0.0, 0.0],
+        color: c,
+    };
+    // 红墙覆盖全视口（±3 覆盖 NDC ±1.2）；透明面覆盖视口中心区。
+    let wall = |x: f32| vec![rv(x, -3.0, -3.0, RED), rv(x, 3.0, -3.0, RED), rv(x, 0.0, 3.0, RED)];
+    let tq = |x: f32, c: [f32; 4]| {
+        vec![rv(x, -0.5, -0.5, c), rv(x, 0.5, -0.5, c), rv(x, 0.0, 0.5, c)]
+    };
+    // BGRA 中心像素 → (r, g, b)。
+    let px = |bytes: &[u8]| {
+        let i = ((32 * 64 + 32) * 4) as usize;
+        (bytes[i + 2], bytes[i + 1], bytes[i])
+    };
+    // ① 墙 x=0 + 墙前 x=0.5 绿 0.5 → 中心 = 0.5 绿 + 0.5 红 = (127,127,0)。
+    let s1 = RenderScene {
+        tris: wall(0.0),
+        tris_alpha: tq(0.5, GREEN05),
+        lines: vec![],
+        camera: cam,
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: 1.0,
+    };
+    let bytes = r.render_readback(&s1, 64, 64).expect("render blend");
+    let (pr, pg, pb) = px(&bytes);
+    assert!(
+        (pr as i32 - 127).abs() <= 25 && (pg as i32 - 127).abs() <= 25 && pb < 40,
+        "0.5 green over red wall: {pr} {pg} {pb}"
+    );
+    // ② 墙 x=0 + 墙后 x=-0.5 蓝 0.5 → 只读深剔除，中心保持墙红。
+    let s2 = RenderScene {
+        tris: wall(0.0),
+        tris_alpha: tq(-0.5, BLUE05),
+        lines: vec![],
+        camera: cam,
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: 1.0,
+    };
+    let bytes = r.render_readback(&s2, 64, 64).expect("render behind");
+    let (pr, pg, pb) = px(&bytes);
+    assert!(pr > 200 && pg < 40 && pb < 40, "behind-wall culled: {pr} {pg} {pb}");
+    // ③ 声明序：绿 0.5（x=0.5）先、蓝 0.5（x=0.25）后 → 中心 =
+    // 0.5 蓝 + 0.5(0.5 绿 + 0.5 红) = (63,63,127)，蓝主导（深度写关，
+    // 混合序 = 数组序；两支都在墙前，均通过只读深）。
+    let s3 = RenderScene {
+        tris: wall(0.0),
+        tris_alpha: [tq(0.5, GREEN05), tq(0.25, BLUE05)].concat(),
+        lines: vec![],
+        camera: cam,
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: 1.0,
+    };
+    let bytes = r.render_readback(&s3, 64, 64).expect("render order");
+    let (pr, pg, pb) = px(&bytes);
+    assert!(
+        pb > 100 && pb > pr && pb > pg,
+        "declaration order: later blue dominates: {pr} {pg} {pb}"
+    );
 }

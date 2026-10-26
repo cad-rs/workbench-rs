@@ -33,23 +33,25 @@ use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
 
-/// 渲染顶点：世界坐标 + 法线 + 颜色（三角形与线段共用管线）。
+/// 渲染顶点：世界坐标 + 法线 + 颜色（三角形与线段共用管线）。color.a
+/// 只在不透明桶语义固定为 1；透明桶（[`RenderScene::tris_alpha`]）承
+/// 载透明度。
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct RenderVertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
-    pub color: [f32; 3],
+    pub color: [f32; 4],
 }
 
 /// 线段顶点（pos + 颜色；法线朝向相机由着色器处理）。顶点缓冲按
-/// **一实例 = 一段的两端**连续排列（2×24 字节），顶点着色器把段展开为
-/// 屏幕空间线宽四边形（见 [`SHADER_LINE`]）。
+/// **一实例 = 一段的两端**连续排列，顶点着色器把段展开为屏幕空间线宽
+/// 四边形（见 [`SHADER_LINE`]）。alpha 恒 1（透明线不在 P0 语义内）。
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct LineVertexGpu {
     pub pos: [f32; 3],
-    pub color: [f32; 3],
+    pub color: [f32; 4],
 }
 
 /// 相机：正交投影（yaw/pitch 度 + 场域包围盒）。
@@ -76,7 +78,14 @@ struct FrameUniform {
 
 /// 渲染场景（纯数据；产品侧几何构建产出后转入 GPU 顶点）。
 pub struct RenderScene {
+    /// 不透明桶（depth write on；alpha 语义恒 1）。
     pub tris: Vec<RenderVertex>,
+    /// 透明桶（round-205 P0：depth write **OFF**、只读深 `Less`、
+    /// `ALPHA_BLENDING`，绘制序 = 数组序——组级 far-to-near 排序是产
+    /// 品侧领域知识，桶内逐三角排序是 P1）。头灯着色照旧作用于 rgb，
+    /// alpha 只承载透明度。
+    pub tris_alpha: Vec<RenderVertex>,
+    /// 不透明线（保持）。
     pub lines: Vec<LineVertexGpu>,
     pub camera: OrthoCamera,
     pub bg: [f32; 4],
@@ -273,13 +282,13 @@ struct FrameUniform {
 struct VSOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
-    @location(1) color: vec3<f32>,
+    @location(1) color: vec4<f32>,
 };
 
 @vertex
 fn vs_main(@location(0) pos: vec3<f32>,
            @location(1) normal: vec3<f32>,
-           @location(2) color: vec3<f32>) -> VSOut {
+           @location(2) color: vec4<f32>) -> VSOut {
     var out: VSOut;
     out.pos = frame.mvp * vec4<f32>(pos, 1.0);
     out.world_normal = normal;
@@ -289,11 +298,12 @@ fn vs_main(@location(0) pos: vec3<f32>,
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    // 头灯：0.45 环境 + 0.55 |n·l|。
+    // 头灯：0.45 环境 + 0.55 |n·l|（明暗乘进 rgb，alpha 只承载透明度
+    // ——透明桶管线用 ALPHA_BLENDING，不透明桶 REPLACE 下 a=1 等价现状）。
     let l = normalize(frame.light_dir);
     let nd = abs(dot(normalize(in.world_normal), l));
     let shade = 0.45 + 0.55 * nd;
-    return vec4<f32>(in.color * shade, 1.0);
+    return vec4<f32>(in.color.rgb * shade, in.color.a);
 }
 "#;
 
@@ -308,7 +318,7 @@ struct FrameUniform {
 
 struct VSOut {
     @builtin(position) pos: vec4<f32>,
-    @location(0) color: vec3<f32>,
+    @location(0) color: vec4<f32>,
 };
 
 // 六顶点角表（两三角形拼成一段的四边形）：x = 沿段参数 t，y = 垂直符号。
@@ -325,9 +335,9 @@ fn corner(vi: u32) -> vec2<f32> {
 // w=1 恒定，遮挡与 1px LineList 一致。
 @vertex
 fn vs_main(@location(0) pos_a: vec3<f32>,
-           @location(1) color_a: vec3<f32>,
+           @location(1) color_a: vec4<f32>,
            @location(2) pos_b: vec3<f32>,
-           @location(3) color_b: vec3<f32>,
+           @location(3) color_b: vec4<f32>,
            @builtin(vertex_index) vi: u32) -> VSOut {
     let k = corner(vi);
     let ca = frame.mvp * vec4<f32>(pos_a, 1.0);
@@ -352,7 +362,7 @@ fn vs_main(@location(0) pos_a: vec3<f32>,
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 1.0);
+    return in.color;
 }
 "#;
 
@@ -364,12 +374,15 @@ pub struct Renderer {
     queue: wgpu::Queue,
     target_format: wgpu::TextureFormat,
     tri_pipeline: wgpu::RenderPipeline,
+    tri_alpha_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
     uniform_bind: wgpu::BindGroup,
     tri_buf: wgpu::Buffer,
+    tri_alpha_buf: wgpu::Buffer,
     line_buf: wgpu::Buffer,
     n_tris: u32,
+    n_tris_alpha: u32,
     n_lines: u32,
     /// 深度目标（两条呈现路径共用；随尺寸重建；MSAA 倍数同颜色）。
     depth: Option<(wgpu::TextureView, u32, u32)>,
@@ -428,10 +441,15 @@ impl Renderer {
                 resource: uniform_buf.as_entire_binding(),
             }],
         });
-        let make_pipeline = |module: &wgpu::ShaderModule, line: bool| -> wgpu::RenderPipeline {
+        let make_pipeline = |module: &wgpu::ShaderModule,
+                             line: bool,
+                             alpha: bool|
+         -> wgpu::RenderPipeline {
             // 线段管线：一实例 = 一段的两端（连续 2×LineVertexGpu），
             // 顶点着色器展开 6 顶点四边形；三角形管线逐顶点。两者同为
-            // TriangleList + 深度 + MSAA。
+            // TriangleList + 深度 + MSAA。透明三角管线（alpha=true）：
+            // ALPHA_BLENDING + depth write OFF（只读深 Less）——绘制序
+            // 即混合序，排序语义见 RenderScene::tris_alpha 文档。
             let vb_layout = [if line {
                 wgpu::VertexBufferLayout {
                     array_stride: (2 * size_of::<LineVertexGpu>()) as u64,
@@ -443,18 +461,18 @@ impl Renderer {
                             shader_location: 0,
                         },
                         wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
+                            format: wgpu::VertexFormat::Float32x4,
                             offset: 12,
                             shader_location: 1,
                         },
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Float32x3,
-                            offset: 24,
+                            offset: 28,
                             shader_location: 2,
                         },
                         wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 36,
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 40,
                             shader_location: 3,
                         },
                     ],
@@ -475,7 +493,7 @@ impl Renderer {
                             shader_location: 1,
                         },
                         wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
+                            format: wgpu::VertexFormat::Float32x4,
                             offset: 24,
                             shader_location: 2,
                         },
@@ -485,6 +503,8 @@ impl Renderer {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(if line {
                     "wb-render-pipeline-line"
+                } else if alpha {
+                    "wb-render-pipeline-tri-alpha"
                 } else {
                     "wb-render-pipeline-tri"
                 }),
@@ -505,7 +525,11 @@ impl Renderer {
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: target_format,
-                        blend: Some(wgpu::BlendState::REPLACE),
+                        blend: Some(if alpha {
+                            wgpu::BlendState::ALPHA_BLENDING
+                        } else {
+                            wgpu::BlendState::REPLACE
+                        }),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),
@@ -516,7 +540,7 @@ impl Renderer {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth24Plus,
-                    depth_write_enabled: Some(true),
+                    depth_write_enabled: Some(!alpha),
                     depth_compare: Some(wgpu::CompareFunction::Less),
                     stencil: Default::default(),
                     bias: Default::default(),
@@ -529,10 +553,17 @@ impl Renderer {
                 cache: None,
             })
         };
-        let tri_pipeline = make_pipeline(&module, false);
-        let line_pipeline = make_pipeline(&module_line, true);
+        let tri_pipeline = make_pipeline(&module, false, false);
+        let line_pipeline = make_pipeline(&module_line, true, false);
+        let tri_alpha_pipeline = make_pipeline(&module, false, true);
         let tri_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("wb-render-tri"),
+            size: 16,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let tri_alpha_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wb-render-tri-alpha"),
             size: 16,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -548,12 +579,15 @@ impl Renderer {
             queue,
             target_format,
             tri_pipeline,
+            tri_alpha_pipeline,
             line_pipeline,
             uniform_buf,
             uniform_bind,
             tri_buf,
+            tri_alpha_buf,
             line_buf,
             n_tris: 0,
+            n_tris_alpha: 0,
             n_lines: 0,
             depth: None,
             msaa: None,
@@ -682,6 +716,24 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.tri_buf, 0, bytemuck::cast_slice(&scene.tris));
         }
+        let need_tri_alpha = (scene.tris_alpha.len() * size_of::<RenderVertex>()) as u64;
+        if need_tri_alpha > self.tri_alpha_buf.size() {
+            self.tri_alpha_buf = self
+                .device
+                .create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("wb-render-tri-alpha"),
+                    size: need_tri_alpha.next_power_of_two(),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+        }
+        if !scene.tris_alpha.is_empty() {
+            self.queue.write_buffer(
+                &self.tri_alpha_buf,
+                0,
+                bytemuck::cast_slice(&scene.tris_alpha),
+            );
+        }
         let need_line = (scene.lines.len() * size_of::<LineVertexGpu>()) as u64;
         if need_line > self.line_buf.size() {
             self.line_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -696,6 +748,7 @@ impl Renderer {
                 .write_buffer(&self.line_buf, 0, bytemuck::cast_slice(&scene.lines));
         }
         self.n_tris = scene.tris.len() as u32;
+        self.n_tris_alpha = scene.tris_alpha.len() as u32;
         self.n_lines = scene.lines.len() as u32;
 
         let depth_view = self.ensure_depth(width, height);
@@ -746,6 +799,14 @@ impl Renderer {
                 pass.set_vertex_buffer(0, self.line_buf.slice(..));
                 // 一实例一段（两端 48 字节），顶点着色器展开 6 顶点四边形。
                 pass.draw(0..6, 0..self.n_lines / 2);
+            }
+            // 透明桶最后画：只读深（被不透明几何遮挡者被 Less 剔除），
+            // 透明-透明按数组序混合（深度写已关）。
+            if self.n_tris_alpha > 0 {
+                pass.set_pipeline(&self.tri_alpha_pipeline);
+                pass.set_bind_group(0, &self.uniform_bind, &[]);
+                pass.set_vertex_buffer(0, self.tri_alpha_buf.slice(..));
+                pass.draw(0..self.n_tris_alpha, 0..1);
             }
         }
         self.queue.submit(Some(enc.finish()));
