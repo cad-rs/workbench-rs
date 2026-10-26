@@ -100,6 +100,27 @@ pub struct RenderScene {
     /// 屏幕空间线宽（px）：线段展开四边形的整体宽度，随视口分辨率
     /// 保持物理厚度不变。
     pub line_width_px: f32,
+    /// 体渲染切片（round-211 P2 MVP，`docs/multiphysics-volume-render-
+    /// ask.md` §3 数据契约）：递「纹理 + 包围盒 + LUT」不递「场」——
+    /// 框架不认识场。None = 现状语义零回归。绘制序 tris → lines →
+    /// **volume** → tris_alpha（体是最远透明层，诉求书 §5.2）。
+    pub volume: Option<VolumeSlice>,
+}
+
+/// 体渲染数据契约：标量体（已归一化 [0,1]，行主序 x 最快，格心语义）、
+/// 世界 AABB、LUT（256×rgba8：rgb 色标 / a 不透明度曲线，均产品侧
+/// 出）、采样步数（质量/成本旋钮）与全局不透明度倍率。`generation` 为
+/// 重采样代数：(dims, generation) 是 3D 纹理上传缓存键，代数不变不
+/// 重传（产品每帧重建场景，MB 级体数据靠 Arc 共享 + 代数缓存不重传）。
+#[derive(Clone, Debug)]
+pub struct VolumeSlice {
+    pub data: std::sync::Arc<[f32]>,
+    pub dims: [u32; 3],
+    pub bounds: ([f32; 3], [f32; 3]),
+    pub lut: Vec<[u8; 4]>,
+    pub steps: u32,
+    pub alpha_scale: f32,
+    pub generation: u64,
 }
 
 impl RenderScene {
@@ -263,6 +284,49 @@ pub fn cam_offset_for_test() -> CamOffset {
     CAM.with(|c| *c.borrow())
 }
 
+/// 体渲染帧参数（uniform；16 字节对齐成员）。
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct VolumeUniform {
+    mvp: [[f32; 4]; 4],
+    /// 世界 AABB（w = 0）。
+    aabb_lo: [f32; 4],
+    aabb_hi: [f32; 4],
+    /// 相机眼点（视深 = d·(eye - p) 计算用）。
+    eye: [f32; 4],
+    /// 视线方向（进场景，正交恒定 = -头灯方向）。
+    ray_dir: [f32; 4],
+    /// x = near、y = f - near、z = steps、w = alpha_scale。
+    params: [f32; 4],
+}
+
+/// f32 → f16 位型（IEEE 754 half）：±Inf/NaN 保形、上溢 → Inf、下溢 →
+/// 带符号零（归一化 [0,1] 体数据不触达次正规域），尾数 round-to-
+/// nearest（平局进位简化为 `> 半格` 入——体采样语义下无差别）。
+/// R16Float 上传用，不引入依赖（诉求书 §10-5 倾向已裁决）。
+fn f16_bits(v: f32) -> u16 {
+    let b = v.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let exp = ((b >> 23) & 0xFF) as i32;
+    let mant = b & 0x007F_FFFF;
+    if exp == 0xFF {
+        return sign | 0x7C00 | u16::from(mant != 0);
+    }
+    let e = exp - 127 + 15;
+    if e >= 31 {
+        return sign | 0x7C00;
+    }
+    if e <= 0 {
+        return sign;
+    }
+    let h = sign | ((e as u16) << 10) | ((mant >> 13) as u16);
+    if mant & 0x1000 != 0 && mant & 0x0FFF != 0 {
+        h + 1
+    } else {
+        h
+    }
+}
+
 /// 列主序 4×4。
 type Mat4 = [[f32; 4]; 4];
 
@@ -286,6 +350,12 @@ fn eye_pos(cam: &OrthoCamera) -> [f32; 3] {
         cam.center[1] + d[1] * cam.radius * 3.0,
         cam.center[2] + d[2] * cam.radius * 3.0,
     ]
+}
+
+/// 深度范围（near, f - near）——正交 NDC z 线性映射参数，`ortho_mvp`
+/// 与体渲染撞墙视深解析共用（round-211）。
+fn depth_range(cam: &OrthoCamera) -> (f32, f32) {
+    (0.01 * cam.radius.max(1e-6), cam.radius * 8.0)
 }
 
 /// 正交 MVP（view-lookat + ortho；相机在 (0,0,3r) 看向中心，先转 yaw/pitch）。
@@ -314,7 +384,7 @@ fn ortho_mvp(cam: &OrthoCamera, aspect: f32) -> Mat4 {
     // **WebGPU NDC 深度是 [0,1]**（非 OpenGL [-1,1]）：z_ndc = (z-n)/(f-n)。
     let hh = cam.radius * 1.2;
     let hw = hh * aspect.max(1e-3);
-    let (n, f) = (0.01 * cam.radius.max(1e-6), cam.radius * 8.0);
+    let (n, f) = depth_range(cam);
     let mut proj = [[0.0f32; 4]; 4];
     proj[0][0] = 1.0 / hw;
     proj[1][1] = 1.0 / hh;
@@ -420,6 +490,95 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+const SHADER_VOLUME: &str = r#"
+struct VolumeUniform {
+    mvp: mat4x4<f32>,
+    aabb_lo: vec4<f32>,
+    aabb_hi: vec4<f32>,
+    eye: vec4<f32>,
+    ray_dir: vec4<f32>,  // 进场景（正交恒定）。
+    params: vec4<f32>,   // x=near y=f-near z=steps w=alpha_scale
+};
+@group(0) @binding(0) var<uniform> u: VolumeUniform;
+@group(0) @binding(1) var vol_tex: texture_3d<f32>;
+@group(0) @binding(2) var vol_samp: sampler;
+@group(0) @binding(3) var wall_tex: texture_depth_2d;
+@group(0) @binding(4) var lut_tex: texture_1d<f32>;
+
+// 单位立方 12 三角（36 顶点，外向 CCW——cross(v1-v0, v2-v0) = 外法向，
+// cull back 后仅剩朝相机的前面，即射线入口面）。
+fn cube(vi: u32) -> vec3<f32> {
+    var c = array<vec3<f32>, 36>(
+        vec3<f32>(0., 0., 1.), vec3<f32>(1., 0., 1.), vec3<f32>(1., 1., 1.),
+        vec3<f32>(0., 0., 1.), vec3<f32>(1., 1., 1.), vec3<f32>(0., 1., 1.),
+        vec3<f32>(0., 0., 0.), vec3<f32>(0., 1., 0.), vec3<f32>(1., 1., 0.),
+        vec3<f32>(0., 0., 0.), vec3<f32>(1., 1., 0.), vec3<f32>(1., 0., 0.),
+        vec3<f32>(1., 0., 0.), vec3<f32>(1., 1., 1.), vec3<f32>(1., 0., 1.),
+        vec3<f32>(1., 0., 0.), vec3<f32>(1., 1., 0.), vec3<f32>(1., 1., 1.),
+        vec3<f32>(0., 0., 0.), vec3<f32>(0., 0., 1.), vec3<f32>(0., 1., 1.),
+        vec3<f32>(0., 0., 0.), vec3<f32>(0., 1., 1.), vec3<f32>(0., 1., 0.),
+        vec3<f32>(0., 1., 0.), vec3<f32>(0., 1., 1.), vec3<f32>(1., 1., 1.),
+        vec3<f32>(0., 1., 0.), vec3<f32>(1., 1., 1.), vec3<f32>(1., 1., 0.),
+        vec3<f32>(0., 0., 0.), vec3<f32>(1., 0., 0.), vec3<f32>(1., 0., 1.),
+        vec3<f32>(0., 0., 0.), vec3<f32>(1., 0., 1.), vec3<f32>(0., 0., 1.));
+    return c[vi];
+}
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) world: vec3<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+    let c = cube(vi);
+    var out: VsOut;
+    out.pos = u.mvp * vec4<f32>(mix(u.aabb_lo.xyz, u.aabb_hi.xyz, c), 1.0);
+    out.world = mix(u.aabb_lo.xyz, u.aabb_hi.xyz, c);
+    return out;
+}
+
+// 包围盒前向面 ray-march：正交射线方向全屏恒定，起点 = 前面片元世界
+// 坐标；出点 = AABB slab 解析；撞墙 = 1x 深度预 pass texel 解析视深
+// （正交 w=1 → 深度即 NDC z 线性映射）。等距采样 → LUT → 前向累积，
+// ERT acc_a > 0.99 提前止步；输出 premultiplied（管线 ONE +
+// ONE_MINUS_SRC_ALPHA）。
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let ro = in.world;
+    let rd = normalize(u.ray_dir.xyz);
+    var t_far = 1e30;
+    for (var k = 0; k < 3; k++) {
+        if (abs(rd[k]) < 1e-12) { continue; } // 平行轴：ro 在 slab 内不约束
+        let t1 = (u.aabb_lo[k] - ro[k]) / rd[k];
+        let t2 = (u.aabb_hi[k] - ro[k]) / rd[k];
+        t_far = min(t_far, max(t1, t2));
+    }
+    let depth = textureLoad(wall_tex, vec2<i32>(in.pos.xy), 0);
+    let view_z_wall = depth * u.params.y + u.params.x;
+    let view_z_ro = dot(u.eye.xyz - ro, -rd);
+    let t_wall = max(view_z_wall - view_z_ro, 0.0);
+    let t_end = max(min(t_far, t_wall), 0.0);
+    let steps = u32(u.params.z + 0.5);
+    let dt = t_end / f32(steps);
+    let size = u.aabb_hi.xyz - u.aabb_lo.xyz;
+    var acc = vec3<f32>(0.0);
+    var acc_a = 0.0;
+    for (var s = u32(0); s < steps; s++) {
+        if (acc_a > 0.99) { break; }
+        let p = ro + rd * (f32(s) * dt + 0.5 * dt);
+        let uvw = (p - u.aabb_lo.xyz) / size;
+        if (any(uvw < vec3<f32>(0.0)) || any(uvw > vec3<f32>(1.0))) { continue; }
+        let v = textureSampleLevel(vol_tex, vol_samp, uvw, 0.0).r;
+        let rgba = textureSampleLevel(lut_tex, vol_samp, v, 0.0);
+        let a = rgba.a * u.params.w;
+        acc += (1.0 - acc_a) * a * rgba.rgb;
+        acc_a += (1.0 - acc_a) * a;
+    }
+    return vec4<f32>(acc, acc_a);
+}
+"#;
+
 /// 纯 wgpu 渲染核心：只依赖 wgpu 类型——设备/队列/目标格式由宿主递入
 /// （GUI 壳递共享设备走 surface 合成；headless 测试自建本地设备），
 /// 本模块不创建窗口、不触碰任何 GUI 类型。
@@ -430,6 +589,20 @@ pub struct Renderer {
     tri_pipeline: wgpu::RenderPipeline,
     tri_alpha_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
+    /// 体渲染 ray-march 管线（主 MSAA pass 内第四管线，round-211 方案 I）。
+    volume_pipeline: wgpu::RenderPipeline,
+    /// 1x 深度预 pass 管线（无 fragment、sample_count 1——撞墙截断）。
+    depth_pre_pipeline: wgpu::RenderPipeline,
+    volume_bgl: wgpu::BindGroupLayout,
+    volume_uniform: wgpu::Buffer,
+    volume_bind: Option<wgpu::BindGroup>,
+    /// 3D 数据纹理 + 其 (dims, generation) 缓存键——代数不变不重传。
+    volume_tex: Option<(wgpu::Texture, [u32; 3], u64)>,
+    /// LUT 1D 纹理（256×rgba8；1KB 级每帧重传，免缓存键）。
+    lut_tex: Option<wgpu::Texture>,
+    /// 1x 深度预目标（Depth24Plus，RENDER_ATTACHMENT |
+    /// TEXTURE_BINDING；随尺寸重建）。
+    wall: Option<(wgpu::TextureView, u32, u32)>,
     uniform_buf: wgpu::Buffer,
     uniform_bind: wgpu::BindGroup,
     tri_buf: wgpu::Buffer,
@@ -610,6 +783,176 @@ impl Renderer {
         let tri_pipeline = make_pipeline(&module, false, false);
         let line_pipeline = make_pipeline(&module_line, true, false);
         let tri_alpha_pipeline = make_pipeline(&module, false, true);
+
+        // ---- 体渲染（round-211 P2 方案 I：主 MSAA pass 第四管线 + 1x
+        // 深度预 pass；现有三管线字节不动） ----
+        let module_volume = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("wb-render-shader-volume"),
+            source: wgpu::ShaderSource::Wgsl(SHADER_VOLUME.into()),
+        });
+        let volume_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("wb-render-bgl-volume"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<VolumeUniform>() as u64),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D1,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let volume_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("wb-render-pl-volume"),
+                bind_group_layouts: &[Some(&volume_bgl)],
+                immediate_size: 0,
+            });
+        let volume_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wb-render-pipeline-volume"),
+            layout: Some(&volume_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module_volume,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module_volume,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                // premultiplied 输出：ONE + ONE_MINUS_SRC_ALPHA（与透明
+                // 桶的非预乘 ALPHA_BLENDING 并存于各自管线）。
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // 外向 CCW 立方 cull back → 仅朝相机的前面（射线入口面）。
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: Self::MSAA_SAMPLES,
+                ..Default::default()
+            },
+            multiview_mask: None,
+            cache: None,
+        });
+        // 1x 深度预 pass：复用三角管线顶点级（SHADER vs_main）、无
+        // fragment、sample_count 1——只写专用深度纹理供 ray-march 撞墙。
+        let depth_pre_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wb-render-pipeline-depth-pre"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("wb-render-pl-depth-pre"),
+                bind_group_layouts: &[Some(&bgl)],
+                immediate_size: 0,
+            })),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: size_of::<RenderVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 12,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 24,
+                            shader_location: 2,
+                        },
+                    ],
+                }],
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let volume_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wb-render-volume-uniform"),
+            size: size_of::<VolumeUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let tri_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("wb-render-tri"),
             size: 16,
@@ -635,6 +978,14 @@ impl Renderer {
             tri_pipeline,
             tri_alpha_pipeline,
             line_pipeline,
+            volume_pipeline,
+            depth_pre_pipeline,
+            volume_bgl,
+            volume_uniform,
+            volume_bind: None,
+            volume_tex: None,
+            lut_tex: None,
+            wall: None,
             uniform_buf,
             uniform_bind,
             tri_buf,
@@ -694,6 +1045,168 @@ impl Renderer {
         view
     }
 
+    /// 1x 深度预目标就绪（撞墙截断；尺寸不变即复用）。
+    fn ensure_wall(&mut self, width: u32, height: u32) -> wgpu::TextureView {
+        let (w, h) = (width.max(1), height.max(1));
+        if let Some((view, dw, dh)) = &self.wall {
+            if *dw == w && *dh == h {
+                return view.clone();
+            }
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("wb-render-depth-wall"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth24Plus,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        self.wall = Some((view.clone(), w, h));
+        view
+    }
+
+    /// 体渲染资源就绪：3D 数据纹理按 (dims, generation) 缓存（代数不
+    /// 变不重传），LUT 1D 每帧重传（1KB 级），绑定组随纹理重建。
+    /// `wall_view` = 1x 深度预目标视图（撞墙 texel，先于本调用就绪）。
+    fn ensure_volume(&mut self, v: &VolumeSlice, wall_view: &wgpu::TextureView) -> wgpu::BindGroup {
+        let rebuilt = match (&self.volume_tex, &self.lut_tex) {
+            (Some((_, d, g)), Some(_)) if *d == v.dims && *g == v.generation => None,
+            _ => Some(()),
+        };
+        if let Some(()) = rebuilt {
+            // R16Float 3D（行主序 x 最快，格心语义）；上传按行填充到
+            // 256 对齐（write_texture 的 bpr 语义跨行/跨层校验源长度）。
+            let bpr = (v.dims[0] * 2).next_multiple_of(256) as usize;
+            let row = v.dims[0] as usize;
+            let mut packed: Vec<u16> = Vec::with_capacity(bpr / 2 * v.dims[1] as usize * v.dims[2] as usize);
+            for z in 0..v.dims[2] as usize {
+                for y in 0..v.dims[1] as usize {
+                    let base = (z * v.dims[1] as usize + y) * row;
+                    packed.extend(v.data[base..base + row].iter().map(|&x| f16_bits(x)));
+                    packed.resize(packed.len() + (bpr - row * 2) / 2, 0);
+                }
+            }
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("wb-render-volume"),
+                size: wgpu::Extent3d {
+                    width: v.dims[0],
+                    height: v.dims[1],
+                    depth_or_array_layers: v.dims[2],
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D3,
+                format: wgpu::TextureFormat::R16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&packed),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr as u32),
+                    rows_per_image: Some(v.dims[1]),
+                },
+                wgpu::Extent3d {
+                    width: v.dims[0],
+                    height: v.dims[1],
+                    depth_or_array_layers: v.dims[2],
+                },
+            );
+            let lut = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("wb-render-volume-lut"),
+                size: wgpu::Extent3d {
+                    width: v.lut.len().max(1) as u32,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D1,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.volume_tex = Some((texture, v.dims, v.generation));
+            self.lut_tex = Some(lut);
+            self.volume_bind = None; // 纹理重建 → 绑定组随之重建。
+        }
+        let (_, lut) = match (&self.volume_tex, &self.lut_tex) {
+            (Some((t, _, _)), Some(l)) => (t, l),
+            _ => unreachable!("volume textures just ensured"),
+        };
+        // LUT 重传（每帧 1KB 级；write_texture 事件语义足够）。
+        let lut_bytes: Vec<u8> = v.lut.iter().flatten().copied().collect();
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: lut,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &lut_bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: None, rows_per_image: None },
+            wgpu::Extent3d { width: v.lut.len().max(1) as u32, height: 1, depth_or_array_layers: 1 },
+        );
+        if self.volume_bind.is_none() {
+            let (tex, _, _) = self.volume_tex.as_ref().unwrap();
+            let volume_view =
+                tex.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("wb-render-volume-view"),
+                    dimension: Some(wgpu::TextureViewDimension::D3),
+                    ..Default::default()
+                });
+            let lut_view = lut.create_view(&Default::default());
+            let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("wb-render-volume-sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            });
+            self.volume_bind = Some(self.device.create_bind_group(
+                &wgpu::BindGroupDescriptor {
+                    label: Some("wb-render-bg-volume"),
+                    layout: &self.volume_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.volume_uniform.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&volume_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(wall_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&lut_view),
+                        },
+                    ],
+                },
+            ));
+        }
+        self.volume_bind.clone().unwrap()
+    }
     /// 回读目标就绪（颜色纹理 + 256 对齐读回缓冲；尺寸不变即复用）。
     fn ensure_readback(&mut self, width: u32, height: u32) -> wgpu::TextureView {
         let (w, h) = (width.max(1), height.max(1));
@@ -806,6 +1319,32 @@ impl Renderer {
         self.n_tris = scene.tris.len() as u32;
         self.n_tris_alpha = scene.tris_alpha.len() as u32;
         self.n_lines = scene.lines.len() as u32;
+        // 体渲染（round-211）：uniform 上传 + 纹理/绑定准备（深度预
+        // 目标先行——绑定组引用其视图）。绘制序 volume 在 tris_alpha
+        // 之前（体是最远透明层，诉求书 §5.2）。
+        let volume_draw = match &scene.volume {
+            Some(v) => {
+                let (yaw_v, pitch_v) =
+                    (scene.camera.yaw_deg.to_radians(), scene.camera.pitch_deg.to_radians());
+                let d = [yaw_v.cos() * pitch_v.cos(), yaw_v.sin() * pitch_v.cos(), pitch_v.sin()];
+                let eye = eye_pos(&scene.camera);
+                let (n, f) = depth_range(&scene.camera);
+                let uni = VolumeUniform {
+                    mvp: ortho_mvp(&scene.camera, aspect),
+                    aabb_lo: [v.bounds.0[0], v.bounds.0[1], v.bounds.0[2], 0.0],
+                    aabb_hi: [v.bounds.1[0], v.bounds.1[1], v.bounds.1[2], 0.0],
+                    eye: [eye[0], eye[1], eye[2], 0.0],
+                    ray_dir: [-d[0], -d[1], -d[2], 0.0],
+                    params: [n, f - n, v.steps as f32, v.alpha_scale],
+                };
+                self.queue
+                    .write_buffer(&self.volume_uniform, 0, bytemuck::bytes_of(&uni));
+                let wall = self.ensure_wall(width, height);
+                let bind = self.ensure_volume(v, &wall);
+                Some((wall, bind))
+            }
+            None => None,
+        };
 
         let depth_view = self.ensure_depth(width, height);
         let msaa_view = self.ensure_msaa(width, height);
@@ -814,6 +1353,34 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("wb-render-enc"),
             });
+        // 1x 深度预 pass（撞墙截断，诉求书 §5.1）：不透明三角以无
+        // fragment 管线重绘进专用 1x 深度（万级三角微秒级）；ray-march
+        // 每像素读一个 texel 解析 t_wall。
+        if let Some((wall, _)) = &volume_draw {
+            // pass 必开（Clear 1.0 = 远平面）——无不透明三角时 wall 保持
+            // 远深度，ray-march t_wall 退化为 t_exit。
+            let mut pre = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("wb-render-pass-depth-pre"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: wall,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if self.n_tris > 0 {
+                pre.set_pipeline(&self.depth_pre_pipeline);
+                pre.set_bind_group(0, &self.uniform_bind, &[]);
+                pre.set_vertex_buffer(0, self.tri_buf.slice(..));
+                pre.draw(0..self.n_tris, 0..1);
+            }
+        }
         {
             let bg = wgpu::LoadOp::Clear(wgpu::Color {
                 r: scene.bg[0] as f64,
@@ -855,6 +1422,14 @@ impl Renderer {
                 pass.set_vertex_buffer(0, self.line_buf.slice(..));
                 // 一实例一段（两端 48 字节），顶点着色器展开 6 顶点四边形。
                 pass.draw(0..6, 0..self.n_lines / 2);
+            }
+            // 体渲染（round-211）：volume 先于透明桶——体是最远透明层
+            // （诉求书 §5.2）；premultiplied 输出与深度预 pass 的 t_wall
+            // 截断在 shader 内完成。
+            if let Some((_, bind)) = &volume_draw {
+                pass.set_pipeline(&self.volume_pipeline);
+                pass.set_bind_group(0, bind, &[]);
+                pass.draw(0..36, 0..1);
             }
             // 透明桶最后画：只读深（被不透明几何遮挡者被 Less 剔除），
             // 透明-透明按数组序混合（深度写已关）。

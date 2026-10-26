@@ -56,6 +56,7 @@ fn renders_triangle_headless() {
         tris: vec![v(-0.5, -0.5), v(0.5, -0.5), v(0.0, 0.5)],
         tris_alpha: vec![],
         sort_alpha: false,
+        volume: None,
         lines: vec![],
         camera: cam(),
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -103,6 +104,7 @@ fn renders_line_headless() {
         tris: vec![],
         tris_alpha: vec![],
         sort_alpha: false,
+        volume: None,
         lines: vec![lv(-1.5), lv(1.5)],
         camera: cam(),
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -135,6 +137,7 @@ fn line_screen_space_width_headless() {
         tris: vec![],
         tris_alpha: vec![],
         sort_alpha: false,
+        volume: None,
         lines: vec![
             LineVertexGpu { pos: [-1.5, 0.0, 0.0], color: [0.0, 1.0, 0.0, 1.0] },
             LineVertexGpu { pos: [1.5, 0.0, 0.0], color: [0.0, 1.0, 0.0, 1.0] },
@@ -203,6 +206,7 @@ fn line_depth_occlusion_headless() {
     let behind = RenderScene {
         tris_alpha: vec![],
         sort_alpha: false,
+        volume: None,
         tris: wall(0.0),
         lines: vec![lv(-0.5, -1.5), lv(-0.5, 1.5)],
         camera: cam,
@@ -217,6 +221,7 @@ fn line_depth_occlusion_headless() {
     let crossing = RenderScene {
         tris_alpha: vec![],
         sort_alpha: false,
+        volume: None,
         tris: wall(0.3),
         lines: vec![lv(-1.0, -1.5), lv(1.0, 1.5)],
         camera: cam,
@@ -309,6 +314,7 @@ fn alpha_centroid_sort_headless() {
         tris: wall(0.0),
         tris_alpha,
         sort_alpha,
+        volume: None,
         lines: vec![],
         camera: cam,
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -364,6 +370,7 @@ fn alpha_centroid_sort_helper_pure() {
             v(2.0, 0.2), v(2.0, 0.2), v(2.0, 0.2), // t2: 中间
         ],
         sort_alpha: true,
+        volume: None,
         lines: vec![],
         camera: cam,
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -428,6 +435,7 @@ fn transparent_tris_blend_order_and_depth() {
         tris: wall(0.0),
         tris_alpha: tq(0.5, GREEN05),
         sort_alpha: false,
+        volume: None,
         lines: vec![],
         camera: cam,
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -444,6 +452,7 @@ fn transparent_tris_blend_order_and_depth() {
         tris: wall(0.0),
         tris_alpha: tq(-0.5, BLUE05),
         sort_alpha: false,
+        volume: None,
         lines: vec![],
         camera: cam,
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -459,6 +468,7 @@ fn transparent_tris_blend_order_and_depth() {
         tris: wall(0.0),
         tris_alpha: [tq(0.5, GREEN05), tq(0.25, BLUE05)].concat(),
         sort_alpha: false,
+        volume: None,
         lines: vec![],
         camera: cam,
         bg: [0.0, 0.0, 0.0, 1.0],
@@ -469,5 +479,161 @@ fn transparent_tris_blend_order_and_depth() {
     assert!(
         pb > 100 && pb > pr && pb > pg,
         "declaration order: later blue dominates: {pr} {pg} {pb}"
+    );
+}
+
+// ---- 体渲染（round-211 P2 MVP，诉求书 §8 断言 ①②③） ----
+
+/// 均匀体 VolumeSlice 构造（dims 8³，LUT 可配）。
+fn uniform_volume(value: f32, lut: Vec<[u8; 4]>) -> workbench_render::VolumeSlice {
+    workbench_render::VolumeSlice {
+        data: std::sync::Arc::from(vec![value; 8 * 8 * 8]),
+        dims: [8, 8, 8],
+        bounds: ([-0.3, -0.3, -0.3], [0.3, 0.3, 0.3]),
+        lut,
+        steps: 64,
+        alpha_scale: 1.0,
+        generation: 1,
+    }
+}
+
+/// 中心射线积分（诉求书 §8 ①）：均匀体 0.5 加常数不透明度 LUT（8/255）
+/// 与 64 步，中心像素解析值 acc_a = 1-(1-8/255)^64 ≈ 0.8696；premult
+/// 输出 over 黑底 ≈ LUT 色 × acc_a（±2/255），四角射线不穿 AABB 保持背景。
+#[test]
+fn volume_center_ray_integration_headless() {
+    let Some(mut r) = headless_renderer() else {
+        eprintln!("skip: 无可用 wgpu 适配器");
+        return;
+    };
+    // LUT 全档绿色 a=8/255（常数不透明度 MVP）。
+    let lut = vec![[0u8, 255u8, 0u8, 8u8]; 256];
+    let scene = RenderScene {
+        tris: vec![],
+        tris_alpha: vec![],
+        sort_alpha: false,
+        volume: Some(uniform_volume(0.5, lut)),
+        lines: vec![],
+        camera: cam(),
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: 1.0,
+    };
+    let bytes = r.render_readback(&scene, 64, 64).expect("render volume");
+    let px = |x: u32, y: u32| {
+        let i = ((y * 64 + x) * 4) as usize;
+        (bytes[i + 2], bytes[i + 1], bytes[i])
+    };
+    // 解析：a = 8/255，acc_a = 1-(1-a)^64，out.g = 255·acc_a（黑底）。
+    let a = 8.0f32 / 255.0;
+    let acc_a = 1.0 - (1.0 - a).powi(64);
+    let expect_g = (255.0 * acc_a).round() as i32;
+    let (cr, cg, cb) = px(32, 32);
+    assert!(
+        (cg as i32 - expect_g).abs() <= 2 && cr <= 2 && cb <= 2,
+        "center ray integral: got ({cr},{cg},{cb}) expect (0,{expect_g},0)"
+    );
+    // 四角射线不穿 AABB → 背景。
+    let (br, bg_, bb) = px(2, 2);
+    assert!(br < 4 && bg_ < 4 && bb < 4, "corner stays bg: ({br},{bg_},{bb})");
+}
+
+/// 撞不透明墙截断（诉求书 §8 ②，归一化步长语义）：steps 均分
+/// [t_entry, t_wall]（§4.2）——截断不减少步数而是把采样集中到墙前段。
+/// 用「前半 0 / 后半 1」场 + 双色 LUT（0 → 绿、1 → 蓝）：截断时采样全
+/// 落前半绿区（b≈0）；不截断则后半蓝区混入（b 显著）。红墙透底
+/// （r = (1-acc_a)·255）。
+#[test]
+fn volume_wall_truncation_headless() {
+    let Some(mut r) = headless_renderer() else {
+        eprintln!("skip: 无可用 wgpu 适配器");
+        return;
+    };
+    // LUT[0] = 绿 a=8；LUT[255] = 蓝 a=8；中间档透明黑（界面带不产雾）。
+    let mut lut = vec![[0u8, 0u8, 0u8, 0u8]; 256];
+    lut[0] = [0u8, 255u8, 0u8, 8u8];
+    lut[255] = [0u8, 0u8, 255u8, 8u8];
+    let rv = |x: f32, y: f32, z: f32| RenderVertex {
+        pos: [x, y, z],
+        normal: [1.0, 0.0, 0.0],
+        color: [1.0, 0.0, 0.0, 1.0],
+    };
+    // 前视相机（深度轴 = 世界 x）：墙 x=0 横切体 [-0.3,0.3] 中部——
+    // 俯视 cam() 下该墙侧对相机（面法线 ⊥ 视线），不触发撞墙。
+    let cam = OrthoCamera {
+        yaw_deg: 0.0,
+        pitch_deg: 0.0,
+        center: [0.0, 0.0, 0.0],
+        radius: 1.0,
+    };
+    // 场：格心 x < 0（后半，远侧）值 1.0（蓝）；x ≥ 0（前半，近侧）0.0（绿）。
+    let mut data = vec![0f32; 8 * 8 * 8];
+    for k in 0..8u32 {
+        for j in 0..8u32 {
+            for i in 0..8u32 {
+                let x = -0.3 + (i as f64 + 0.5) * 0.6 / 8.0;
+                if x < 0.0 {
+                    data[(i + j * 8 + k * 64) as usize] = 1.0;
+                }
+            }
+        }
+    }
+    let scene = RenderScene {
+        tris: vec![rv(0.0, -3.0, -3.0), rv(0.0, 3.0, -3.0), rv(0.0, 0.0, 3.0)],
+        tris_alpha: vec![],
+        sort_alpha: false,
+        volume: Some(workbench_render::VolumeSlice {
+            data: std::sync::Arc::from(data),
+            dims: [8, 8, 8],
+            bounds: ([-0.3, -0.3, -0.3], [0.3, 0.3, 0.3]),
+            lut,
+            steps: 64,
+            alpha_scale: 1.0,
+            generation: 1,
+        }),
+        lines: vec![],
+        camera: cam,
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: 1.0,
+    };
+    let bytes = r.render_readback(&scene, 64, 64).expect("render wall+vol");
+    let i = ((32 * 64 + 32) * 4) as usize;
+    let (cr, cg, cb) = (bytes[i + 2], bytes[i + 1], bytes[i]);
+    // 截断：采样全落绿区（前半）→ 透底红 + 绿雾、零蓝。r/g 按
+    // acc_a ∈ [全 64 样, 少 7 样]（界面带线性滤波过渡档透明）放宽。
+    assert!(
+        (30..=60).contains(&cr) && cg > 195 && cb <= 6,
+        "wall truncation: got ({cr},{cg},{cb}) expect (30..60,>195,<=6)"
+    );
+}
+
+/// LUT 端点（诉求书 §8 ③）：值 1.0 均匀体 → 采样 LUT[255]——归一化
+/// 贯通的端到端证据（rgb 端点色 × ①同款 acc_a）。
+#[test]
+fn volume_lut_endpoint_headless() {
+    let Some(mut r) = headless_renderer() else {
+        eprintln!("skip: 无可用 wgpu 适配器");
+        return;
+    };
+    let mut lut = vec![[0u8, 0u8, 0u8, 8u8]; 256];
+    lut[255] = [255u8, 0u8, 0u8, 8u8]; // 端点红（其余黑——采样仅触 1.0）
+    let scene = RenderScene {
+        tris: vec![],
+        tris_alpha: vec![],
+        sort_alpha: false,
+        volume: Some(uniform_volume(1.0, lut)),
+        lines: vec![],
+        camera: cam(),
+        bg: [0.0, 0.0, 0.0, 1.0],
+        line_width_px: 1.0,
+    };
+    let bytes = r.render_readback(&scene, 64, 64).expect("render lut end");
+    let i = ((32 * 64 + 32) * 4) as usize;
+    let (cr, cg, cb) = (bytes[i + 2], bytes[i + 1], bytes[i]);
+    let a = 8.0f32 / 255.0;
+    let acc_a = 1.0 - (1.0 - a).powi(64);
+    let expect_r = (255.0 * acc_a).round() as i32;
+    assert!(
+        (cr as i32 - expect_r).abs() <= 2 && cg <= 2 && cb <= 2,
+        "lut endpoint: got ({cr},{cg},{cb}) expect ({expect_r},0,0)"
     );
 }
