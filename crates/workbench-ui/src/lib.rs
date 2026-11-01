@@ -149,6 +149,7 @@ struct RootView {
 
 impl RootView {
     fn new(core: SharedCore, pending_dock: Option<gpui_component::dock::DockAreaState>) -> Self {
+        publish_runtime_dispatcher(&core);
         // Seed the applied-theme trackers from the current settings so the
         // first frame does not re-apply what launch_app already applied.
         let (applied_theme, applied_accent) = {
@@ -182,6 +183,25 @@ impl RootView {
 
 /// 请求重绘：根视图 + 全部 dock 面板。
 ///
+/// The frontend's command dispatcher for view element handlers (they run at
+/// event time, after the render that built them). It lives as long as the
+/// runtime. `try_lock`: a dispatch issued while the runtime is locked — from
+/// inside a view's `element` — fails instead of deadlocking.
+fn publish_runtime_dispatcher(core: &SharedCore) {
+    let core = core.clone();
+    wb::publish_dispatcher(std::rc::Rc::new(move |command, args| {
+        match core.try_lock() {
+            Ok(mut guard) => guard.execute_command(command, &args),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                poisoned.into_inner().execute_command(command, &args)
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                wb::CommandResult::failed("视图构建期间不能执行命令")
+            }
+        }
+    }));
+}
+
 /// 面板现在是独立实体，而 dock 用 gpui 的**缓存视图**通路绘制面板内容
 /// （面板实体被 notify 时其子树才重新渲染）。旧布局把面板画在根视图的子树
 /// 里，notify 根视图就够；这层镜像保持"任何输入都驱动每个视口重绘"的语义。
@@ -352,22 +372,16 @@ fn view_canvas(
     };
 
     // The view reads the host while building its element tree, so the model
-    // lock is held for the duration of `element`; the published dispatcher lets
-    // its event handlers reach the same runtime.
+    // lock is held for the duration of `element`; its event handlers reach
+    // the runtime later, at event time, through the dispatcher the root view
+    // published (`publish_runtime_dispatcher`).
     let element = {
         let Ok(mut guard) = core.lock() else {
             return slot_placeholder();
         };
-        let dispatcher_core = core.clone();
-        wb::publish_dispatcher(std::rc::Rc::new(move |command, args| {
-            let mut guard = dispatcher_core.lock().unwrap_or_else(|p| p.into_inner());
-            guard.execute_command(command, &args)
-        }));
-        let built = instance
+        instance
             .borrow_mut()
-            .element(&mut *guard as &mut dyn wb::AppServices);
-        wb::clear_dispatcher();
-        built
+            .element(&mut *guard as &mut dyn wb::AppServices)
     };
 
     match element {
