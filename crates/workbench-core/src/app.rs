@@ -984,6 +984,9 @@ pub struct WorkbenchAppBuilder {
     layout_path: Option<PathBuf>,
     open_on_start: Vec<(String, bool)>,
     create_default_document: bool,
+    /// A document file to open at startup (the file-association entry
+    /// point); applied after the default document would be created.
+    open_file_on_start: Option<PathBuf>,
     /// 默认文档类型 ID（多文档类型时由产品指定）。
     default_doc_type: Option<String>,
     smoke_seconds: Option<f32>,
@@ -1025,6 +1028,7 @@ impl WorkbenchAppBuilder {
             layout_path: None,
             open_on_start: Vec::new(),
             create_default_document: false,
+            open_file_on_start: None,
             default_doc_type: None,
             smoke_seconds: None,
             assets: None,
@@ -1147,6 +1151,15 @@ impl WorkbenchAppBuilder {
     /// 启动时创建一个默认文档（首个注册的文档类型）。
     pub fn create_default_document(mut self, on: bool) -> Self {
         self.create_default_document = on;
+        self
+    }
+
+    /// Open this document file at startup (the file-association entry
+    /// point). Applied after the default-document step, so a launch with
+    /// both shows only the launched file as active. A read failure is
+    /// logged, not fatal.
+    pub fn with_open_file_on_start(mut self, path: PathBuf) -> Self {
+        self.open_file_on_start = Some(path);
         self
     }
 
@@ -1446,6 +1459,13 @@ impl WorkbenchAppBuilder {
                     .create(&t, "未命名")
                     .map_err(|e| format!("创建默认文档失败: {e}"))?;
                 runtime.host.docs.set_active(Some(id));
+            }
+        }
+
+        // 启动时打开文件（文件关联入口；失败只记日志，不阻断启动）。
+        if let Some(path) = self.open_file_on_start.clone() {
+            if let Err(e) = crate::platform_cmds::open_path_runtime(&mut runtime, &path) {
+                runtime.host.log.warn(format!("打开 {} 失败：{e}", path.display()));
             }
         }
 
