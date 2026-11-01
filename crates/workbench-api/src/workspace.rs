@@ -413,13 +413,58 @@ pub struct LayoutFile {
     pub dock: Option<serde_json::Value>,
 }
 
-/// One in-progress settings text edit (see [`WorkspaceState::text_edit`]).
+/// One in-progress text edit (see [`WorkspaceState::text_edit`]): a settings
+/// value, or a value prompt opened by any command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextEdit {
-    /// Setting key being edited (`ui.accent`, …).
+    /// Key of the value being edited (`ui.accent`, …); handed back to the
+    /// commit command as its `key` argument.
     pub key: String,
     /// Edit buffer (what the user has typed so far).
     pub buffer: String,
+    /// Command run on Enter with the arguments `key` and `value`; `None` is
+    /// the settings flow (`app.settings.set`).
+    pub commit: Option<String>,
+    /// Caption shown above the input; `None` shows the key.
+    pub label: Option<String>,
+}
+
+impl TextEdit {
+    /// A settings value edit (commits through `app.settings.set`).
+    pub fn setting(key: impl Into<String>, buffer: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            buffer: buffer.into(),
+            commit: None,
+            label: None,
+        }
+    }
+
+    /// A value prompt: Enter runs `commit` with the arguments `key` and
+    /// `value` (the typed text); Esc or a backdrop click discards.
+    pub fn prompt(
+        key: impl Into<String>,
+        buffer: impl Into<String>,
+        commit: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            buffer: buffer.into(),
+            commit: Some(commit.into()),
+            label: Some(label.into()),
+        }
+    }
+
+    /// The command Enter runs.
+    pub fn commit_command(&self) -> &str {
+        self.commit.as_deref().unwrap_or("app.settings.set")
+    }
+
+    /// The caption shown above the input.
+    pub fn caption(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.key)
+    }
 }
 
 /// The login/session state the UI renders (status bar account entry). The
@@ -881,5 +926,26 @@ impl WorkspaceState {
             _ => {}
         }
         skipped
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TextEdit;
+
+    #[test]
+    fn a_setting_edit_commits_through_the_settings_command() {
+        let edit = TextEdit::setting("ui.accent", "#336699");
+        assert_eq!(edit.commit_command(), "app.settings.set");
+        assert_eq!(edit.caption(), "ui.accent");
+    }
+
+    #[test]
+    fn a_prompt_carries_its_command_and_caption() {
+        let edit = TextEdit::prompt("3/width", "12", "rcad.part.set_property", "长方体 · width");
+        assert_eq!(edit.commit_command(), "rcad.part.set_property");
+        assert_eq!(edit.caption(), "长方体 · width");
+        assert_eq!(edit.key, "3/width");
+        assert_eq!(edit.buffer, "12");
     }
 }

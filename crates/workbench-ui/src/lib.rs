@@ -566,7 +566,7 @@ impl Render for RootView {
                 let weak_k = weak.clone();
                 move |ev: &KeyDownEvent, _w: &mut Window, cx: &mut App| {
                     let ks = &ev.keystroke;
-                    // While a settings text edit is open the Input owns the
+                    // While a text edit is open the Input owns the
                     // keystrokes; hotkeys stay disabled so typing a key that
                     // is also a shortcut does not fire the shortcut.
                     if text_edit::is_active(&core_k) {
@@ -604,11 +604,18 @@ impl Render for RootView {
             root_col = root_col.child(overlay);
         }
 
-        // ---- Settings text-edit overlay (gpui-component Input) ----
-        // Mount when an edit opens (or its key changes); drop when it closes.
+        // ---- Text-edit overlay (gpui-component Input): settings values and
+        // command value prompts. Mount when an edit opens (or its key
+        // changes); drop when it closes.
         if let Some(mount) = text_edit::mount_for(&core, self.edit_key.as_deref()) {
             let input = text_edit::create_input(&mount.seed, window, cx);
-            let sub = text_edit::subscribe_enter(core.clone(), input.clone(), mount.key.clone(), cx);
+            let sub = text_edit::subscribe_enter(
+                core.clone(),
+                input.clone(),
+                mount.key.clone(),
+                mount.commit,
+                cx,
+            );
             self.edit_input = Some(input);
             self.edit_subscription = Some(sub);
             self.edit_key = Some(mount.key);
@@ -626,13 +633,13 @@ impl Render for RootView {
             self.edit_key = None;
         }
         if let Some(input) = &self.edit_input {
-            let key = self.edit_key.clone().unwrap_or_default();
+            let caption = text_edit::caption(&core);
             let input_slot = div()
                 .rounded(px(4.0))
                 .border_1()
                 .border_color(col(theme::ui_theme().placeholder))
                 .child(gpui_component::input::Input::new(input));
-            let overlay = text_edit::overlay_shell(&key, &core, input_slot, cx);
+            let overlay = text_edit::overlay_shell(&caption, &core, input_slot, cx);
             root_col = root_col.child(overlay);
         }
 

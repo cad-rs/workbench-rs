@@ -459,10 +459,7 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
                     .as_str()
                     .unwrap_or_default()
                     .to_string();
-                host.ws.text_edit = Some(api::TextEdit {
-                    key: spec.key.clone(),
-                    buffer,
-                });
+                host.ws.text_edit = Some(api::TextEdit::setting(spec.key.clone(), buffer));
                 CommandResult::done()
             },
         )

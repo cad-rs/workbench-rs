@@ -1,13 +1,14 @@
-//! Settings text-edit overlay: hosts a gpui-component `Input` while
-//! `ws.text_edit` is active (started by `app.settings.edit_begin`, typically
-//! from the settings panel's string rows).
+//! Text-edit overlay: hosts a gpui-component `Input` while `ws.text_edit` is
+//! active — a settings value (started by `app.settings.edit_begin` from the
+//! settings panel's string rows) or a value prompt any command opens
+//! (`wb::TextEdit::prompt`).
 //!
 //! The Input component provides caret/selection/IME/clipboard/undo; this
 //! module owns the lifecycle: create the state entity on open (seeded from
-//! the edit buffer), focus it, commit on `InputEvent::PressEnter` via
-//! `app.settings.set`, discard on the `Escape` action (which the Input
-//! propagates to its parent) or the close button. Hotkeys stay suppressed
-//! while an edit is open (see [`is_active`]).
+//! the edit buffer), focus it, commit on `InputEvent::PressEnter` through the
+//! edit's commit command (`app.settings.set` for settings), discard on the
+//! `Escape` action (which the Input propagates to its parent) or the close
+//! button. Hotkeys stay suppressed while an edit is open (see [`is_active`]).
 
 use gpui::{
     AppContext as _, ClickEvent, Context, Div, Entity, InteractiveElement as _,
@@ -21,9 +22,9 @@ use workbench_api as wb;
 
 use crate::{SharedCore, col, theme};
 
-/// Whether a settings text edit is currently open (the root view suppresses
-/// hotkeys while true so typing a key that is also a shortcut does not
-/// fire the shortcut).
+/// Whether a text edit is currently open (the root view suppresses hotkeys
+/// while true so typing a key that is also a shortcut does not fire the
+/// shortcut).
 pub(crate) fn is_active(core: &SharedCore) -> bool {
     core.lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -37,6 +38,8 @@ pub(crate) fn is_active(core: &SharedCore) -> bool {
 pub(crate) struct EditMount {
     pub key: String,
     pub seed: String,
+    /// The command Enter runs (with `key` + `value`).
+    pub commit: String,
 }
 
 /// Snapshot the open edit, if any and not yet mounted under `mounted_key`.
@@ -49,7 +52,20 @@ pub(crate) fn mount_for(core: &SharedCore, mounted_key: Option<&str>) -> Option<
     Some(EditMount {
         key: edit.key.clone(),
         seed: edit.buffer.clone(),
+        commit: edit.commit_command().to_string(),
     })
+}
+
+/// The caption of the open edit (shown above the input).
+pub(crate) fn caption(core: &SharedCore) -> String {
+    core.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .host
+        .ws
+        .text_edit
+        .as_ref()
+        .map(|edit| edit.caption().to_string())
+        .unwrap_or_default()
 }
 
 /// Close the open edit (Escape / close button / backdrop click).
@@ -66,18 +82,16 @@ pub(crate) fn create_input(
     window: &mut Window,
     cx: &mut Context<crate::RootView>,
 ) -> Entity<InputState> {
-    let state = cx.new(|cx| {
-        InputState::new(window, cx)
-            .placeholder("#RRGGBB")
-            .default_value(seed)
-    });
+    let state = cx.new(|cx| InputState::new(window, cx).default_value(seed));
     state.update(cx, |state, cx| state.focus(window, cx));
     state
 }
 
-/// Commit the Input's current value through `app.settings.set` and close.
+/// Commit the Input's current value through the edit's commit command and
+/// close.
 pub(crate) fn commit(
     core: &SharedCore,
+    command: &str,
     key: &str,
     input: &Entity<InputState>,
     cx: &mut Context<'_, crate::RootView>,
@@ -85,7 +99,7 @@ pub(crate) fn commit(
     let value = input.read(cx).value().to_string();
     if let Ok(mut guard) = core.lock() {
         let _ = guard.execute_command(
-            "app.settings.set",
+            command,
             &wb::CommandArgs::new()
                 .with("key", key)
                 .with("value", value),
@@ -99,21 +113,23 @@ pub(crate) fn subscribe_enter(
     core: SharedCore,
     input: Entity<InputState>,
     key: String,
+    command: String,
     cx: &mut Context<crate::RootView>,
 ) -> Subscription {
     cx.subscribe(&input, move |_, input, ev: &InputEvent, cx| {
         if matches!(ev, InputEvent::PressEnter { .. }) {
-            commit(&core, &key, &input, cx);
+            commit(&core, &command, &key, &input, cx);
             cx.notify();
         }
     })
 }
 
 /// Renders the edit overlay shell for the given open edit: a backdrop (click
-/// discards), the seeded Input, and Enter/Esc hints plus a close button.
-/// The caller mounts the actual `Input` element inside `input_slot`.
+/// discards), the caption, the seeded Input, and Enter/Esc hints plus a
+/// close button. The caller mounts the actual `Input` element inside
+/// `input_slot`.
 pub(crate) fn overlay_shell(
-    key: &str,
+    caption: &str,
     core: &SharedCore,
     input_slot: Div,
     cx: &mut Context<crate::RootView>,
@@ -169,7 +185,7 @@ pub(crate) fn overlay_shell(
         div()
             .text_size(px(12.0))
             .text_color(col(wb::Color::GRAY))
-            .child(SharedString::from(key.to_string())),
+            .child(SharedString::from(caption.to_string())),
     );
 
     card = card.child(input_slot);
