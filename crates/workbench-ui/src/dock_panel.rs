@@ -497,6 +497,16 @@ fn shown_panel(panels: &[String], active: Option<&str>) -> Option<String> {
 /// index follow the survivors, so a pruned tree is still internally
 /// consistent (a stack whose size list no longer lines up with its children
 /// could not divide its space).
+/// The leaf panel names of a persisted dock tree.
+fn collect_panel_names(state: &PanelState, names: &mut HashSet<String>) {
+    if state.children.is_empty() {
+        names.insert(state.panel_name.clone());
+    }
+    for child in &state.children {
+        collect_panel_names(child, names);
+    }
+}
+
 fn prune_panel(state: &PanelState, allowed: &HashSet<String>) -> Option<PanelState> {
     if state.children.is_empty() {
         return allowed
@@ -654,6 +664,22 @@ impl DockShell {
         if state.left_dock.is_none() && state.right_dock.is_none() && state.bottom_dock.is_none() {
             return;
         }
+        // The panels each restored dock actually holds: a panel registered
+        // after the layout was saved is missing from it.
+        let restored_rows: Vec<(wb::DockArea, HashSet<String>)> = [
+            (wb::DockArea::Left, &state.left_dock),
+            (wb::DockArea::Right, &state.right_dock),
+            (wb::DockArea::Bottom, &state.bottom_dock),
+        ]
+        .into_iter()
+        .map(|(area, dock)| {
+            let mut names = HashSet::new();
+            if let Some(dock) = dock {
+                collect_panel_names(dock.panel(), &mut names);
+            }
+            (area, names)
+        })
+        .collect();
 
         // The panels the current layout holds are displaced by the load and
         // told `on_removed`; that is the sync's doing, not the user's.
@@ -670,6 +696,15 @@ impl DockShell {
         // layout is the dock's own business until the model's panel set changes
         // — except the centre, which is empty until the next sync rebuilds it.
         self.structure.center.clear();
+        // An area whose restored dock lacks a panel the model shows records
+        // only what it holds, so the next sync rebuilds it with the newcomer.
+        for (area, held) in restored_rows {
+            let wanted = self.structure.row(area).to_vec();
+            if wanted.iter().any(|id| !held.contains(id)) {
+                let kept: Vec<String> = wanted.into_iter().filter(|id| held.contains(id)).collect();
+                self.structure.set_row(area, kept);
+            }
+        }
     }
 
     /// Mirror the model into the dock. Called from the root view's render,
@@ -1131,6 +1166,21 @@ mod tests {
             .iter()
             .flat_map(leaf_names)
             .collect::<Vec<String>>()
+    }
+
+    /// The restore compares what a persisted dock holds against what the
+    /// model shows: the walker sees every leaf through nested containers, so
+    /// a panel registered after the save is detected as missing.
+    #[test]
+    fn panel_names_of_a_persisted_tree_include_nested_leaves() {
+        let saved = stack(
+            vec![200.0, 300.0],
+            vec![tabs(0, vec![leaf("diagnostics"), leaf("plugins")]), leaf("settings")],
+        );
+        let mut names = HashSet::new();
+        collect_panel_names(&saved, &mut names);
+        assert_eq!(names, allowed(&["diagnostics", "plugins", "settings"]));
+        assert!(!names.contains("rcad.part.tree"), "a newer panel is reported missing");
     }
 
     /// A persisted group whose panel this session no longer has comes back
