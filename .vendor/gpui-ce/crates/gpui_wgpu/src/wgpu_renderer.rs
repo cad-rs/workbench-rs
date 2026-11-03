@@ -15,6 +15,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 mod buffers;
+mod customs;
 mod drawing;
 mod filters;
 mod frame;
@@ -30,6 +31,7 @@ mod target;
 
 #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
 pub use headless::WgpuHeadlessRenderer;
+pub use customs::{CustomDraw, CustomDrawEnv};
 use pipelines::WgpuPipelines as ShaderPipelines;
 use resources::{GlobalBufferLayout, ResourceMetadata, WgpuResources};
 use settings::RenderingParameters;

@@ -1,0 +1,15 @@
+[package]
+name = "workbench-render"
+description = "Generic wgpu viewport render core for workbench-rs: ortho camera, tri/line pipelines, MSAA 4x, screen-space line width, headless-testable"
+keywords = ["wgpu", "render", "viewport", "graphics"]
+categories = ["gui", "rendering", "development-tools"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }

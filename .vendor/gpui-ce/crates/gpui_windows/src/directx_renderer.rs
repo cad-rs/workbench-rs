@@ -681,6 +681,16 @@ impl DirectXRenderer {
                         &scene.surface_opacities()[range.clone()],
                     )
                 }
+                // Custom draws carry a wgpu payload (gpui_wgpu::CustomDraw);
+                // the D3D11 renderer cannot execute them. Skip with a log
+                // line — same degradation contract as SurfaceSource::Texture
+                // on non-wgpu backends.
+                RenderCommand::Batch(PrimitiveBatch::Custom(range)) => {
+                    if !range.is_empty() {
+                        log::error!("Primitive::Custom requires the wgpu renderer; skipping");
+                    }
+                    Ok(())
+                }
                 RenderCommand::Batch(PrimitiveBatch::BackdropFilters(range)) => {
                     let result = (|| {
                         for filter in &scene.backdrop_filters[range.clone()] {

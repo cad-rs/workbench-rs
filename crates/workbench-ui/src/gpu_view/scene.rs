@@ -174,8 +174,14 @@ impl Scene {
         lines.extend(mesh::grid_lines(200.0, 20.0, [0.35, 0.38, 0.45, 0.55]));
         lines.extend(mesh::axes_lines(140.0));
 
+        Self::from_mesh(device, &model, &lines)
+    }
+
+    /// 产品注入入口（注入 API）：自任意 `Mesh`（顶点即三角形扇）+ 特征
+    /// 线构建场景。`Scene::new`（演示零件）经由此委托——上传路径单一来源。
+    pub fn from_mesh(device: &wgpu::Device, model: &Mesh, lines: &[LineVertex]) -> Self {
         let solid_bytes = bytemuck::cast_slice::<SolidVertex, u8>(&model.verts);
-        let line_bytes = bytemuck::cast_slice::<LineVertex, u8>(&lines);
+        let line_bytes = bytemuck::cast_slice::<LineVertex, u8>(lines);
 
         let solid_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("scene-solid-vb"),

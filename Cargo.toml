@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/workbench-api",
     "crates/workbench-core",
+    "crates/workbench-render",
     "crates/workbench-rhai",
     "crates/ribbon",
     "crates/ribbon-demo",
@@ -24,6 +25,7 @@ repository = "https://github.com/cad-rs/workbench-rs"
 # published to crates.io directly)
 workbench-api = { path = "crates/workbench-api", version = "0.1.0" }
 workbench-core = { path = "crates/workbench-core", version = "0.1.0" }
+workbench-render = { path = "crates/workbench-render", version = "0.1.0" }
 workbench-ui = { path = "crates/workbench-ui", version = "0.1.0" }
 workbench-rhai = { path = "crates/workbench-rhai", version = "0.1.0" }
 workbench-example = { path = "workbenches/wb-example", version = "0.1.0" }

@@ -23,7 +23,8 @@ serde_json = { workspace = true }
 # std::time 在 wasm 上不可用；web-time 桌面转发 std、Web 走 performance.now
 web-time = { workspace = true }
 
-# GPU 视口（原生视图扩展；gpu_view 模块）
+# GPU 视口（原生视图扩展；gpu_view 模块；host 宿主 Element 用渲染核心）
+workbench-render = { workspace = true }
 wgpu = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
