@@ -377,16 +377,19 @@ impl Panel for WbPanel {
 }
 
 impl Render for WbPanel {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        match &self.r {
-            PanelRef::Empty => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(col(wb::Color::GRAY))
-                .child(EMPTY_CENTER_TITLE)
-                .into_any_element(),
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (element, wants_repaint) = match &self.r {
+            PanelRef::Empty => (
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(col(wb::Color::GRAY))
+                    .child(EMPTY_CENTER_TITLE)
+                    .into_any_element(),
+                false,
+            ),
             PanelRef::Central { instance_id } => view_canvas(
                 self.ctx.views.clone(),
                 self.ctx.core.clone(),
@@ -394,7 +397,7 @@ impl Render for WbPanel {
                 SlotKey::Central(*instance_id),
             ),
             PanelRef::Area { panel_id, .. } => match &self.script {
-                Some(_) => self.ctx.scripts.borrow().element(panel_id),
+                Some(_) => (self.ctx.scripts.borrow().element(panel_id), false),
                 None => view_canvas(
                     self.ctx.views.clone(),
                     self.ctx.core.clone(),
@@ -402,7 +405,15 @@ impl Render for WbPanel {
                     SlotKey::Panel(panel_id.clone()),
                 ),
             },
+        };
+        // A view with background work in flight (the sheet's HLR generation)
+        // asks for continued frames: gpui only re-renders on invalidation, so
+        // without this the task's result sits unread in its channel and the
+        // view stays on "生成中" until the user happens to click something.
+        if wants_repaint {
+            cx.notify();
         }
+        element
     }
 }
 

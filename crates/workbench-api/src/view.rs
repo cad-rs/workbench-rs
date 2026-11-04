@@ -22,4 +22,13 @@ pub trait ViewInstance: 'static {
     fn element(&mut self, _host: &mut dyn AppServices) -> Option<Box<dyn std::any::Any>> {
         None
     }
+    /// 是否还有后台工作在跑、需要平台继续排帧。
+    ///
+    /// `element` 只在视图**被重画**时调用，而 gpui 在 UI 空闲时不重画。
+    /// 有后台任务（如图纸的 HLR 生成）的视图靠这个方法让平台在任务在途
+    /// 期间持续排帧，否则任务结果回到通道里也没人去取——视图会一直停在
+    /// 「生成中」。默认 `false`（大多数视图没有后台工作）。
+    fn wants_repaint(&self) -> bool {
+        false
+    }
 }

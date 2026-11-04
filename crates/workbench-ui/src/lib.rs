@@ -350,12 +350,12 @@ fn view_canvas(
     core: SharedCore,
     scripts: dock_panel::SharedScripts,
     key: SlotKey,
-) -> AnyElement {
+) -> (AnyElement, bool) {
     // A script central tab has no Rust instance: the frontend mounts the script
     // view and draws it here, keyed by the tab instance (`wb.tab.{id}`).
     if let SlotKey::Central(id) = &key {
         if tab_script(&core, *id).is_some() {
-            return scripts.borrow().element(&format!("wb.tab.{id}"));
+            return (scripts.borrow().element(&format!("wb.tab.{id}")), false);
         }
     }
 
@@ -368,7 +368,7 @@ fn view_canvas(
     };
 
     let Some(instance) = instance else {
-        return slot_placeholder();
+        return (slot_placeholder(), false);
     };
 
     // The view reads the host while building its element tree, so the model
@@ -380,23 +380,26 @@ fn view_canvas(
     // "视图元素不在渲染上下文中"). The handle points at the same live runtime
     // the view was built from; a new frame always replaces it before any
     // further handler runs.
-    let element = {
+    let (element, wants_repaint) = {
         let Ok(mut guard) = core.lock() else {
-            return slot_placeholder();
+            return (slot_placeholder(), false);
         };
-        let built = instance
-            .borrow_mut()
-            .element(&mut *guard as &mut dyn wb::AppServices);
-        built
+        let mut view = instance.borrow_mut();
+        let built = view.element(&mut *guard as &mut dyn wb::AppServices);
+        // Read after `element`: it is what clears the flag (adopting a landed
+        // result) or sets it (spawning a task).
+        let wants = view.wants_repaint();
+        (built, wants)
     };
 
-    match element {
+    let element = match element {
         Some(handle) => match handle.downcast::<AnyElement>() {
             Ok(element) => *element,
             Err(_) => slot_placeholder(),
         },
         None => slot_placeholder(),
-    }
+    };
+    (element, wants_repaint)
 }
 
 impl Render for RootView {
