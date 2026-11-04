@@ -1,5 +1,6 @@
 //! 命令系统契约（design.md §10）：RibbonBar/工具栏、菜单、快捷键与插件 API 的统一执行入口。
 
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use crate::ids::{CommandId, DocumentId};
@@ -405,6 +406,16 @@ impl<'a> CommandCtx<'a> {
     }
     pub fn run_with(&mut self, command: &str, args: CommandArgs) -> CommandResult {
         self.app.dispatch(command, &args)
+    }
+    /// 请求原生文件对话框（非阻塞）。对话框在后台线程执行，`action` 于
+    /// 下一帧节拍在 UI 线程被调用；详见 [`AppServices::request_file_dialog`]。
+    pub fn request_file_dialog(
+        &mut self,
+        extensions: Vec<String>,
+        default_name: Option<String>,
+        action: Box<dyn FnOnce(&mut dyn AppServices, Option<PathBuf>)>,
+    ) {
+        self.app.request_file_dialog(extensions, default_name, action);
     }
     /// 打开中央视图（可绑定活动文档）。
     pub fn open_view(&mut self, view_type: &str, bind_document: bool) -> Result<(), String> {

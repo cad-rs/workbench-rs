@@ -2,21 +2,26 @@
 //!
 //! Web（wasm32）构建没有同步本地对话框：返回 None（命令按“已取消”处理）；
 //! 需要文件选择时应改用浏览器文件/拖拽等 Web 惯例（后续扩展）。
+//!
+//! 这些函数是**阻塞式**的（OS 模态循环），只能在后台线程调用：UI 线程内
+//! 调用会重入 gpui 的窗口过程、楔死渲染循环。因此它们对本 crate 私有，
+//! 唯一出口是 [`crate::app::AppRuntime::request_file_dialog`]（后台线程
+//! 执行 + 帧节拍回 UI 线程）。
 
 use std::path::PathBuf;
 
 #[cfg(target_arch = "wasm32")]
-pub fn pick_open_file(_extensions: &[String]) -> Option<PathBuf> {
+pub(crate) fn pick_open_file(_extensions: &[String]) -> Option<PathBuf> {
     None
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn pick_save_file(_default_name: &str, _extensions: &[String]) -> Option<PathBuf> {
+pub(crate) fn pick_save_file(_default_name: &str, _extensions: &[String]) -> Option<PathBuf> {
     None
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn pick_open_file(extensions: &[String]) -> Option<PathBuf> {
+pub(crate) fn pick_open_file(extensions: &[String]) -> Option<PathBuf> {
     let mut dlg = rfd::FileDialog::new().set_title("打开文档");
     if !extensions.is_empty() {
         let exts: Vec<&str> = extensions.iter().map(|s| s.as_str()).collect();
@@ -26,7 +31,7 @@ pub fn pick_open_file(extensions: &[String]) -> Option<PathBuf> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn pick_save_file(default_name: &str, extensions: &[String]) -> Option<PathBuf> {
+pub(crate) fn pick_save_file(default_name: &str, extensions: &[String]) -> Option<PathBuf> {
     let mut dlg = rfd::FileDialog::new()
         .set_title("保存文档")
         .set_file_name(default_name);

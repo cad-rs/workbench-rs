@@ -41,17 +41,21 @@ pub struct AppRuntime {
     invocations: VecDeque<InvocationRecord>,
     invocation_seq: u64,
     /// 在途的原生对话框（后台线程执行，结果按帧排空）。
-    dialog_in_flight: Option<DialogRequest>,
-    dialog_result_rx: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+    dialog_in_flight: Option<FileDialogRequest>,
+    dialog_result_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
 }
 
 /// 需要弹原生对话框的 UI 动作。对话框在后台线程运行（阻塞式 rfd 调用
 /// 绝不能进 UI 线程：会饿死 gpui 事件循环并触发窗口内部重入借用），
-/// 结果经通道回传，由 [`AppRuntime::frame_tick`] 排水并执行后续动作。
-#[derive(Clone, Debug)]
-pub(crate) enum DialogRequest {
-    OpenDocument { extensions: Vec<String> },
-    SaveDocumentAs { doc_id: api::DocumentId, default_name: String, extensions: Vec<String> },
+/// 结果经通道回传，由 [`AppRuntime::frame_tick`] 排水并在 UI 线程执行
+/// `action`。
+pub(crate) struct FileDialogRequest {
+    /// 文件过滤扩展名（空 = 不过滤）。
+    pub extensions: Vec<String>,
+    /// 默认文件名（保存对话框）；打开对话框为 `None`。
+    pub default_name: Option<String>,
+    /// 拿到选择结果后于 UI 线程执行的后续动作（`None` = 取消）。
+    pub action: Box<dyn FnOnce(&mut dyn api::AppServices, Option<PathBuf>)>,
 }
 
 impl AppRuntime {
@@ -166,22 +170,16 @@ impl AppRuntime {
 
     // ---- 帧驱动 ----
 
-    /// 请求弹原生文件对话框（非阻塞）：对话框在后台线程运行， picking 结果
+    /// 请求弹原生文件对话框（非阻塞）：对话框在后台线程运行，选择结果
     /// 由 [`Self::frame_tick`] 排水执行。同一时刻只允许一个在途对话框。
-    pub(crate) fn request_dialog(&mut self, request: DialogRequest) {
+    pub(crate) fn request_dialog(&mut self, request: FileDialogRequest) {
         if self.dialog_in_flight.is_some() {
             self.host.log.warn("已有对话框在途，忽略新的打开/保存请求");
             return;
         }
-        let (extensions, default_name) = match &request {
-            DialogRequest::OpenDocument { extensions } => (extensions.clone(), None),
-            DialogRequest::SaveDocumentAs {
-                extensions,
-                default_name,
-                ..
-            } => (extensions.clone(), Some(default_name.clone())),
-        };
         let (tx, rx) = std::sync::mpsc::channel();
+        let extensions = request.extensions.clone();
+        let default_name = request.default_name.clone();
         std::thread::spawn(move || {
             let picked = match &default_name {
                 Some(name) => crate::dialog::pick_save_file(name, &extensions),
@@ -193,7 +191,7 @@ impl AppRuntime {
         self.dialog_result_rx = Some(rx);
     }
 
-    /// 排空在途对话框结果并执行后续动作（打开文档 / 另存为）。
+    /// 排空在途对话框结果并在 UI 线程执行其后续动作。
     /// 返回是否取到了一个结果（UI 需要重绘）。
     fn drain_dialog_result(&mut self) -> bool {
         let Some(rx) = &self.dialog_result_rx else {
@@ -214,20 +212,10 @@ impl AppRuntime {
         let Some(request) = self.dialog_in_flight.take() else {
             return false;
         };
-        match (request, picked) {
-            (DialogRequest::OpenDocument { .. }, Some(path)) => {
-                if let Err(e) = platform_cmds::open_path_runtime(self, &path) {
-                    self.host.log.error(e);
-                }
-            }
-            (DialogRequest::SaveDocumentAs { doc_id, .. }, Some(path)) => {
-                match self.host.docs.save_as(doc_id, &path) {
-                    Ok(saved) => self.host.log.info(format!("已另存为 {}", saved.display())),
-                    Err(e) => self.host.log.error(e),
-                }
-            }
-            (_, None) => self.host.log.info("已取消"),
+        if picked.is_none() {
+            self.host.log.info("已取消");
         }
+        (request.action)(self, picked);
         true
     }
 
@@ -264,75 +252,6 @@ impl AppRuntime {
             self.host.ws.account = phase;
         }
         true
-    }
-
-    /// 平台命令 → 对话框请求的映射；返回 None 的命令照常走命令分发。
-    fn dialog_request_for_command(&self, id: &str) -> Option<DialogRequest> {
-        match id {
-            crate::platform_cmds::OPEN_DOCUMENT => Some(DialogRequest::OpenDocument {
-                extensions: self.all_extensions(),
-            }),
-            crate::platform_cmds::SAVE_DOCUMENT_AS => {
-                let doc_id = self.snapshot.active_document.as_ref()?.id;
-                let (default_name, extensions) = self.save_dialog_context(&doc_id)?;
-                Some(DialogRequest::SaveDocumentAs {
-                    doc_id,
-                    default_name,
-                    extensions,
-                })
-            }
-            // 保存：已有路径的文档走普通同步保存（无对话框），只有无路径
-            // 文档才需要“另存为”式对话框。
-            crate::platform_cmds::SAVE_DOCUMENT => {
-                let doc_id = self.snapshot.active_document.as_ref()?.id;
-                let has_path = self
-                    .host
-                    .docs
-                    .get(doc_id)
-                    .map(|d| d.path.is_some())
-                    .unwrap_or(false);
-                if has_path {
-                    return None;
-                }
-                let (default_name, extensions) = self.save_dialog_context(&doc_id)?;
-                Some(DialogRequest::SaveDocumentAs {
-                    doc_id,
-                    default_name,
-                    extensions,
-                })
-            }
-            _ => None,
-        }
-    }
-
-    fn all_extensions(&self) -> Vec<String> {
-        self.host
-            .docs
-            .types()
-            .iter()
-            .flat_map(|t| t.extensions.iter().cloned())
-            .collect()
-    }
-
-    /// 另存为对话框的默认文件名与扩展名过滤（取自文档标题与类型）。
-    fn save_dialog_context(&self, doc_id: &api::DocumentId) -> Option<(String, Vec<String>)> {
-        let doc = self.host.docs.get(*doc_id)?;
-        let extensions = self
-            .host
-            .docs
-            .type_of(&doc.type_id)
-            .map(|t| t.extensions.clone())
-            .unwrap_or_default();
-        let default_name = if doc.title.contains('.') {
-            doc.title.clone()
-        } else {
-            format!(
-                "{}.{}",
-                doc.title,
-                extensions.first().map(|s| s.as_str()).unwrap_or("dat")
-            )
-        };
-        Some((default_name, extensions))
     }
 
     /// 平台节拍：泵任务事件、自动保存计时、同步活动文档/标签标题、刷新上下文快照。
@@ -670,13 +589,6 @@ impl AppRuntime {
             self.host.log.error(msg.clone());
             return CommandResult::failed(msg);
         }
-        // 平台对话框命令走非阻塞路径：阻塞式原生对话框绝不能在 UI 线程内
-        // 执行（会饿死 gpui 事件循环并触发窗口内部重入借用）。
-        if let Some(request) = self.dialog_request_for_command(id) {
-            self.note_invocation(seq, InvocationStatus::Succeeded, Some("已弹出文件对话框".into()));
-            self.request_dialog(request);
-            return CommandResult::done_with("已弹出文件对话框");
-        }
         // Account commands run on the host directly (they manage the
         // background login thread; same interception pattern as dialogs).
         match id {
@@ -950,6 +862,19 @@ impl api::AppServices for AppRuntime {
 
     fn autosave_now(&mut self) -> Result<usize, String> {
         self.autosave_now()
+    }
+
+    fn request_file_dialog(
+        &mut self,
+        extensions: Vec<String>,
+        default_name: Option<String>,
+        action: Box<dyn FnOnce(&mut dyn api::AppServices, Option<PathBuf>)>,
+    ) {
+        self.request_dialog(FileDialogRequest {
+            extensions,
+            default_name,
+            action,
+        });
     }
 }
 
@@ -1533,5 +1458,105 @@ fn default_layout_dir(product_id: &str) -> PathBuf {
         std::env::var_os("HOME")
             .map(|h| PathBuf::from(h).join(".config").join(product_id))
             .unwrap_or_else(std::env::temp_dir)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime() -> AppRuntime {
+        WorkbenchAppBuilder::new("test.dialog", "Dialog test")
+            .with_layout_path(std::env::temp_dir().join("workbench-rs-dialog-test/layout.json"))
+            .build()
+            .expect("装配失败")
+    }
+
+    fn request(
+        action: Box<dyn FnOnce(&mut dyn api::AppServices, Option<PathBuf>)>,
+    ) -> FileDialogRequest {
+        FileDialogRequest {
+            extensions: vec!["rcad".to_string()],
+            default_name: None,
+            action,
+        }
+    }
+
+    /// A module-requested pick is drained by `frame_tick`, which runs the
+    /// action on the UI thread with the picked path. The blocking OS modal
+    /// loop itself never runs on the UI thread.
+    #[test]
+    fn 对话框请求_由帧节拍排水并在主线程执行动作() {
+        let mut app = runtime();
+        let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        tx.send(Some(PathBuf::from("C:/tmp/part.rcad"))).unwrap();
+        app.dialog_in_flight = Some(request(Box::new(move |_, picked| {
+            let _ = done_tx.send(picked);
+        })));
+        app.dialog_result_rx = Some(rx);
+
+        assert!(app.frame_tick(0.0), "取到结果应报告需要重绘");
+        assert_eq!(
+            done_rx.try_recv().unwrap(),
+            Some(PathBuf::from("C:/tmp/part.rcad"))
+        );
+        assert!(app.dialog_in_flight.is_none());
+        assert!(app.dialog_result_rx.is_none());
+    }
+
+    /// A cancelled dialog (user closed the picker) still runs the action with
+    /// `None`, so the module can log the cancellation.
+    #[test]
+    fn 对话框取消_动作收到空值() {
+        let mut app = runtime();
+        let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        tx.send(None).unwrap();
+        app.dialog_in_flight = Some(request(Box::new(move |_, picked| {
+            let _ = done_tx.send(picked);
+        })));
+        app.dialog_result_rx = Some(rx);
+
+        assert!(app.frame_tick(0.0));
+        assert_eq!(done_rx.try_recv().unwrap(), None);
+    }
+
+    /// A picker thread that dies without sending is treated as a cancellation
+    /// (the action still runs, with `None`).
+    #[test]
+    fn 对话框线程死亡_按取消处理() {
+        let mut app = runtime();
+        let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        drop(tx);
+        app.dialog_in_flight = Some(request(Box::new(move |_, picked| {
+            let _ = done_tx.send(picked);
+        })));
+        app.dialog_result_rx = Some(rx);
+
+        assert!(app.frame_tick(0.0));
+        assert_eq!(done_rx.try_recv().unwrap(), None);
+    }
+
+    /// Only one dialog may be in flight: a second request while one is pending
+    /// is ignored (and must not replace the pending request or its channel).
+    #[test]
+    fn 在途对话框期间_新请求被忽略() {
+        let mut app = runtime();
+        app.dialog_in_flight = Some(FileDialogRequest {
+            extensions: vec![],
+            default_name: None,
+            action: Box::new(|_, _| {}),
+        });
+
+        app.request_dialog(request(Box::new(|_, _| {})));
+
+        let pending = app.dialog_in_flight.as_ref().expect("在途请求应保留");
+        assert!(pending.extensions.is_empty(), "在途请求被替换了");
+        assert!(
+            app.dialog_result_rx.is_none(),
+            "被忽略的请求不应安装结果通道"
+        );
     }
 }

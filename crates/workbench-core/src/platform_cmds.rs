@@ -260,11 +260,8 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
     // 打开文档
     registry.register_command(
         CommandDef::sync(OPEN_DOCUMENT, "打开文档…", |ctx: &mut CommandCtx, _args: &CommandArgs| {
-            let exts = all_extensions(ctx);
-            let Some(path) = crate::dialog::pick_open_file(&exts) else {
-                return CommandResult::done_with("已取消");
-            };
-            open_path(ctx, &path)
+            request_open_dialog(ctx);
+            CommandResult::done_with("已弹出文件对话框")
         })
         .icon(crate::assets::icons::OPEN)
         .hotkey(Hotkey::new(KeyCode::O).ctrl(true)),
@@ -291,7 +288,7 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
                     Err(e) => CommandResult::failed(e),
                 }
             } else {
-                save_as_flow(ctx, doc_id)
+                request_save_as_dialog(ctx, doc_id)
             }
         })
         .icon(crate::assets::icons::SAVE)
@@ -305,7 +302,7 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
             let Some(doc_id) = ctx.active_document() else {
                 return CommandResult::failed("没有活动文档");
             };
-            save_as_flow(ctx, doc_id)
+            request_save_as_dialog(ctx, doc_id)
         })
         .hotkey(Hotkey::new(KeyCode::S).ctrl(true).shift(true))
         .enabled_when(|snap| snap.active_document.is_some()),
@@ -545,8 +542,26 @@ pub fn open_path_runtime(
     Ok(())
 }
 
-fn save_as_flow(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResult {
-    let (title, exts) = {
+/// 请平台在后台线程弹出“打开文档”对话框，选中后于 UI 线程打开。
+///
+/// 阻塞式 OS 模态循环绝不能在 UI 线程执行（会重入 gpui 窗口过程、楔死
+/// 渲染循环），所以走 [`CommandCtx::request_file_dialog`]。
+fn request_open_dialog(ctx: &mut CommandCtx) {
+    let exts = all_extensions(ctx);
+    ctx.request_file_dialog(exts, None, Box::new(|ctx, picked| {
+        let Some(path) = picked else {
+            return;
+        };
+        let mut cmd = CommandCtx::new(ctx);
+        if let CommandResult::Failed { error } = open_path(&mut cmd, &path) {
+            cmd.host().log.error(error);
+        }
+    }));
+}
+
+/// 请平台在后台线程弹出“另存为”对话框，选中后于 UI 线程落盘。
+fn request_save_as_dialog(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResult {
+    let (default_name, exts) = {
         let host = ctx.host();
         match host.docs.get(doc_id) {
             Some(doc) => {
@@ -555,26 +570,31 @@ fn save_as_flow(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResult 
                     .type_of(&doc.type_id)
                     .map(|t| t.extensions.clone())
                     .unwrap_or_default();
-                (doc.title.clone(), exts)
+                let default_name = if doc.title.contains('.') {
+                    doc.title.clone()
+                } else {
+                    format!(
+                        "{}.{}",
+                        doc.title,
+                        exts.first().map(|s| s.as_str()).unwrap_or("dat")
+                    )
+                };
+                (default_name, exts)
             }
             None => return CommandResult::failed("文档不存在"),
         }
     };
-    let default_name = if title.contains('.') {
-        title
-    } else {
-        format!("{}.{}", title, exts.first().map(|s| s.as_str()).unwrap_or("dat"))
-    };
-    let Some(path) = crate::dialog::pick_save_file(&default_name, &exts) else {
-        return CommandResult::done_with("已取消");
-    };
-    match ctx.host().docs.save_as(doc_id, &path) {
-        Ok(path) => {
-            ctx.host().log.info(format!("已另存为 {}", path.display()));
-            CommandResult::done()
+    ctx.request_file_dialog(exts, Some(default_name), Box::new(move |ctx, picked| {
+        let Some(path) = picked else {
+            return;
+        };
+        let mut cmd = CommandCtx::new(ctx);
+        match cmd.host().docs.save_as(doc_id, &path) {
+            Ok(saved) => cmd.host().log.info(format!("已另存为 {}", saved.display())),
+            Err(e) => cmd.host().log.error(e),
         }
-        Err(e) => CommandResult::failed(e),
-    }
+    }));
+    CommandResult::done_with("已弹出文件对话框")
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! 平台服务聚合与工作台可见的能力门面（design.md §4.1 Platform）。
 
 use std::any::{Any, TypeId};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::command::{CommandArgs, CommandResult, CtxSnapshot};
@@ -280,4 +281,16 @@ pub trait AppServices {
     fn disable_plugin(&mut self, plugin_id: &str) -> Result<Vec<String>, String>;
     /// 立即执行一次自动保存，返回保存的文档数（阶段 5）。
     fn autosave_now(&mut self) -> Result<usize, String>;
+    /// 请求原生文件对话框（非阻塞）。
+    ///
+    /// 阻塞式 OS 模态循环绝不能在 UI 线程内执行：它会在 gpui 的窗口过程
+    /// 重入窗口状态借用，楔死渲染循环（进程 Responding=False）。对话框因此
+    /// 在后台线程运行，`action` 于下一帧节拍在 UI 线程被调用，参数为选中的
+    /// 路径（`None` = 取消）。同一时刻只允许一个在途对话框。
+    fn request_file_dialog(
+        &mut self,
+        extensions: Vec<String>,
+        default_name: Option<String>,
+        action: Box<dyn FnOnce(&mut dyn AppServices, Option<PathBuf>)>,
+    );
 }
