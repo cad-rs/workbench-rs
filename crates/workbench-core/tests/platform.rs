@@ -463,6 +463,50 @@ fn 任务_进度取消与终态() {
     assert_eq!(tasks.get(id).unwrap().status, wb::TaskStatus::Cancelled);
 }
 
+/// 节拍与渲染解耦后，`frame_tick` 的返回值是前端排帧的依据。
+///
+/// 旧前端只看 `tasks.summary().0 > 0`：任务完成的那一刻谓词转假，终态事件
+/// 永远不被泵，诊断面板的「后台任务 运行/累计」就此滞后到下一次输入。本测试
+/// 钉住「取走终态事件的那次节拍必须报告 changed」，并且泵完后回到 false。
+#[test]
+fn 任务_节拍在任务完成后仍报告需要重绘() {
+    let mut a = app();
+    assert!(!a.frame_tick(0.0), "空闲节拍不应请求重绘");
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let id = a.host.tasks.spawn(wb::TaskSpec {
+        title: "节拍回归任务".into(),
+        cancellable: false,
+        input: Box::new(()),
+        job: Box::new(move |_ctx: &mut wb::TaskCtx| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = done_tx.send(());
+            Ok(None)
+        }),
+    });
+
+    assert!(a.frame_tick(0.0), "任务在跑时节拍应请求重绘");
+    assert_eq!(a.host.tasks.summary().0, 1);
+    // 等任务线程真正结束：终态事件已进通道，但还没有被泵（模拟 UI 空闲）。
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("任务应完成");
+    assert_eq!(
+        a.host.tasks.summary().0, 1,
+        "事件未泵时任务仍显示运行中（滞后的前提）"
+    );
+    assert!(
+        a.frame_tick(0.0),
+        "取走终态事件的那次节拍必须报告需要重绘"
+    );
+    assert_eq!(a.host.tasks.summary().0, 0, "终态已泵，运行计数应为 0");
+    assert_eq!(
+        a.host.tasks.get(id).unwrap().status,
+        wb::TaskStatus::Succeeded
+    );
+    assert!(!a.frame_tick(0.0), "泵完后的空闲节拍不应请求重绘");
+}
+
 #[test]
 fn 工作区_单例视图与布局恢复() {
     let mut a = app();

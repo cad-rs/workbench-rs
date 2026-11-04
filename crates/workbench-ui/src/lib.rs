@@ -404,10 +404,11 @@ fn view_canvas(
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 帧驱动：任务泵 + 上下文快照
+        // 帧统计只在这里测：它描述的是渲染节奏。平台节拍（任务泵 / 自动保存 /
+        // 上下文快照）由 `launch_app` 的定时器驱动，与渲染解耦——gpui 只在失效时
+        // 重画，渲染驱动的泵在 UI 空闲时停转，任务结果会留在通道里没人取。
         {
             let mut core = self.core.lock().unwrap_or_else(|p| p.into_inner());
-            core.frame_tick(0.016);
             let now = web_time::Instant::now();
             let dt_ms = (now - self.last_render).as_secs_f32() * 1000.0;
             self.last_render = now;
@@ -1069,7 +1070,8 @@ fn launch_app(
         let _ = handle;
         cx.activate(true);
 
-        // 有任务运行时以低频率刷新（进度动画）
+        // 平台节拍定时器：泵任务事件、驱动自动保存、刷新上下文快照，并在有
+        // UI 可见工作（任务在跑 / 取到事件 / 对话框结果）时排帧。
         let root_entity = cx
             .active_window()
             .and_then(|w| w.downcast::<RootView>())
@@ -1110,14 +1112,15 @@ fn launch_app(
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(100))
                 .await;
-            let running = core_loop
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .host
-                .tasks
-                .summary()
-                .0;
-            if running > 0 {
+            // 节拍自己返回是否需要重绘：任务在跑、取到终态事件、对话框结果、
+            // 自动保存、活动文档变化都为 true。旧实现只看 `running > 0`，于是
+            // 任务完成的那一刻谓词转假，终态事件永远不被泵——诊断面板的
+            // 「后台任务 运行/累计」就此滞后到下一次输入。
+            let needs_repaint = {
+                let mut core = core_loop.lock().unwrap_or_else(|p| p.into_inner());
+                core.frame_tick(0.1)
+            };
+            if needs_repaint {
                 if let Some(weak) = weak_root.clone() {
                     cx.update(|cx| notify(&weak, cx));
                 }

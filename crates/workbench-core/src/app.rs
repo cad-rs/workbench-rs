@@ -18,7 +18,8 @@ use crate::platform_cmds;
 /// 调用历史环形缓冲容量。
 const INVOCATION_HISTORY: usize = 100;
 
-/// 平台运行时。UI 线程所有；前端每帧调用 [`AppRuntime::frame_tick`]。
+/// 平台运行时。UI 线程所有；前端在自己的定时器上调用 [`AppRuntime::frame_tick`]
+/// （与视图渲染解耦：gpui 只在失效时重画，渲染驱动的泵在 UI 空闲时停转）。
 pub struct AppRuntime {
     registry: Registry,
     pub host: ServiceHost,
@@ -193,16 +194,17 @@ impl AppRuntime {
     }
 
     /// 排空在途对话框结果并执行后续动作（打开文档 / 另存为）。
-    fn drain_dialog_result(&mut self) {
+    /// 返回是否取到了一个结果（UI 需要重绘）。
+    fn drain_dialog_result(&mut self) -> bool {
         let Some(rx) = &self.dialog_result_rx else {
-            return;
+            return false;
         };
         let picked = match rx.try_recv() {
             Ok(picked) => {
                 self.dialog_result_rx = None;
                 picked
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 // 线程异常退出且未发送：按取消处理。
                 self.dialog_result_rx = None;
@@ -210,7 +212,7 @@ impl AppRuntime {
             }
         };
         let Some(request) = self.dialog_in_flight.take() else {
-            return;
+            return false;
         };
         match (request, picked) {
             (DialogRequest::OpenDocument { .. }, Some(path)) => {
@@ -226,20 +228,25 @@ impl AppRuntime {
             }
             (_, None) => self.host.log.info("已取消"),
         }
+        true
     }
 
     // ---- 账号登录（Phase 3：device flow）----
     // The login state machine lives on the ServiceHost (commands reach it via
     // ctx.host()); the runtime only drains phase updates each frame.
 
-    /// Drain pending login-phase updates into `ws.account` (once per frame).
-    fn drain_account_login(&mut self) {
+    /// Drain pending login-phase updates into `ws.account` (once per tick).
+    /// 返回是否消费了阶段更新（UI 需要重绘）。
+    fn drain_account_login(&mut self) -> bool {
         let Some(rx) = self.host.account_login_rx.as_ref() else {
-            return;
+            return false;
         };
         let mut updates = Vec::new();
         while let Ok(phase) = rx.try_recv() {
             updates.push(phase);
+        }
+        if updates.is_empty() {
+            return false;
         }
         // A terminal phase (LoggedIn / Failed) closes the flow: drop the
         // channel so the next login can start fresh.
@@ -256,6 +263,7 @@ impl AppRuntime {
             }
             self.host.ws.account = phase;
         }
+        true
     }
 
     /// 平台命令 → 对话框请求的映射；返回 None 的命令照常走命令分发。
@@ -327,11 +335,17 @@ impl AppRuntime {
         Some((default_name, extensions))
     }
 
-    /// 每帧调用：泵任务事件、自动保存计时、同步活动文档/标签标题、刷新上下文快照。
-    pub fn frame_tick(&mut self, dt_secs: f32) {
-        self.drain_dialog_result();
-        self.drain_account_login();
-        self.pump_task_events();
+    /// 平台节拍：泵任务事件、自动保存计时、同步活动文档/标签标题、刷新上下文快照。
+    ///
+    /// 返回 `true` 表示本次节拍改动了 UI 可见状态（任务事件、对话框结果、
+    /// 登录阶段、自动保存、活动文档），前端据此排一次重绘。前端在自己的定时器
+    /// 上驱动本方法，而不是在视图渲染里——gpui 只在失效时重画，渲染驱动的泵
+    /// 会在 UI 空闲时停转，任务结果回到通道里没人取（诊断面板的后台任务计数
+    /// 因此滞后）。
+    pub fn frame_tick(&mut self, dt_secs: f32) -> bool {
+        let mut changed = self.drain_dialog_result();
+        changed |= self.drain_account_login();
+        changed |= self.pump_task_events();
         // 自动保存（阶段 5：§18 生产级扩展）
         let interval = self
             .host
@@ -341,15 +355,21 @@ impl AppRuntime {
         self.autosave_accum += dt_secs.max(0.0);
         if self.autosave_accum >= interval {
             self.autosave_accum = 0.0;
-            if let Err(e) = self.autosave_now() {
-                self.host.log.warn(format!("自动保存失败: {e}"));
+            match self.autosave_now() {
+                Ok(saved) => changed |= saved > 0,
+                Err(e) => {
+                    self.host.log.warn(format!("自动保存失败: {e}"));
+                    changed = true;
+                }
             }
         }
         // 活动文档跟随活动标签的绑定
         if let Some(tab) = self.host.ws.active_tab() {
             if tab.document.is_some() {
                 let doc = tab.document;
+                let before = self.host.docs.active_id();
                 self.host.docs.set_active(doc);
+                changed |= self.host.docs.active_id() != before;
             }
         }
         // 文档绑定标签的标题同步（含未保存标记）
@@ -371,6 +391,7 @@ impl AppRuntime {
                         .iter_mut()
                         .find(|t| t.instance_id == instance_id)
                     {
+                        changed |= slot.title != title;
                         slot.title = title;
                     }
                 } else {
@@ -382,12 +403,19 @@ impl AppRuntime {
                         .iter_mut()
                         .find(|t| t.instance_id == instance_id)
                     {
-                        slot.document = None;
+                        if slot.document.is_some() {
+                            slot.document = None;
+                            changed = true;
+                        }
                     }
                 }
             }
         }
         self.snapshot = self.make_snapshot();
+        // 有任务在跑时持续排帧（进度动画），任务终态事件被本节拍取走后
+        // `changed` 为真，面板才会把「运行」计数落回 0。
+        changed |= self.host.tasks.summary().0 > 0;
+        changed
     }
 
     // ---- 自动保存与崩溃恢复（阶段 5：§18）----
@@ -536,12 +564,15 @@ impl AppRuntime {
         self.host.record_frame(dt_ms);
     }
 
-    fn pump_task_events(&mut self) {
+    /// 泵任务事件通道。返回是否取到了事件（任务状态/日志/调用历史变化，
+    /// 前端需要重绘）。
+    fn pump_task_events(&mut self) -> bool {
         let rx = self.host.task_events();
         let events: Vec<TaskEvent> = {
             let guard = rx.lock().unwrap_or_else(|p| p.into_inner());
             std::iter::from_fn(|| guard.try_recv().ok()).collect()
         };
+        let any = !events.is_empty();
         for ev in events {
             self.host.tasks.apply_event(&ev);
             match ev {
@@ -598,6 +629,7 @@ impl AppRuntime {
                 }
             }
         }
+        any
     }
 
     // ---- 命令执行 ----
