@@ -56,6 +56,29 @@ fn intern(name: &str) -> &'static str {
     leaked
 }
 
+/// The panel names the dock must keep for a model snapshot: every panel the
+/// model still has (side docks plus centre tabs), or the empty-centre
+/// placeholder when no tab is open.
+///
+/// The sync's own live set cannot serve this purpose: `panel_for_*` registers
+/// a panel only when its region is (re)built, so an unchanged frame would
+/// otherwise prune panels the dock is still displaying.
+fn live_names(snap: &ShellSnapshot) -> HashSet<&'static str> {
+    let mut live = HashSet::new();
+    for area in [&snap.left, &snap.right, &snap.bottom] {
+        for panel in &area.panels {
+            live.insert(intern(&panel.id));
+        }
+    }
+    for instance_id in &snap.tabs {
+        live.insert(intern(&format!("wb.tab.{instance_id}")));
+    }
+    if snap.tabs.is_empty() {
+        live.insert(intern("wb.empty"));
+    }
+    live
+}
+
 // ---- 共享状态（面板实体携带） ----
 
 /// The gpui-rhai view domain, shared between the root view (which mounts) and
@@ -738,6 +761,16 @@ impl DockShell {
         self.sync_center(snap, fresh, &mut live, window, cx);
         self.installed = true;
 
+        // `panel_for_*` only registers a panel with `live` when its region is
+        // (re)built, so on an unchanged frame the set misses every panel the
+        // dock is still showing. Union in the model's own set: those names are
+        // exactly the panels the dock must keep, and the retain below then
+        // still drops the ones the model no longer has (closed tab, hidden
+        // panel) instead of pruning live panels -- which would leave
+        // `panel_weaks()` empty and the root's repaint driver unable to reach
+        // any panel (the diagnostics panel froze solid).
+        live.extend(live_names(snap));
+
         // A panel the model no longer has (closed tab, hidden panel) leaves the
         // dock with the next rebuild; its adapter goes now, so the map cannot
         // grow with every closed tab.
@@ -1000,6 +1033,58 @@ mod tests {
             active: active.map(str::to_string),
             size,
         }
+    }
+
+    /// The live set must name every panel the model still has, including the
+    /// ones whose region is not rebuilt on a given frame.
+    ///
+    /// Regression: the sync used to build the set only from `panel_for_*`,
+    /// which runs inside the "region changed" guard. From the second frame on,
+    /// the retain then pruned every panel the dock was still showing, so
+    /// `panel_weaks()` came back empty and the root's repaint driver could no
+    /// longer reach any panel -- the diagnostics panel froze until the next
+    /// input event.
+    #[test]
+    fn live_names_cover_every_panel_the_model_still_has() {
+        let snap = ShellSnapshot {
+            left: area(&["rcad.part.tree", "rcad.assembly.tree"], Some("rcad.part.tree"), 200.0),
+            right: area(
+                &[
+                    "app.panel.diagnostics",
+                    "app.panel.plugins",
+                    "app.panel.settings",
+                ],
+                Some("app.panel.diagnostics"),
+                320.0,
+            ),
+            bottom: area(&[], None, 0.0),
+            tabs: vec![7, 9],
+            active_tab: Some(7),
+        };
+
+        let live = live_names(&snap);
+        for name in [
+            "rcad.part.tree",
+            "rcad.assembly.tree",
+            "app.panel.diagnostics",
+            "app.panel.plugins",
+            "app.panel.settings",
+            "wb.tab.7",
+            "wb.tab.9",
+        ] {
+            assert!(live.contains(intern(name)), "{name} must stay live");
+        }
+        assert!(!live.contains(intern("wb.empty")), "a tab is open");
+        assert!(
+            !live.contains(intern("rcad.closed.tree")),
+            "a panel the model no longer has is not live"
+        );
+
+        // No tab open: the empty-centre placeholder is the live panel.
+        let empty = ShellSnapshot { tabs: vec![], ..snap };
+        let live = live_names(&empty);
+        assert!(live.contains(intern("wb.empty")));
+        assert!(!live.contains(intern("wb.tab.7")));
     }
 
     /// A runtime with one open tab, and the shared cells a panel carries.
