@@ -487,7 +487,15 @@ fn 任务_节拍在任务完成后仍报告需要重绘() {
 
     assert!(a.frame_tick(0.0), "任务在跑时节拍应请求重绘");
     assert_eq!(a.host.tasks.summary().0, 1);
-    // 等任务线程真正结束：终态事件已进通道，但还没有被泵（模拟 UI 空闲）。
+    // Wait until the job itself has finished (UI idle: the terminal event has
+    // not been pumped yet).
+    //
+    // `done_tx` is sent from inside the job closure, which happens-before the
+    // TaskManager enqueues the terminal `Finished` event. So `done_rx.recv()`
+    // returning does NOT guarantee the event is already in the channel: a
+    // single `frame_tick` right after it can legitimately observe an empty
+    // channel. That race made this test fail 11 of 15 runs. Pump in a loop
+    // until the terminal event is actually taken.
     done_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("任务应完成");
@@ -495,10 +503,21 @@ fn 任务_节拍在任务完成后仍报告需要重绘() {
         a.host.tasks.summary().0, 1,
         "事件未泵时任务仍显示运行中（滞后的前提）"
     );
-    assert!(
-        a.frame_tick(0.0),
-        "取走终态事件的那次节拍必须报告需要重绘"
-    );
+    // While the running count is non-zero `frame_tick` always returns true, so
+    // the loop can only observe `summary == 0` on a tick that took the event
+    // (`pump_task_events` returned true).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let changed = a.frame_tick(0.0);
+        if a.host.tasks.summary().0 == 0 {
+            assert!(changed, "取走终态事件的那次节拍必须报告需要重绘");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "终态事件未在时限内被泵"
+        );
+    }
     assert_eq!(a.host.tasks.summary().0, 0, "终态已泵，运行计数应为 0");
     assert_eq!(
         a.host.tasks.get(id).unwrap().status,
