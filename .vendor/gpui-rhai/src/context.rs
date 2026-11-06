@@ -6713,13 +6713,13 @@ mod tests {
         });
         sender.send(UiValue::Integer(1)).unwrap();
         sender.send(UiValue::Integer(2)).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let deadline = web_time::Instant::now() + Duration::from_secs(1);
         let first = loop {
             let values = subscriptions.drain(generation);
             if !values.is_empty() {
                 break values;
             }
-            assert!(std::time::Instant::now() < deadline);
+            assert!(web_time::Instant::now() < deadline);
             std::thread::yield_now();
         };
         assert_eq!(first[0].payload, UiValue::Integer(1));
@@ -6728,7 +6728,7 @@ mod tests {
             if !values.is_empty() {
                 break values;
             }
-            assert!(std::time::Instant::now() < deadline);
+            assert!(web_time::Instant::now() < deadline);
             std::thread::yield_now();
         };
         assert_eq!(second[0].payload, UiValue::Integer(2));
@@ -6824,7 +6824,7 @@ mod tests {
 
     #[test]
     fn window_release_uses_segment_boundaries_and_clears_suspend_tombstones() {
-        let now = std::time::Instant::now();
+        let now = web_time::Instant::now();
         let transition = || {
             let mut spec =
                 crate::MotionTransition::new(crate::MotionProperty::Opacity, 0.0, 1.0, 1_000);
@@ -6886,7 +6886,7 @@ mod tests {
     #[test]
     fn timeline_handles_cannot_cross_view_contexts() {
         let runtime = Rc::new(RefCell::new(UiRuntimeState::new()));
-        let now = std::time::Instant::now();
+        let now = web_time::Instant::now();
         let mut transition =
             crate::MotionTransition::new(crate::MotionProperty::Opacity, 0.0, 1.0, 1_000);
         transition.easing = crate::MotionEasing::Linear;

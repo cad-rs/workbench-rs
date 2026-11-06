@@ -6,7 +6,8 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use gpui::{
     App, Axis, Background, Bounds, ContentMask, CursorStyle, DispatchPhase, Edges, Element,

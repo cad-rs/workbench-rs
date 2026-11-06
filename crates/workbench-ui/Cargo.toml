@@ -17,6 +17,7 @@ ribbon = { workspace = true }
 gpui = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
+gpui-rhai = { workspace = true }
 serde_json = { workspace = true }
 # std::time 在 wasm 上不可用；web-time 桌面转发 std、Web 走 performance.now
 web-time = { workspace = true }
@@ -43,10 +44,9 @@ gpui-web = { workspace = true }
 
 # 桌面：平台层（Web 端自建 WebPlatform，不经 gpui_platform）；GPU 视口自建
 # wgpu 设备（GPUI 在 Windows 上是 D3D11、macOS 上是 Metal，没有可共享的 wgpu
-# 设备）；脚本视图（gpui-rhai 不支持 wasm，Web 产品也不加载脚本插件）。
+# 设备）。
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 gpui-platform = { workspace = true }
-gpui-rhai = { workspace = true }
 pollster = { workspace = true }
 
 # Windows：视口的 wgpu 交换链挂在 GPUI 窗口合成的 DirectComposition visual

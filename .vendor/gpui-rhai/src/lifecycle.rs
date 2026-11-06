@@ -32,7 +32,7 @@ pub struct ScriptLifecycle {
     root: Option<Rc<UiNode>>,
     retained: crate::RetainedUiTree,
     semantics: crate::CommittedSemanticFrame,
-    suspended_at: Option<std::time::Instant>,
+    suspended_at: Option<web_time::Instant>,
     /// Advances whenever a new retained tree is committed (or restored).
     revision: u64,
     commit_statistics: CommitStatistics,
@@ -45,7 +45,7 @@ pub(crate) struct ScriptLifecycleCheckpoint {
     root: Option<Rc<UiNode>>,
     retained: crate::RetainedUiTree,
     semantics: crate::CommittedSemanticFrame,
-    suspended_at: Option<std::time::Instant>,
+    suspended_at: Option<web_time::Instant>,
 }
 
 /// Commits and the time spent in each of their phases, summed since the last
@@ -77,20 +77,20 @@ impl CommitStatistics {
 /// Laps one commit's phases; folded into the lifecycle's statistics when the
 /// commit ends, whether it succeeded or not.
 struct PhaseClock {
-    last: std::time::Instant,
+    last: web_time::Instant,
     laps: CommitStatistics,
 }
 
 impl PhaseClock {
     fn start() -> Self {
         Self {
-            last: std::time::Instant::now(),
+            last: web_time::Instant::now(),
             laps: CommitStatistics::default(),
         }
     }
 
     fn lap(&mut self, phase: &'static str) {
-        let now = std::time::Instant::now();
+        let now = web_time::Instant::now();
         self.laps.add(phase, now - self.last);
         self.last = now;
     }
@@ -1516,7 +1516,7 @@ impl ScriptLifecycle {
 
     fn resume_runtime_mechanisms(
         &self,
-        now: std::time::Instant,
+        now: web_time::Instant,
         elapsed: std::time::Duration,
     ) -> Result<(), LifecycleError> {
         let mut runtime = self
@@ -2231,7 +2231,8 @@ mod tests {
         ValueSchema,
     };
     use semver::{Version, VersionReq};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use web_time::Instant;
 
     #[test]
     fn effect_origin_followup_does_not_restart_a_rejected_cascade() {

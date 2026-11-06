@@ -1035,7 +1035,7 @@ fn launch_app(
             }
         }
         gpui_component::init(cx);
-        dock_panel::ScriptRuntime::install(cx);
+        gpui_rhai::install(cx);
         // 主题在组件初始化后、任何窗口打开前应用：shell 配色、ribbon tokens
         // 与 gpui-component 全局主题一次切齐。品牌强调色（ui.accent，来自
         // product.toml 的 branding.accent）同时落到 ribbon tokens。

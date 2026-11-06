@@ -995,7 +995,8 @@ mod tests {
         ComponentInstancePath, ComponentStateSchema, EventPropagation, HostCallback, StateField,
         ValueSchema,
     };
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use web_time::Instant;
 
     #[test]
     fn inspector_reports_host_handler_label_without_opaque_details() {

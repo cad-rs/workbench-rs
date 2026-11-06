@@ -2482,6 +2482,7 @@ dependencies = [
  "toml 0.8.23",
  "unicode-segmentation",
  "usvg 0.45.1",
+ "web-time",
 ]
 
 [[package]]
@@ -3424,10 +3425,12 @@ dependencies = [
  "defmt",
  "jiff-core",
  "jiff-static",
+ "js-sys",
  "log",
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+ "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -6227,6 +6230,7 @@ checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
 dependencies = [
  "bstr",
  "unicode-segmentation",
+ "web-time",
 ]
 
 [[package]]

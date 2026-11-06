@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use gpui::KeyBinding;
 use gpui::actions;
@@ -9065,7 +9066,7 @@ mod tests {
             entry.clone(),
             "fn view(ctx) { text(\"clock probe\") }".to_owned(),
         )]));
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let manual = crate::ManualRuntimeClock::new(start);
         let prepared = EmbeddedScriptView::new(
             entry,

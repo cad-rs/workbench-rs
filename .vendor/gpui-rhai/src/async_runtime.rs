@@ -6,7 +6,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use event_listener::{Event, EventListener};
 use rhai::{CustomType, TypeBuilder};

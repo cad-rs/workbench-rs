@@ -4,7 +4,8 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use rhai::{
     AST, ASTNode, Array, Dynamic, Engine, EvalAltResult, Expr, FnPtr, FuncArgs, FuncRegistration,

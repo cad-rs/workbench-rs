@@ -11,7 +11,7 @@ use crate::{
 #[derive(Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct NodeSlotRuntime {
-    pub now: std::time::Instant,
+    pub now: web_time::Instant,
     pub clock: crate::RuntimeClock,
     pub colors: OwnedColorResolver,
     pub primitives: PrimitiveRegistry,

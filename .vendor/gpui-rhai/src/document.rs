@@ -9,7 +9,8 @@ use std::sync::{
     Arc, OnceLock, RwLock,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use rhai::{CustomType, Dynamic, Engine, FuncRegistration, ImmutableString, TypeBuilder};
 use similar::{Algorithm, DiffOp, capture_diff_slices_deadline};

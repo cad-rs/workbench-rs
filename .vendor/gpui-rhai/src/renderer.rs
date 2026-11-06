@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use web_time::Instant;
 
 use gpui::{
     AlignSelf as GpuiAlignSelf, AnyElement, App, Background, Bounds, BoxShadow, ClickEvent,
@@ -4855,7 +4855,7 @@ fn native_overlay_element<C: ColorResolver>(
     if rendered_spec.kind == crate::OverlayKind::Tooltip {
         rendered_spec.open = environment
             .overlays
-            .tooltip_visible(&rendered_spec.id, std::time::Instant::now());
+            .tooltip_visible(&rendered_spec.id, web_time::Instant::now());
     }
     let trigger = GpuiNodeRenderer::render_internal(
         trigger,

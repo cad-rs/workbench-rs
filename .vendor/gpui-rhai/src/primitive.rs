@@ -107,6 +107,8 @@ pub enum PrimitivePlatform {
     MacOs,
     Linux,
     Windows,
+    // workbench-rs: the browser (wasm32), where GPUI runs too.
+    Web,
 }
 
 impl PrimitivePlatform {
@@ -123,6 +125,10 @@ impl PrimitivePlatform {
         #[cfg(target_os = "windows")]
         {
             Self::Windows
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            Self::Web
         }
     }
 }
@@ -357,7 +363,7 @@ impl PrimitiveTheme {
     }
 
     #[must_use]
-    pub fn now(&self) -> std::time::Instant {
+    pub fn now(&self) -> web_time::Instant {
         self.clock.now()
     }
 

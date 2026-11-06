@@ -70,7 +70,7 @@ impl PageVisibility {
         root: &ComponentInstancePath,
         domain: &str,
         motions: &mut crate::MotionRuntime,
-        now: std::time::Instant,
+        now: web_time::Instant,
     ) -> BTreeSet<ComponentInstancePath> {
         let mut next = BTreeMap::from([(
             root.clone(),

@@ -475,7 +475,7 @@ mod tests {
         let watcher = FileWatcher::new(directory.path()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
         std::fs::write(&file, "fn view(ctx) { text(\"after\") }").unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = web_time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let batch = watcher.poll().unwrap();
             if batch
@@ -486,7 +486,7 @@ mod tests {
                 break;
             }
             assert!(
-                std::time::Instant::now() < deadline,
+                web_time::Instant::now() < deadline,
                 "watcher event timed out"
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
