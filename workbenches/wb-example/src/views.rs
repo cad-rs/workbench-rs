@@ -33,17 +33,8 @@ fn rgb(v: u32) -> Hsla {
     gpui::rgb(v).into()
 }
 
-fn bg_panel() -> Hsla {
-    rgb(0x292B33)
-}
-fn bg_canvas() -> Hsla {
-    rgb(0x2B2E38)
-}
 fn bg_row() -> Hsla {
     rgb(0x333640)
-}
-fn bg_output() -> Hsla {
-    rgb(0x1F2026)
 }
 
 fn line(text: String, color: Hsla, size: f32) -> Div {
@@ -225,7 +216,6 @@ impl CanvasElement {
                 origin: Point::new(origin.x + px(s.x), origin.y + px(s.y)),
                 size: gpui::size(px(s.w), px(s.h)),
             };
-            let radius = if s.round { s.h * 0.5 } else { 4.0 };
             paint_quad(window, r, hue_color(s.hue).into());
             if self.selected == Some(i) {
                 let outer = Bounds {
@@ -690,7 +680,7 @@ fn kv(key: &str, value: String) -> Div {
 
 /// A barely-visible white, for the canvas grid lines.
 fn grid_line() -> Hsla {
-    gpui::Hsla::from(gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.045 })
+    gpui::white().opacity(0.045)
 }
 
 /// A shape colour from a hue in degrees.

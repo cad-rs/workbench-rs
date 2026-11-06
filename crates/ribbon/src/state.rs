@@ -6,7 +6,7 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Bounds, Context, Focusable as _, IntoElement, Pixels, ParentElement as _, Render,
-    ScrollWheelEvent, Styled as _, Window, px,
+    ScrollEvent, Styled as _, Window, px,
 };
 
 use crate::model::{RibbonEvent, RibbonModel, RibbonTabVm};
@@ -189,7 +189,7 @@ impl RibbonState {
 
     pub(crate) fn handle_scroll_wheel(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {

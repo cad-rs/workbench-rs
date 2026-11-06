@@ -65,11 +65,13 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     /// The color format every viewport frame is rendered in.
     pub target_format: wgpu::TextureFormat,
-    /// Desktop: the instance and adapter the device came from (Windows makes
-    /// composition swap chains with them).
-    #[cfg(not(target_family = "wasm"))]
+    /// The device's `max_texture_dimension_2d`.
+    pub(crate) max_texture: u32,
+    /// Windows: the instance and adapter the device came from, which
+    /// composition swap chains are made with.
+    #[cfg(target_os = "windows")]
     pub(crate) instance: wgpu::Instance,
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(target_os = "windows")]
     pub(crate) adapter: wgpu::Adapter,
     /// Web: GPUI's context, which dynamic textures are allocated from.
     #[cfg(target_family = "wasm")]
@@ -91,6 +93,7 @@ impl Gpu {
             device: (*context.device).clone(),
             queue: (*context.queue).clone(),
             target_format: context.color_texture_format(),
+            max_texture: context.device.limits().max_texture_dimension_2d,
             context,
         }
     }
@@ -135,23 +138,17 @@ impl Gpu {
         }));
 
         Ok(Self {
+            max_texture: device.limits().max_texture_dimension_2d,
             device,
             queue,
             // Matches GPUI's own (non-sRGB) BGRA targets, so colors written by
             // the viewport pipelines come out as GPUI would show them; also
             // the readback path's byte order.
             target_format: wgpu::TextureFormat::Bgra8Unorm,
+            #[cfg(target_os = "windows")]
             instance,
+            #[cfg(target_os = "windows")]
             adapter,
         })
-    }
-
-    /// Adapter summary for diagnostics ("name (backend)").
-    pub fn adapter_summary(&self) -> String {
-        #[cfg(not(target_family = "wasm"))]
-        let info = self.adapter.get_info();
-        #[cfg(target_family = "wasm")]
-        let info = self.context.adapter.get_info();
-        format!("{} ({:?})", info.name, info.backend)
     }
 }

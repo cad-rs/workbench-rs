@@ -13,25 +13,6 @@
 //! Run: `trunk serve` in this directory (needs `rustup target add
 //! wasm32-unknown-unknown` and `cargo install trunk`).
 
-/// The example module plus the GPU viewport demo views, as product-demo
-/// assembles them (the views are frontend types, so they are registered here
-/// rather than in wb-example). On the web they render on GPUI's own wgpu
-/// device, into a texture GPUI samples.
-#[cfg(target_arch = "wasm32")]
-struct WebWorkbench;
-
-#[cfg(target_arch = "wasm32")]
-impl workbench_api::Workbench for WebWorkbench {
-    fn id(&self) -> workbench_api::WorkbenchId {
-        workbench_api::WorkbenchId::new("product-web")
-    }
-
-    fn init(&self, reg: &mut workbench_api::Registry) {
-        wb_example::ExampleWorkbench.init(reg);
-        workbench_ui::gpu_view::register_views(reg);
-    }
-}
-
 #[cfg(target_arch = "wasm32")]
 fn main() {
     gpui_platform::web_init();
@@ -41,12 +22,17 @@ fn main() {
         "Workbench Demo (Web)",
     )
     .with_backend_label("gpui-web")
-    .with_workbench(WebWorkbench)
+    .with_workbench(wb_example::ExampleWorkbench)
+    // The GPU viewport demo views are frontend types, so they come from
+    // workbench-ui rather than wb-example. On the web they render on GPUI's
+    // own wgpu device, into a texture GPUI samples.
+    .with_plugin_stage(Box::new(workbench_ui::gpu_view::register_views))
     .with_assets(wb_example::example_assets())
     .create_default_document(true)
     .open_on_start("example.welcome", false)
     .open_on_start("example.canvas", true)
-    .open_on_start("example.gpu3d", false);
+    .open_on_start("example.gpu3d", false)
+    .open_on_start("example.gpu_top", false);
 
     if let Err(e) = workbench_ui::run(builder, "Workbench Demo (Web)") {
         web_sys::console::error_1(&format!("run failed: {e}").into());

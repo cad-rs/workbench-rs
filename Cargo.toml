@@ -85,7 +85,8 @@ gpui-web = { package = "gpui_web", git = "https://github.com/longbridge/gpui-fas
 # backend (`gpui-pre` =0.3.11), which [patch.crates-io] points at gpui-fast.
 gpui-component = "0.9.0"
 gpui-component-assets = { package = "gpui-kit-assets", version = "0.9.0" }
-# Rhai script views (`gpui-pre` =0.3.9, likewise patched onto gpui-fast).
+# Rhai script views, desktop only. Resolves to the vendored copy (see
+# [patch.crates-io]), whose `gpui-pre` pin is moved to =0.3.11.
 gpui-rhai = { version = "=0.4.1", default-features = false }
 
 # GPU 视口（workbench-ui 的原生视图扩展）。版本必须与 gpui-fast pin 的
@@ -93,8 +94,9 @@ gpui-rhai = { version = "=0.4.1", default-features = false }
 wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007" }
 glam = "0.30"
 bytemuck = { version = "1", features = ["derive"] }
-# 非 Windows 桌面的回读合成路径（离屏渲染 → CPU 回读 → paint_image）
+# 窗口图标解码；回读上屏路径（离屏渲染 → CPU 回读 → paint_image）
 image = "0.25"
+# 桌面 GPU 视口设备创建（同步等 adapter/device）
 pollster = "0.4"
 anyhow = "1"
 

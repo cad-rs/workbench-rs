@@ -9,7 +9,8 @@
 //!
 //! 集成方式：[`GpuViewportView`] 实现 [`wb::ViewInstance`]，其 `element`
 //! 返回一个 [`GpuViewportElement`]——一个自绘的 gpui `Element`，在 prepaint
-//! 定位、paint 渲染。
+//! 定位、paint 渲染；上屏、输入与脏标记由 [`present::Viewport`] 统一承担，
+//! 本模块与 [`host`] 只提供各自的 [`present::ViewportContent`]。
 //!
 //! 设备不归属任何一个视图：[`shared_gpu`] 提供全进程共享的 [`Gpu`]，
 //! 供插件自带的自定义 gpui `Element` 建自己的渲染资源。
@@ -28,14 +29,14 @@ pub mod host;
 pub use host::RenderViewportElement;
 
 use std::cell::RefCell;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 use camera::{OrbitCamera, OrthoCamera};
 use gpui::{
     App, AnyElement, Bounds, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior,
-    InspectorElementId, IntoElement, LayoutId, Pixels, Point, Style, Window,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Window,
 };
-use present::{NativeHooks, PointerInput, Presenter};
+use present::Viewport;
 use scene::{Pipelines, Scene, Uniforms, ViewState};
 use workbench_api as wb;
 
@@ -180,333 +181,166 @@ impl DepthTarget {
     }
 }
 
-fn uniforms_for(kind: ViewKind, orbit: &OrbitCamera, ortho: &OrthoCamera, aspect: f32) -> Uniforms {
-    match kind {
-        ViewKind::Orbit3d => Uniforms::new(
-            orbit.view_proj(aspect),
-            orbit.eye(),
-            glam::Vec3::new(0.45, 0.8, 0.35).normalize(),
-            0.002,
-        ),
-        ViewKind::Top2d => Uniforms::new(
-            ortho.view_proj(aspect),
-            glam::Vec3::new(ortho.center.x, 1000.0, ortho.center.z),
-            // Light straight down the view direction: an elevation-drawing
-            // style flat projection.
-            glam::Vec3::new(0.0, -1.0, 0.0),
-            0.002,
-        ),
-    }
-}
-
-/// Encodes and submits one frame of `common`'s scene into `view`.
-fn draw_frame(
-    common: &ViewportCommon,
-    view_state: &ViewState,
-    depth: &mut Option<DepthTarget>,
-    uniforms: &Uniforms,
-    view: &wgpu::TextureView,
-    size: (u32, u32),
-) {
-    let gpu = &common.gpu;
-    if depth.as_ref().is_none_or(|d| d.size != size) {
-        *depth = Some(DepthTarget::new(&gpu.device, size));
-    }
-    let depth = depth.as_ref().expect("allocated above");
-    gpu.queue
-        .write_buffer(&view_state.uniform_buf, 0, bytemuck::bytes_of(uniforms));
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("viewport-encoder"),
-        });
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("viewport-pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.102,
-                        g: 0.110,
-                        b: 0.133,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &depth.view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Discard,
-                }),
-                stencil_ops: None,
-            }),
-            ..Default::default()
-        });
-        scene::draw_scene(&mut pass, &common.scene, &common.pipes, &view_state.bind_group);
-    }
-    gpu.queue.submit([encoder.finish()]);
-}
-
-/// Mutable viewport state, shared between the view and its element.
-///
-/// The element needs live access to the camera and the GPU resources, so the
-/// state lives behind an `Rc` that both sides clone.
-struct GpuViewportInner {
-    kind: ViewKind,
-    orbit: OrbitCamera,
-    ortho: OrthoCamera,
-    view_state: Option<ViewState>,
-    depth: Option<DepthTarget>,
-    presenter: Presenter,
-    /// What the viewport draws: the demo scene or the product's injected one.
-    common: Option<Rc<ViewportCommon>>,
-    /// The camera changed since the last frame.
-    dirty: bool,
-    /// A left-button drag started over the viewport (pointer position of the
-    /// previous event, viewport-local logical pixels).
-    drag_from: Option<(f32, f32)>,
-    /// Where the element was last laid out (window logical pixels).
-    origin: Point<Pixels>,
-    /// 注入场景的每视图缓存：(provider, common)——provider 指针同一性
-    /// 变化（产品换了场景源）即重建；demo 视口不经此路径。
-    injected: Option<(Rc<SceneProvider>, Rc<ViewportCommon>)>,
-}
-
-impl GpuViewportInner {
-    fn new(kind: ViewKind) -> Self {
-        Self {
-            kind,
-            orbit: OrbitCamera::new(),
-            ortho: OrthoCamera::new(),
-            view_state: None,
-            depth: None,
-            presenter: Presenter::Pending,
-            common: None,
-            dirty: true,
-            drag_from: None,
-            origin: Point::default(),
-            injected: None,
-        }
-    }
-
-    /// The scene this viewport draws, built on first use. `None` until the
-    /// device is available (or the product's provider has no scene yet).
-    fn resolve_common(
-        &mut self,
-        provider: Option<&Rc<SceneProvider>>,
-        window: &Window,
-    ) -> Option<Rc<ViewportCommon>> {
-        let common = match provider {
-            Some(provider) => {
-                let cached = self
-                    .injected
-                    .as_ref()
-                    .is_some_and(|(p, _)| Rc::ptr_eq(p, provider));
-                if !cached {
-                    let gpu = shared_gpu(window)?;
-                    let scene = provider(&gpu.device)?;
-                    let pipes = Rc::new(Pipelines::new(&gpu.device, gpu.target_format));
-                    self.injected = Some((
-                        provider.clone(),
-                        Rc::new(ViewportCommon { gpu, scene, pipes }),
-                    ));
-                    self.dirty = true;
-                }
-                self.injected.as_ref().map(|(_, c)| c.clone())?
-            }
-            None => demo_viewport(window)?,
-        };
-        if self.view_state.is_none() {
-            self.view_state = Some(ViewState::new(&common.gpu.device, &common.pipes.layout));
-        }
-        self.common = Some(common.clone());
-        Some(common)
-    }
-
-    /// Applies pointer input to the camera; true when the view changed.
-    fn pointer(&mut self, input: PointerInput) -> bool {
-        let local = |p: Point<Pixels>, origin: Point<Pixels>| {
-            (f32::from(p.x - origin.x), f32::from(p.y - origin.y))
-        };
-        match input {
-            PointerInput::Press(position) => {
-                self.drag_from = Some(local(position, self.origin));
-                false
-            }
-            PointerInput::Release => {
-                self.drag_from = None;
-                false
-            }
-            PointerInput::Move {
-                position,
-                dragging,
-                shift,
-            } => {
-                let Some(from) = self.drag_from else {
-                    return false;
-                };
-                if !dragging {
-                    // The release happened elsewhere.
-                    self.drag_from = None;
-                    return false;
-                }
-                let p = local(position, self.origin);
-                let (dx, dy) = (p.0 - from.0, p.1 - from.1);
-                self.drag_from = Some(p);
-                if dx == 0.0 && dy == 0.0 {
-                    return false;
-                }
-                match (self.kind, shift) {
-                    (ViewKind::Orbit3d, false) => self.orbit.orbit(dx, dy),
-                    (ViewKind::Orbit3d, true) => self.orbit.pan(dx, dy),
-                    (ViewKind::Top2d, _) => self.ortho.pan(dx, dy),
-                }
-                self.dirty = true;
-                true
-            }
-            PointerInput::Scroll(pixels) => {
-                let factor = (-pixels * 0.0012).exp();
-                match self.kind {
-                    ViewKind::Orbit3d => self.orbit.zoom(factor),
-                    ViewKind::Top2d => self.ortho.zoom(factor),
-                }
-                self.dirty = true;
-                true
-            }
-        }
-    }
-
-    /// Renders a frame through `presenter`'s `render` (paint or a native
-    /// redraw), from the camera as it is now.
-    fn render_with(
-        &mut self,
-        render: impl FnOnce(&mut Presenter, &mut dyn FnMut(&wgpu::TextureView, (u32, u32))),
-    ) {
-        let Some(common) = self.common.clone() else {
-            return;
-        };
-        let Self {
-            kind,
-            orbit,
-            ortho,
-            view_state,
-            depth,
-            presenter,
-            ..
-        } = self;
-        let Some(view_state) = view_state.as_ref() else {
-            return;
-        };
-        let mut draw = |view: &wgpu::TextureView, size: (u32, u32)| {
-            let uniforms = uniforms_for(*kind, orbit, ortho, size.0 as f32 / size.1 as f32);
-            draw_frame(&common, view_state, depth, &uniforms, view, size);
-        };
-        render(presenter, &mut draw);
-        self.dirty = false;
-    }
-
-    /// Native surfaces: a frame outside GPUI's draw, after input.
-    fn redraw_native(&mut self) {
-        self.render_with(|presenter, draw| presenter.redraw_native(draw));
-    }
-
-    fn prepaint(
-        &mut self,
-        this: Weak<RefCell<Self>>,
-        provider: Option<&Rc<SceneProvider>>,
-        bounds: Bounds<Pixels>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.origin = bounds.origin;
-        let Some(common) = self.resolve_common(provider, window) else {
-            return;
-        };
-        self.presenter.prepaint(&common.gpu, bounds, window, cx, || {
-            let redraw = this.clone();
-            NativeHooks {
-                redraw: Box::new(move || {
-                    if let Some(inner) = redraw.upgrade() {
-                        inner.borrow_mut().redraw_native();
-                    }
-                }),
-                pointer: Rc::new(move |input| {
-                    this.upgrade()
-                        .is_some_and(|inner| inner.borrow_mut().pointer(input))
-                }),
-            }
-        });
-    }
-
-    /// Draw one frame into the view area, or a placeholder background until
-    /// the GPU context (or the injected scene) is available.
-    fn paint(&mut self, window: &mut Window, bounds: Bounds<Pixels>) {
-        let Some(common) = self.common.clone() else {
-            crate::paint_placeholder(window, bounds);
-            return;
-        };
-        if matches!(self.presenter, Presenter::Pending) {
-            crate::paint_placeholder(window, bounds);
-            return;
-        }
-        let dirty = self.dirty;
-        let Self {
-            kind,
-            orbit,
-            ortho,
-            view_state,
-            depth,
-            presenter,
-            ..
-        } = self;
-        let Some(view_state) = view_state.as_ref() else {
-            crate::paint_placeholder(window, bounds);
-            return;
-        };
-        let mut draw = |view: &wgpu::TextureView, size: (u32, u32)| {
-            let uniforms = uniforms_for(*kind, orbit, ortho, size.0 as f32 / size.1 as f32);
-            draw_frame(&common, view_state, depth, &uniforms, view, size);
-        };
-        if let Err(err) = presenter.paint(&common.gpu, bounds, dirty, window, &mut draw) {
-            eprintln!("gpu viewport render error: {err:#}");
-            crate::paint_placeholder(window, bounds);
-        }
-        self.dirty = false;
-    }
-}
-
 /// 产品场景提供者：每次 paint 调用，返回注入场景（`None` → 占位符）。
 /// 实现方自缓存（按内容身份判定重建），返回 `Rc` 保证与注入缓存指针
 /// 同一性对比成立（避免每帧重建上传缓冲）。
 pub type SceneProvider = dyn Fn(&wgpu::Device) -> Option<Rc<Scene>>;
 
+/// What a demo (or product-injected) viewport draws, and its camera.
+struct SceneView {
+    kind: ViewKind,
+    orbit: OrbitCamera,
+    ortho: OrthoCamera,
+    /// The scene drawn; `None` until the device (or the injected scene) is
+    /// available, which paints the placeholder.
+    common: Option<Rc<ViewportCommon>>,
+    /// The product provider `common` was built from: a different one (by
+    /// identity) rebuilds it.
+    provider: Option<Rc<SceneProvider>>,
+    view_state: Option<ViewState>,
+    depth: Option<DepthTarget>,
+}
+
+impl SceneView {
+    fn new(kind: ViewKind) -> Self {
+        Self {
+            kind,
+            orbit: OrbitCamera::new(),
+            ortho: OrthoCamera::new(),
+            common: None,
+            provider: None,
+            view_state: None,
+            depth: None,
+        }
+    }
+
+    /// Builds the scene on first use (or when the product's provider
+    /// changed). True when it was (re)built and needs a new frame.
+    fn resolve(&mut self, provider: Option<&Rc<SceneProvider>>, window: &Window) -> bool {
+        let same = match (provider, &self.provider) {
+            (Some(wanted), Some(built)) => Rc::ptr_eq(wanted, built),
+            (None, None) => true,
+            _ => false,
+        };
+        if same && self.common.is_some() {
+            return false;
+        }
+        self.common = match provider {
+            Some(provider) => shared_gpu(window).and_then(|gpu| {
+                let scene = provider(&gpu.device)?;
+                let pipes = Rc::new(Pipelines::new(&gpu.device, gpu.target_format));
+                Some(Rc::new(ViewportCommon { gpu, scene, pipes }))
+            }),
+            None => demo_viewport(window),
+        };
+        self.provider = provider.cloned();
+        self.view_state = self
+            .common
+            .as_ref()
+            .map(|c| ViewState::new(&c.gpu.device, &c.pipes.layout));
+        self.common.is_some()
+    }
+}
+
+impl present::ViewportContent for SceneView {
+    fn drag(&mut self, dx: f32, dy: f32, shift: bool) -> bool {
+        match (self.kind, shift) {
+            (ViewKind::Orbit3d, false) => self.orbit.orbit(dx, dy),
+            (ViewKind::Orbit3d, true) => self.orbit.pan(dx, dy),
+            (ViewKind::Top2d, _) => self.ortho.pan(dx, dy),
+        }
+        true
+    }
+
+    fn scroll(&mut self, pixels: f32) -> bool {
+        let factor = (-pixels * 0.0012).exp();
+        match self.kind {
+            ViewKind::Orbit3d => self.orbit.zoom(factor),
+            ViewKind::Top2d => self.ortho.zoom(factor),
+        }
+        true
+    }
+
+    fn draw(&mut self, view: &wgpu::TextureView, size: (u32, u32)) {
+        let (Some(common), Some(view_state)) = (&self.common, &self.view_state) else {
+            return;
+        };
+        let aspect = size.0 as f32 / size.1 as f32;
+        let uniforms = match self.kind {
+            ViewKind::Orbit3d => Uniforms::new(
+                self.orbit.view_proj(aspect),
+                self.orbit.eye(),
+                glam::Vec3::new(0.45, 0.8, 0.35).normalize(),
+                0.002,
+            ),
+            ViewKind::Top2d => Uniforms::new(
+                self.ortho.view_proj(aspect),
+                glam::Vec3::new(self.ortho.center.x, 1000.0, self.ortho.center.z),
+                // Light straight down the view direction: an elevation-drawing
+                // style flat projection.
+                glam::Vec3::new(0.0, -1.0, 0.0),
+                0.002,
+            ),
+        };
+        let gpu = &common.gpu;
+        if self.depth.as_ref().is_none_or(|d| d.size != size) {
+            self.depth = Some(DepthTarget::new(&gpu.device, size));
+        }
+        let depth = self.depth.as_ref().expect("allocated above");
+        gpu.queue
+            .write_buffer(&view_state.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("viewport-encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewport-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.102,
+                            g: 0.110,
+                            b: 0.133,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            scene::draw_scene(&mut pass, &common.scene, &common.pipes, &view_state.bind_group);
+        }
+        gpu.queue.submit([encoder.finish()]);
+    }
+}
+
 /// A GPU viewport view instance (central tab content).
 pub struct GpuViewportView {
     type_id: &'static str,
     title: &'static str,
-    inner: Rc<RefCell<GpuViewportInner>>,
+    viewport: Rc<RefCell<Viewport<SceneView>>>,
     scene_provider: Option<Rc<SceneProvider>>,
 }
 
 impl GpuViewportView {
-    fn new3d() -> Self {
-        Self::new(ViewKind::Orbit3d, "example.gpu3d", "三维视图 (wgpu)")
-    }
-
-    fn new_top() -> Self {
-        Self::new(ViewKind::Top2d, "example.gpu_top", "俯视图 (wgpu)")
-    }
-
     fn new(kind: ViewKind, type_id: &'static str, title: &'static str) -> Self {
         Self {
             type_id,
             title,
-            inner: Rc::new(RefCell::new(GpuViewportInner::new(kind))),
+            viewport: Rc::new(RefCell::new(Viewport::new(SceneView::new(kind)))),
             scene_provider: None,
         }
     }
@@ -520,10 +354,8 @@ impl GpuViewportView {
         scene_provider: Rc<SceneProvider>,
     ) -> Self {
         Self {
-            type_id,
-            title,
-            inner: Rc::new(RefCell::new(GpuViewportInner::new(ViewKind::Orbit3d))),
             scene_provider: Some(scene_provider),
+            ..Self::new(ViewKind::Orbit3d, type_id, title)
         }
     }
 }
@@ -539,7 +371,7 @@ impl wb::ViewInstance for GpuViewportView {
 
     fn element(&mut self, _host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
         let element: AnyElement = GpuViewportElement {
-            inner: self.inner.clone(),
+            viewport: self.viewport.clone(),
             scene_provider: self.scene_provider.clone(),
         }
         .into_any_element();
@@ -547,14 +379,10 @@ impl wb::ViewInstance for GpuViewportView {
     }
 }
 
-/// A gpui element that renders one GPU viewport.
-///
-/// It is placed in prepaint and draws in paint. Pointer input reaches the
-/// camera either through GPUI listeners (registered in paint, as GPUI clears
-/// them every frame) or, over a native surface, through the surface's own
-/// input handler.
+/// A gpui element that renders one GPU viewport: placed in prepaint, drawn
+/// in paint (see [`present`]).
 struct GpuViewportElement {
-    inner: Rc<RefCell<GpuViewportInner>>,
+    viewport: Rc<RefCell<Viewport<SceneView>>>,
     scene_provider: Option<Rc<SceneProvider>>,
 }
 
@@ -571,7 +399,8 @@ impl Element for GpuViewportElement {
     type PrepaintState = Hitbox;
 
     fn id(&self) -> Option<ElementId> {
-        None
+        // Element state keeps a native surface's liveness token.
+        Some("gpu-viewport".into())
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
@@ -585,13 +414,7 @@ impl Element for GpuViewportElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        // 自绘 Element 必须显式满尺寸：auto 尺寸在 flex 容器里得 0 高，
-        // paint 空转（实测视口 900×1 全黑；同 mulphy round-182 e070835 教训）。
-        let style = Style {
-            size: gpui::Size::full(),
-            ..Default::default()
-        };
-        (window.request_layout(style, [], cx), ())
+        (present::full_size_layout(window, cx), ())
     }
 
     fn prepaint(
@@ -603,20 +426,22 @@ impl Element for GpuViewportElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let this = Rc::downgrade(&self.inner);
-        self.inner.borrow_mut().prepaint(
-            this,
-            self.scene_provider.as_ref(),
-            bounds,
-            window,
-            cx,
-        );
-        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+        let gpu = {
+            let mut viewport = self.viewport.borrow_mut();
+            if viewport.content.resolve(self.scene_provider.as_ref(), window) {
+                viewport.invalidate();
+            }
+            viewport.content.common.as_ref().map(|c| c.gpu.clone())
+        };
+        match gpu {
+            Some(gpu) => Viewport::prepaint(&self.viewport, &gpu, bounds, window, cx),
+            None => window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        }
     }
 
     fn paint(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
@@ -624,20 +449,10 @@ impl Element for GpuViewportElement {
         window: &mut Window,
         _cx: &mut App,
     ) {
-        let native_input = {
-            let mut inner = self.inner.borrow_mut();
-            inner.paint(window, bounds);
-            inner.presenter.native_input()
-        };
-        if !native_input {
-            let inner = self.inner.clone();
-            let view = window.current_view();
-            present::listen_pointer(
-                window,
-                hitbox,
-                Rc::new(move |input| inner.borrow_mut().pointer(input)),
-                view,
-            );
+        let ready = self.viewport.borrow().content.common.is_some();
+        let id = id.expect("the element has an id");
+        if !ready || !Viewport::paint(&self.viewport, id, bounds, hitbox, window) {
+            crate::paint_placeholder(window, bounds);
         }
     }
 }
@@ -645,35 +460,25 @@ impl Element for GpuViewportElement {
 /// 注册两个演示 GPU 视图、打开命令与 Ribbon 入口（产品装配时调用；
 /// 视图类型由本模块提供，Workbench 模块层不接触 GUI，故不放在 wb-example）。
 pub fn register_views(reg: &mut wb::Registry) {
-    reg.register_view(
-        wb::ViewDef::new("example.gpu3d", "三维视图 (wgpu)", true, || {
-            Box::new(GpuViewportView::new3d())
-        }),
-    );
-    reg.register_view(
-        wb::ViewDef::new("example.gpu_top", "俯视图 (wgpu)", true, || {
-            Box::new(GpuViewportView::new_top())
-        }),
-    );
-    reg.register_command(wb::CommandDef::sync(
-        "example.open_gpu3d",
-        "三维视图",
-        |ctx: &mut wb::CommandCtx, _a: &wb::CommandArgs| match ctx.open_view("example.gpu3d", false)
-        {
-            Ok(_) => wb::CommandResult::done(),
-            Err(e) => wb::CommandResult::failed(e),
-        },
-    ));
-    reg.register_command(wb::CommandDef::sync(
-        "example.open_gpu_top",
-        "俯视图",
-        |ctx: &mut wb::CommandCtx, _a: &wb::CommandArgs| match ctx.open_view(
-            "example.gpu_top", false,
-        ) {
-            Ok(_) => wb::CommandResult::done(),
-            Err(e) => wb::CommandResult::failed(e),
-        },
-    ));
+    reg.register_view(wb::ViewDef::new("example.gpu3d", "三维视图 (wgpu)", true, || {
+        Box::new(GpuViewportView::new(ViewKind::Orbit3d, "example.gpu3d", "三维视图 (wgpu)"))
+    }));
+    reg.register_view(wb::ViewDef::new("example.gpu_top", "俯视图 (wgpu)", true, || {
+        Box::new(GpuViewportView::new(ViewKind::Top2d, "example.gpu_top", "俯视图 (wgpu)"))
+    }));
+    for (command, title, view) in [
+        ("example.open_gpu3d", "三维视图", "example.gpu3d"),
+        ("example.open_gpu_top", "俯视图", "example.gpu_top"),
+    ] {
+        reg.register_command(wb::CommandDef::sync(
+            command,
+            title,
+            move |ctx: &mut wb::CommandCtx, _a: &wb::CommandArgs| match ctx.open_view(view, false) {
+                Ok(_) => wb::CommandResult::done(),
+                Err(e) => wb::CommandResult::failed(e),
+            },
+        ));
+    }
     reg.add_ribbon_tab(
         wb::RibbonTab::new("wb.gpu", "三维")
             .from_source("gpu-view")

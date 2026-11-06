@@ -147,7 +147,7 @@ fn render_scroll_panel(state: &RibbonState, cx: &mut Context<RibbonState>) -> An
                 // the viewport and the overflow measurement would never
                 // exceed it (arrows could never appear).
                 .flex()
-                .on_scroll_wheel(cx.listener(RibbonState::handle_scroll_wheel))
+                .on_scroll(cx.listener(RibbonState::handle_scroll_wheel))
                 .child(content_row)
                 .when_some(left_arrow, |viewport, arrow| viewport.child(arrow))
                 .when_some(right_arrow, |viewport, arrow| viewport.child(arrow)),

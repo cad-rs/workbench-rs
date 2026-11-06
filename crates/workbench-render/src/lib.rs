@@ -621,12 +621,88 @@ pub struct Renderer {
     readback: Option<ReadbackTarget>,
 }
 
-struct ReadbackTarget {
+/// 可回读的离屏颜色目标（颜色纹理 + 对齐读回缓冲）：`render_readback` 与
+/// 壳层的回读上屏通路共用。
+pub struct ReadbackTarget {
     texture: wgpu::Texture,
+    view: wgpu::TextureView,
     buf: wgpu::Buffer,
     width: u32,
     height: u32,
     bytes_per_row: u32,
+}
+
+impl ReadbackTarget {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
+        let (width, height) = (width.max(1), height.max(1));
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("wb-render-target"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let bytes_per_row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wb-render-readback"),
+            size: bytes_per_row as u64 * height as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let view = texture.create_view(&Default::default());
+        Self { texture, view, buf, width, height, bytes_per_row }
+    }
+
+    /// 尺寸（device 像素）。
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// 渲染目标 view。
+    pub fn view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
+
+    /// 拷出并阻塞等待：紧排 BGRA 行（`width*height*4`，已去行 padding）。
+    pub fn read(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Vec<u8>> {
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("wb-render-readback-enc"),
+        });
+        enc.copy_texture_to_buffer(
+            self.texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.bytes_per_row),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+        );
+        queue.submit(Some(enc.finish()));
+        let (sx, rx) = std::sync::mpsc::channel();
+        let slice = self.buf.slice(..);
+        slice.map_async(wgpu::MapMode::Read, move |res| {
+            let _ = sx.send(res);
+        });
+        device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .ok()?;
+        rx.recv().ok()?.ok()?;
+        let data = slice.get_mapped_range().ok()?;
+        let row = self.width as usize * 4;
+        let mut out = Vec::with_capacity(row * self.height as usize);
+        for chunk in data.chunks(self.bytes_per_row as usize).take(self.height as usize) {
+            out.extend_from_slice(&chunk[..row]);
+        }
+        drop(data);
+        self.buf.unmap();
+        Some(out)
+    }
 }
 
 impl Renderer {
@@ -1209,40 +1285,14 @@ impl Renderer {
         }
         self.volume_bind.clone().unwrap()
     }
-    /// 回读目标就绪（颜色纹理 + 256 对齐读回缓冲；尺寸不变即复用）。
+    /// 回读目标就绪（尺寸不变即复用）。
     fn ensure_readback(&mut self, width: u32, height: u32) -> wgpu::TextureView {
-        let (w, h) = (width.max(1), height.max(1));
-        if let Some(t) = &self.readback {
-            if t.width == w && t.height == h {
-                return t.texture.create_view(&Default::default());
-            }
+        let size = (width.max(1), height.max(1));
+        if self.readback.as_ref().is_none_or(|t| t.size() != size) {
+            self.readback =
+                Some(ReadbackTarget::new(&self.device, self.target_format, size.0, size.1));
         }
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("wb-render-target"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.target_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let bytes_per_row = (w * 4).next_multiple_of(256);
-        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("wb-render-readback"),
-            size: bytes_per_row as u64 * h as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let view = texture.create_view(&Default::default());
-        self.readback = Some(ReadbackTarget {
-            texture,
-            buf,
-            width: w,
-            height: h,
-            bytes_per_row,
-        });
-        view
+        self.readback.as_ref().expect("allocated above").view().clone()
     }
 
     /// 渲一帧到宿主颜色目标：mvp/头灯 uniform 更新 + 顶点上传 + 绘制编码
@@ -1446,57 +1496,13 @@ impl Renderer {
     }
 
     /// 渲一帧并回读 BGRA 位图（`width*height*4`，行已去 padding）——
-    /// headless 测试断言像素 / 非 Windows 壳的 `paint_image` 回退路径。
+    /// headless 测试断言像素（壳层回读上屏通路直接用 [`ReadbackTarget`]）。
     /// 阻塞等帧（视口按需渲染，可接受；poll(Wait) 保证 map_async 回调
     /// 在返回前触发）。
     pub fn render_readback(&mut self, scene: &RenderScene, width: u32, height: u32) -> Option<Vec<u8>> {
         let view = self.ensure_readback(width, height);
         self.render(scene, width, height, &view);
-        let t = self.readback.as_ref()?;
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("wb-render-readback-enc"),
-            });
-        enc.copy_texture_to_buffer(
-            t.texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &t.buf,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(t.bytes_per_row),
-                    rows_per_image: None,
-                },
-            },
-            wgpu::Extent3d {
-                width: t.width,
-                height: t.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(enc.finish()));
-        let (sx, rx) = std::sync::mpsc::channel();
-        let buf = t.buf.clone();
-        let slice = buf.slice(..);
-        slice.map_async(wgpu::MapMode::Read, move |res| {
-            let _ = sx.send(res);
-        });
-        self.device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
-            .ok()?;
-        rx.recv().ok()?.ok()?;
-        let data = slice.get_mapped_range().ok()?.to_vec();
-        buf.unmap();
-        // 去行 padding。
-        let w = t.width as usize;
-        let h = t.height as usize;
-        let bpr = t.bytes_per_row as usize;
-        let mut out = Vec::with_capacity(w * h * 4);
-        for row in 0..h {
-            let s = row * bpr;
-            out.extend_from_slice(&data[s..s + w * 4]);
-        }
-        Some(out)
+        self.readback.as_ref()?.read(&self.device, &self.queue)
     }
 }
 

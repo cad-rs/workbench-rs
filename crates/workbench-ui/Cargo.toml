@@ -15,7 +15,6 @@ workbench-core = { workspace = true }
 # RibbonBar 组件（纯 gpui 组件，无 workbench 依赖；bridge 在 src/ribbon_bridge.rs）
 ribbon = { workspace = true }
 gpui = { workspace = true }
-gpui-platform = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
 serde_json = { workspace = true }
@@ -42,10 +41,11 @@ wasm-bindgen-futures = { workspace = true }
 gpui-wgpu = { workspace = true }
 gpui-web = { workspace = true }
 
-# 桌面：GPU 视口自建 wgpu 设备（GPUI 在 Windows 上是 D3D11、macOS 上是
-# Metal，没有可共享的 wgpu 设备）；脚本视图（gpui-rhai 不支持
-# wasm，Web 产品也不加载脚本插件）。
+# 桌面：平台层（Web 端自建 WebPlatform，不经 gpui_platform）；GPU 视口自建
+# wgpu 设备（GPUI 在 Windows 上是 D3D11、macOS 上是 Metal，没有可共享的 wgpu
+# 设备）；脚本视图（gpui-rhai 不支持 wasm，Web 产品也不加载脚本插件）。
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+gpui-platform = { workspace = true }
 gpui-rhai = { workspace = true }
 pollster = { workspace = true }
 

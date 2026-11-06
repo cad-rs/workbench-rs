@@ -98,6 +98,12 @@ pub(crate) struct ScriptRuntime {
 pub(crate) type SharedScripts = Rc<RefCell<ScriptRuntime>>;
 
 impl ScriptRuntime {
+    /// Installs gpui-rhai's app-level state (desktop only).
+    pub(crate) fn install(#[allow(unused_variables)] cx: &mut App) {
+        #[cfg(not(target_family = "wasm"))]
+        gpui_rhai::install(cx);
+    }
+
     /// Web: script views are unavailable; remember that as the panel's error.
     #[cfg(target_family = "wasm")]
     pub(crate) fn mount(&mut self, panel_id: &str, _script: &str, _window: &mut Window, _cx: &mut App) {

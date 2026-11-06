@@ -5036,7 +5036,6 @@ dependencies = [
  "gpui_platform",
  "wasm-bindgen",
  "web-sys",
- "workbench-api",
  "workbench-core",
  "workbench-example",
  "workbench-ui",

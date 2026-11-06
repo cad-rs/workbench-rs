@@ -12,11 +12,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    div, prelude::*, px, quad, relative, size, AnyElement, App, Bounds, Context, Corners, Div, Edges,
-    ElementId, GlobalElementId, InspectorElementId, Hsla, KeyDownEvent, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
-    ScrollWheelEvent, SharedString, Style, StyleRefinement, TextAlign, TextRun, TitlebarOptions,
-    TransformationMatrix, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, relative, size, AnyElement, App, Bounds, Context, Div, Hsla, KeyDownEvent,
+    Pixels, Render, Rgba, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 
 use workbench_api as wb;
@@ -95,18 +92,6 @@ impl gpui::AssetSource for WbAssets {
 
 pub fn col(c: wb::Color) -> Hsla {
     Hsla::from(Rgba { r: c.r, g: c.g, b: c.b, a: c.a })
-}
-
-fn black() -> Hsla {
-    Hsla::from(Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
-}
-
-fn ui_font() -> gpui::Font {
-    gpui::Font {
-        // ".SystemUIFont" 由 gpui 按平台解析为系统字体（Windows 上为 Segoe UI）
-        family: ".SystemUIFont".into(),
-        ..Default::default()
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -228,15 +213,14 @@ fn notify(weak: &gpui::WeakEntity<RootView>, cx: &mut App) {
 
 /// GPU 视口未就绪 / 失败时的占位背景（深色，与视口底色一致）。
 pub(crate) fn paint_placeholder(window: &mut Window, bounds: Bounds<Pixels>) {
-    let q = quad(
-        bounds,
-        Corners::all(px(0.)),
-        col(theme::ui_theme().placeholder),
-        Edges::all(px(0.)),
-        gpui::transparent_black(),
-        gpui::BorderStyle::default(),
-    );
-    window.paint_quad(q);
+    window.paint_quad(gpui::fill(bounds, col(theme::ui_theme().placeholder)));
+}
+
+/// A modal overlay (About, text edit), drawn deferred: on GPUI's overlay
+/// layer, above everything else — including native viewport surfaces, which
+/// window composition stacks between the base content and the overlays.
+fn modal_overlay(overlay: impl IntoElement) -> gpui::Deferred {
+    gpui::deferred(overlay).with_priority(1)
 }
 
 /// 面板/中央视图绘制到 canvas。
@@ -625,10 +609,7 @@ impl Render for RootView {
 
         // ---- About 对话框 overlay（app.about 命令置位时渲染） ----
         if let Some(overlay) = about::maybe_about_overlay(&core, cx) {
-            // Deferred: drawn on GPUI's overlay layer, so it stays above native
-            // viewport surfaces (window composition stacks those between the
-            // base content and the overlays).
-            root_col = root_col.child(gpui::deferred(overlay).with_priority(1));
+            root_col = root_col.child(modal_overlay(overlay));
         }
 
         // ---- Text-edit overlay (gpui-component Input): settings values and
@@ -667,10 +648,7 @@ impl Render for RootView {
                 .border_color(col(theme::ui_theme().placeholder))
                 .child(gpui_component::input::Input::new(input));
             let overlay = text_edit::overlay_shell(&caption, &core, input_slot, cx);
-            // Deferred: drawn on GPUI's overlay layer, so it stays above native
-            // viewport surfaces (window composition stacks those between the
-            // base content and the overlays).
-            root_col = root_col.child(gpui::deferred(overlay).with_priority(1));
+            root_col = root_col.child(modal_overlay(overlay));
         }
 
         root_col
@@ -1057,9 +1035,7 @@ fn launch_app(
             }
         }
         gpui_component::init(cx);
-        // Script views are desktop only (gpui-rhai does not build for wasm).
-        #[cfg(not(target_family = "wasm"))]
-        gpui_rhai::install(cx);
+        dock_panel::ScriptRuntime::install(cx);
         // 主题在组件初始化后、任何窗口打开前应用：shell 配色、ribbon tokens
         // 与 gpui-component 全局主题一次切齐。品牌强调色（ui.accent，来自
         // product.toml 的 branding.accent）同时落到 ribbon tokens。
