@@ -14,6 +14,7 @@ fn headless_renderer() -> Option<Renderer> {
         power_preference: wgpu::PowerPreference::LowPower,
         compatible_surface: None,
         force_fallback_adapter: false,
+        apply_limit_buckets: false,
     }))
     .ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -23,6 +24,7 @@ fn headless_renderer() -> Option<Renderer> {
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: Default::default(),
         trace: wgpu::Trace::Off,
+        default_queue: wgpu::QueueDescriptor::default(),
     }))
     .ok()?;
     Some(Renderer::new(device, queue, wgpu::TextureFormat::Bgra8Unorm))

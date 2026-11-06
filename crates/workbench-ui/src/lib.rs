@@ -1,5 +1,5 @@
 //! gpui frontend for workbench-rs: renders the platform workspace model into
-//! a gpui-ce window.
+//! a gpui window (gpui-fast).
 //!
 //! This crate is the only place on the GUI side that touches gpui. Panels and
 //! central views draw through `PaintBackend`; panels registered with a
@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    div, prelude::*, px, quad, relative, rgb_to_hsla, size, AnyElement, App, Bounds, Context, Corners, Div, Edges,
+    div, prelude::*, px, quad, relative, size, AnyElement, App, Bounds, Context, Corners, Div, Edges,
     ElementId, GlobalElementId, InspectorElementId, Hsla, KeyDownEvent, LayoutId,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
     ScrollWheelEvent, SharedString, Style, StyleRefinement, TextAlign, TextRun, TitlebarOptions,
@@ -45,7 +45,7 @@ pub mod theme;
 type SharedCore = std::rc::Rc<Mutex<AppRuntime>>;
 
 /// 拉丁基础字体（IBM Plex Sans，OFL 许可，随 license.txt 一并提交）。
-/// fork 的 gpui_web 是空字体库，Web 端必须在首帧前显式注入。
+/// gpui_web 不带字体，Web 端必须在首帧前显式注入。
 #[cfg(target_arch = "wasm32")]
 const LATIN_FONT: &[u8] = include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf");
 
@@ -94,11 +94,11 @@ impl gpui::AssetSource for WbAssets {
 // ---- 颜色转换 ----
 
 pub fn col(c: wb::Color) -> Hsla {
-    rgb_to_hsla(Rgba::new(c.r, c.g, c.b, c.a))
+    Hsla::from(Rgba { r: c.r, g: c.g, b: c.b, a: c.a })
 }
 
 fn black() -> Hsla {
-    rgb_to_hsla(Rgba::new(0.0, 0.0, 0.0, 1.0))
+    Hsla::from(Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
 }
 
 fn ui_font() -> gpui::Font {
@@ -625,7 +625,10 @@ impl Render for RootView {
 
         // ---- About 对话框 overlay（app.about 命令置位时渲染） ----
         if let Some(overlay) = about::maybe_about_overlay(&core, cx) {
-            root_col = root_col.child(overlay);
+            // Deferred: drawn on GPUI's overlay layer, so it stays above native
+            // viewport surfaces (window composition stacks those between the
+            // base content and the overlays).
+            root_col = root_col.child(gpui::deferred(overlay).with_priority(1));
         }
 
         // ---- Text-edit overlay (gpui-component Input): settings values and
@@ -664,7 +667,10 @@ impl Render for RootView {
                 .border_color(col(theme::ui_theme().placeholder))
                 .child(gpui_component::input::Input::new(input));
             let overlay = text_edit::overlay_shell(&caption, &core, input_slot, cx);
-            root_col = root_col.child(overlay);
+            // Deferred: drawn on GPUI's overlay layer, so it stays above native
+            // viewport surfaces (window composition stacks those between the
+            // base content and the overlays).
+            root_col = root_col.child(gpui::deferred(overlay).with_priority(1));
         }
 
         root_col
@@ -897,9 +903,9 @@ fn render_account_chip(
 
 /// gpui 入口：构建产品并运行主循环。
 ///
-/// 桌面：`Application::run` 阻塞直至退出。Web（wasm32）：`gpui_platform`
-/// 自动切换到 `gpui_web` 的 WebPlatform（WebGPU 渲染），浏览器事件循环驱动；
-/// 先注入字体（fork 的 gpui_web 是空字体库：内嵌拉丁 + 异步取同源 CJK，
+/// 桌面：`Application::run` 阻塞直至退出。Web（wasm32）：自建 `gpui_web`
+/// 的 WebPlatform（WebGPU/WebGL 渲染；GPU 视口要它的 wgpu 上下文），浏览器事件循环驱动；
+/// 先注入字体（gpui_web 不带字体：内嵌拉丁 + 异步取同源 CJK，
 /// 均在首帧前，避免排版缓存命中旧字形），并用 `run_embedded` 返回的句柄
 /// 保持应用存活（页面生命周期 = 应用生命周期）。
 pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> Result<(), String> {
@@ -911,8 +917,8 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
     let smoke = builder.smoke_seconds();
     let title: SharedString = window_title.to_string().into();
     let assets = builder.asset_source();
-    // 产品声明的 GPU 设备需求：在窗口打开前交给前端（gpui 的平台层按
-    // WgpuDeviceRequirements 合并）；未声明时用平台基线。
+    // 产品声明的 GPU 设备需求（`gpu_view::GpuRequirements`）：在 GPU 视口
+    // 设备创建前落位；未声明时用视口基线。
     let gpu_requirements = builder.take_gpu_requirements();
     let runtime = builder.build()?;
     let core: SharedCore = std::rc::Rc::new(Mutex::new(runtime));
@@ -958,7 +964,19 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
                     break;
                 }
             }
-            let app = gpui_platform::application().with_assets(WbAssets {
+            // The web platform is built here rather than by gpui_platform,
+            // whose constructors don't hand it back: the GPU viewports render
+            // on its wgpu context (`WebPlatform::wgpu_context`). Single
+            // threaded — wasm threads need nightly and a cross-origin
+            // isolated page. Canvas fallback covers CJK when no cjk.ttf was
+            // fetched.
+            let platform = Rc::new(gpui_web::WebPlatform::new_with_backend_and_font_fallback(
+                false,
+                gpui_web::WebBackendPreference::Auto,
+                gpui_web::CanvasFontFallback::EmojiAndCjk,
+            ));
+            gpu_view::set_web_platform(platform.clone());
+            let app = gpui::Application::with_platform(platform).with_assets(WbAssets {
                 app: assets,
                 component: gpui_component_assets::Assets::new(""),
             });
@@ -1028,11 +1046,19 @@ fn launch_app(
         if !fonts.is_empty() {
             let _ = cx.text_system().add_fonts(fonts);
         }
-        // 产品声明的额外 GPU 设备需求必须在任何窗口（即任何设备）创建之前落位。
+        // 产品声明的额外 GPU 设备需求必须在 GPU 视口设备创建（首个 GPU 视图
+        // 绘制）之前落位。
         if let Some(requirements) = gpu_requirements {
-            cx.set_gpu_requirements(requirements);
+            match requirements.downcast::<gpu_view::GpuRequirements>() {
+                Ok(requirements) => gpu_view::set_requirements(*requirements),
+                Err(_) => eprintln!(
+                    "with_gpu_requirements: expected workbench_ui::gpu_view::GpuRequirements; ignored"
+                ),
+            }
         }
         gpui_component::init(cx);
+        // Script views are desktop only (gpui-rhai does not build for wasm).
+        #[cfg(not(target_family = "wasm"))]
         gpui_rhai::install(cx);
         // 主题在组件初始化后、任何窗口打开前应用：shell 配色、ribbon tokens
         // 与 gpui-component 全局主题一次切齐。品牌强调色（ui.accent，来自

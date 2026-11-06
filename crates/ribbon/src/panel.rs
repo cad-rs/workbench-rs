@@ -2,10 +2,9 @@
 //! horizontal-scroll overflow strategy (docs/ribbon-bar.md sections 2.2-2.3,
 //! 4.5-A) and the five item kinds (section 2.4).
 
-use gpui::ColorExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement, Styled as _, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};

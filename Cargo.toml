@@ -58,31 +58,39 @@ console_error_panic_hook = "0.1"
 # std、Web 端走 performance.now/Date
 web-time = "1"
 
-# gpui frontend (gpui-ce community fork; the single UI framework).
-# Base is a vendored copy of javagg/gpui-ce (main @ 8ffa9a7 + the
-# windows-wgpu-renderer branch patches) plus a compatibility-patched
-# gpui-component — see .vendor/ (mirrors D:\srcs\gpui-wgpu, the known-good
-# gpui+wgpu reference). Once the wgpu fixes land upstream and on crates.io,
-# switch these entries back to the registry versions and drop .vendor/.
-gpui = { package = "gpui-ce", path = ".vendor/gpui-ce/crates/gpui", features = [
-    "custom-gpu",
-    "wgpu-surfaces",
+# gpui frontend: gpui-fast (longbridge/gpui-fast, a performance fork of Zed's
+# GPUI), main branch. Main, not the crates.io release (0.1.13), because the
+# web GPU viewport needs `WebPlatform::wgpu_context` (#102) and
+# `WgpuDynamicTexture` (#86/#99), which no release carries yet. Once a
+# release does, these can move to `gpui-fast*` from crates.io.
+#
+# Every `rev` below — here, in [patch.crates-io] and in
+# .vendor/gpui-pre-compat — must be the same commit, or Cargo builds two gpui
+# cores whose types don't mix.
+gpui = { git = "https://github.com/longbridge/gpui-fast", rev = "a10f393d8033c5f52f34821d6a25cddadc6174b4" }
+# No default features: the default `multithreaded` needs wasm threads
+# (nightly + a cross-origin-isolated page). x11/wayland only take effect on
+# Linux, font-kit only on macOS.
+gpui-platform = { package = "gpui_platform", git = "https://github.com/longbridge/gpui-fast", rev = "a10f393d8033c5f52f34821d6a25cddadc6174b4", default-features = false, features = [
+    "font-kit",
+    "x11",
+    "wayland",
 ] }
-gpui-platform = { package = "gpui_ce_platform", path = ".vendor/gpui-ce/crates/gpui_platform", features = [
-    "windows-wgpu",
-] }
-# GPUI 渲染器的 wgpu 上下文（GPU 视口零拷贝通路：WgpuContextHandle /
-# WgpuRenderTarget），Windows 与 Web 与 gpui 共享设备时使用。
-gpui-wgpu = { package = "gpui_ce_wgpu", path = ".vendor/gpui-ce/crates/gpui_wgpu", features = [
-    "custom-gpu",
-    "wgpu-surfaces",
-] }
-gpui-component = { package = "gpui_ce_components", path = ".vendor/gpui-component/crates/ui" }
-gpui-component-assets = { package = "gpui_ce_components_assets", path = ".vendor/gpui-component/crates/assets" }
+# Web only: GPUI's own wgpu context (`WgpuContext` / `WgpuDynamicTexture`),
+# which the web GPU viewport renders on, and the concrete web platform that
+# hands that context out.
+gpui-wgpu = { package = "gpui_wgpu", git = "https://github.com/longbridge/gpui-fast", rev = "a10f393d8033c5f52f34821d6a25cddadc6174b4" }
+gpui-web = { package = "gpui_web", git = "https://github.com/longbridge/gpui-fast", rev = "a10f393d8033c5f52f34821d6a25cddadc6174b4", default-features = false }
+# GPUI Kit's component layer, from crates.io. It is built on the default
+# backend (`gpui-pre` =0.3.11), which [patch.crates-io] points at gpui-fast.
+gpui-component = "0.9.0"
+gpui-component-assets = { package = "gpui-kit-assets", version = "0.9.0" }
+# Rhai script views (`gpui-pre` =0.3.9, likewise patched onto gpui-fast).
+gpui-rhai = { version = "=0.4.1", default-features = false }
 
-# GPU 视口（workbench-ui 的原生视图扩展）：wgpu 版本必须与 vendored
-# gpui-ce pin 的一致（当前 29.0.3），否则类型不同一、纹理无法共享。
-wgpu = "29.0.3"
+# GPU 视口（workbench-ui 的原生视图扩展）。版本必须与 gpui-fast pin 的
+# wgpu 一致：Web 端视口直接用 GPUI 的设备与纹理，类型必须同一。
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007" }
 glam = "0.30"
 bytemuck = { version = "1", features = ["derive"] }
 # 非 Windows 桌面的回读合成路径（离屏渲染 → CPU 回读 → paint_image）
@@ -102,41 +110,29 @@ lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
 
-# Unify gpui-ce for registry dependencies that pin it (gpui-rhai =0.2.2):
-# the vendored fork carries the same version number.
-
-# Unify every vendored gpui-ce/gpui-component internal crate name, so no
-# registry duplicate can slip into the graph (version skew breaks builds).
 [patch.crates-io]
+# One gpui core for the whole graph. The registry crates that build on GPUI
+# name it through the `gpui-pre-*` snapshot packages; these entries swap each
+# snapshot for a re-export of gpui-fast, so their types are this workspace's.
+#
+# gpui-component 0.9 pins the =0.3.11 snapshot. gpui-fast's own compat crates
+# still carry 0.3.9, so local copies at 0.3.11 stand in (see
+# .vendor/gpui-pre-compat). Drop them once gpui-fast moves its compat crates
+# to the snapshot gpui-component pins.
+gpui-pre = { path = ".vendor/gpui-pre-compat/gpui-pre" }
+gpui-pre-macros = { path = ".vendor/gpui-pre-compat/gpui-pre-macros" }
+gpui-pre-platform = { path = ".vendor/gpui-pre-compat/gpui-pre-platform" }
+gpui-pre-sum-tree = { path = ".vendor/gpui-pre-compat/gpui-pre-sum-tree" }
+# gpui-rhai 0.4.1 pins the older =0.3.9 snapshot, and Cargo admits only one
+# semver-compatible `gpui-pre` per graph. The vendored copy is the published
+# 0.4.1 package with only that pin moved to =0.3.11. Drop it once a gpui-rhai
+# release pins the snapshot gpui-component does.
 gpui-rhai = { path = ".vendor/gpui-rhai" }
-gpui-ce = { path = ".vendor/gpui-ce/crates/gpui" }
-gpui-component-story = { path = ".vendor/gpui-component/crates/story" }
-gpui-component-story-web = { path = ".vendor/gpui-component/crates/story-web" }
-gpui_ce_apple = { path = ".vendor/gpui-ce/crates/gpui_apple" }
-gpui_ce_collections = { path = ".vendor/gpui-ce/crates/gpui_collections" }
-gpui_ce_components = { path = ".vendor/gpui-component/crates/ui" }
-gpui_ce_components_assets = { path = ".vendor/gpui-component/crates/assets" }
-gpui_ce_components_base = { path = ".vendor/gpui-component/crates/base" }
-gpui_ce_components_fps = { path = ".vendor/gpui-component/crates/fps" }
-gpui_ce_components_macros = { path = ".vendor/gpui-component/crates/macros" }
-gpui_ce_components_shell = { path = ".vendor/gpui-component/crates/shell" }
-gpui_ce_components_webview = { path = ".vendor/gpui-component/crates/webview" }
-gpui_ce_derive_refineable = { path = ".vendor/gpui-ce/crates/gpui_derive_refineable" }
-gpui_ce_elements = { path = ".vendor/gpui-ce/crates/gpui_elements" }
-gpui_ce_linux = { path = ".vendor/gpui-ce/crates/gpui_linux" }
-gpui_ce_macos = { path = ".vendor/gpui-ce/crates/gpui_macos" }
-gpui_ce_macros = { path = ".vendor/gpui-ce/crates/gpui_macros" }
-gpui_ce_media = { path = ".vendor/gpui-ce/crates/gpui_media" }
-gpui_ce_path = { path = ".vendor/gpui-ce/crates/gpui_path" }
-gpui_ce_platform = { path = ".vendor/gpui-ce/crates/gpui_platform" }
-gpui_ce_refineable = { path = ".vendor/gpui-ce/crates/gpui_refineable" }
-gpui_ce_render = { path = ".vendor/gpui-ce/crates/gpui_render" }
-gpui_ce_scheduler = { path = ".vendor/gpui-ce/crates/gpui_scheduler" }
-gpui_ce_shared_string = { path = ".vendor/gpui-ce/crates/gpui_shared_string" }
-gpui_ce_sum_tree = { path = ".vendor/gpui-ce/crates/gpui_sum_tree" }
-gpui_ce_tokio = { path = ".vendor/gpui-ce/crates/gpui_tokio" }
-gpui_ce_util = { path = ".vendor/gpui-ce/crates/gpui_ce_util" }
-gpui_ce_web = { path = ".vendor/gpui-ce/crates/gpui_web" }
-gpui_ce_wgpu = { path = ".vendor/gpui-ce/crates/gpui_wgpu" }
-gpui_ce_windows = { path = ".vendor/gpui-ce/crates/gpui_windows" }
-gpui_ce_zed_util = { path = ".vendor/gpui-ce/crates/gpui_zed_util" }
+
+# gpui-fast's own workspace patches. Patches don't cross workspaces, so a
+# git dependency on gpui-fast has to repeat them (as its wgpu demo does).
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
+windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
+calloop = { git = "https://github.com/zed-industries/calloop" }
+khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }

@@ -3,7 +3,6 @@
 
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use gpui::{
     div, prelude::*, px, rgb, App, Bounds, Context, Entity, Size, Window, WindowBounds, WindowOptions,
@@ -279,12 +278,10 @@ fn main() {
     // with gpui-component built-ins as fallback (chevrons, menu glyphs).
     let icon_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../workbenches/wb-example/assets/icons");
-    let app = app.with_assets(
-        Arc::new(DemoAssets {
-            app: FsAssetSource { root: icon_dir },
-            component: gpui_component_assets::Assets::new(""),
-        }) as Arc<dyn gpui::AssetSource>,
-    );
+    let app = app.with_assets(DemoAssets {
+        app: FsAssetSource { root: icon_dir },
+        component: gpui_component_assets::Assets::new(""),
+    });
 
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);

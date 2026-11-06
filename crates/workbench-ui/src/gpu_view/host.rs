@@ -3,22 +3,32 @@
 //! 收编产品侧重复的整段壳代码（自 mulphy gpu3d.rs 迁入——两份壳曾各自
 //! 漂移：0 高布局 bug 双份各修致「表面共享坏」误诊存续 7 轮、命中测试
 //! 只有产品侧有；此后框架唯一实现）：满尺寸布局、指针/滚轮裸输入转发
-//! （按下命中视口矩形才起拖拽）、渲染器与离屏合成目标槽、
-//! `paint_surface`/readback 双路径呈现、无适配器深色底回退、超大视口
-//! 护栏。
+//! （按下命中视口矩形才起拖拽）、渲染器与上屏通路（[`super::present`]：
+//! Web 动态纹理 / Windows 原生合成表面 / 其余回读贴图）、无适配器深色底
+//! 回退、超大视口护栏。
 //!
 //! 分层：渲染语义（相机灵敏度/几何/着色/线宽）归 [`workbench_render`]，
 //! 本模块只递裸输入与目标参数；产品每帧构建 [`workbench_render::RenderScene`]
 //! （世界坐标几何 + **基准**相机 + 背景）与基准视角 [`RenderViewportElement::base_view`]，
-//! 交互相机偏移由渲染核心会话状态在 paint 时叠加。
+//! 交互相机偏移由渲染核心会话状态在渲染时叠加。
 
-use gpui::{Bounds, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId, Pixels, Style, Window};
+use std::cell::RefCell;
+use std::rc::{Rc, Weak};
+
+use gpui::{
+    Bounds, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    LayoutId, Pixels, Point, Style, Window,
+};
 use workbench_render as wbr;
 
+use super::present::{NativeHooks, PointerInput, Presenter};
+use super::Gpu;
+
 /// 通用渲染视口：产品递场景（基准相机）+ 基准视角，交互偏移由渲染核心
-/// 叠加。Windows/Web 走 gpui 渲染器共享设备 `paint_surface` 零拷贝合成
-/// （纹理全程留 GPU，尺寸不变即复用合成目标）；其余桌面 readback 位图
-/// 贴图回退；无可用适配器深色底如实呈现。
+/// 叠加。上屏通路见 [`super::present`]；无可用适配器深色底如实呈现。
+///
+/// 进程内只有一个宿主（渲染器与上屏目标是单例，与迁移前相同）：同时
+/// 显示两个本元素会争用同一目标。
 pub struct RenderViewportElement {
     /// 每帧重建：世界坐标几何 + 基准相机（`scene_camera` 类语义）+ 背景。
     pub scene: wbr::RenderScene,
@@ -28,101 +38,123 @@ pub struct RenderViewportElement {
 
 /// 0xRRGGBB → gpui 颜色。
 fn rgb(v: u32) -> gpui::Hsla {
-    gpui::rgb_to_hsla(gpui::Rgba::new(
-        ((v >> 16) & 0xFF) as f32 / 255.0,
-        ((v >> 8) & 0xFF) as f32 / 255.0,
-        (v & 0xFF) as f32 / 255.0,
-        1.0,
-    ))
+    gpui::rgb(v).into()
 }
 
-// 渲染器单例（gpui UI 线程 thread_local；设备来自框架共享槽
-// `shared_gpu`——Windows/Web 复用 gpui 渲染器自己的设备，其余桌面为
-// 框架自建的独立设备）。
+/// The host singleton: renderer, presenter and the product's last scene.
+/// The scene is kept so a native surface can draw input-driven frames on its
+/// own, without the product's view rendering again.
+struct Host {
+    gpu: Option<Rc<Gpu>>,
+    renderer: Option<wbr::Renderer>,
+    presenter: Presenter,
+    /// The product's last scene and its base camera (before the interactive
+    /// offset is applied).
+    scene: Option<(wbr::RenderScene, wbr::OrthoCamera, (f64, f64))>,
+    dirty: bool,
+    /// Where a left-button drag over the viewport last was (viewport-local).
+    drag_from: Option<(f32, f32)>,
+    /// Where the element was last laid out (window logical pixels).
+    origin: Point<Pixels>,
+}
+
 thread_local! {
-    static RENDERER: std::cell::RefCell<Option<wbr::Renderer>> =
-        const { std::cell::RefCell::new(None) };
+    // gpui UI 线程单例；设备来自框架共享槽 `shared_gpu`。
+    static HOST: Rc<RefCell<Host>> = Rc::new(RefCell::new(Host {
+        gpu: None,
+        renderer: None,
+        presenter: Presenter::Pending,
+        scene: None,
+        dirty: true,
+        drag_from: None,
+        origin: Point::default(),
+    }));
 }
 
-// Windows/Web 的离屏合成目标（gpui 渲染器设备上的纹理；尺寸不变即复用
-// ——纹理身份稳定，gpui SurfaceCache 的绑定缓存不重建）。
-#[cfg(any(target_family = "wasm", target_os = "windows"))]
-thread_local! {
-    static SURFACE_TARGET:
-        std::cell::RefCell<Option<(u32, u32, gpui_wgpu::WgpuRenderTarget)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// 注册视口指针输入（每帧随 paint 重注册——gpui 每帧清监听）。
-/// **壳只递裸参数**：拖拽位移（px）+ Shift 键位、滚轮像素 → 缩放乘子；
-/// 灵敏度/换算/clamp 语义全在渲染核心（`wbr::CamOffset`）。按下时命中
-/// 视口矩形才启动拖拽。
-fn register_cam_input(window: &mut Window, bounds: Bounds<Pixels>) {
-    use gpui::{MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollDelta, ScrollWheelEvent};
-    let origin = bounds.origin;
-    let size = bounds.size;
-    let (ox, oy, sw, sh) = (
-        f32::from(origin.x),
-        f32::from(origin.y),
-        f32::from(size.width),
-        f32::from(size.height),
-    );
-    let in_bounds = move |p: gpui::Point<gpui::Pixels>| {
-        let (px, py) = (f32::from(p.x), f32::from(p.y));
-        px >= ox && py >= oy && px <= ox + sw && py <= oy + sh
-    };
-    thread_local! {
-        static DRAGGING: std::cell::Cell<Option<(f32, f32)>> = const { std::cell::Cell::new(None) };
-    }
-    window.on_mouse_event(move |ev: &MouseDownEvent, phase, _w, _cx| {
-        if phase.bubble() && ev.button == gpui::MouseButton::Left && in_bounds(ev.position) {
-            DRAGGING.with(|d| {
-                d.set(Some((
-                    f32::from(ev.position.x - origin.x),
-                    f32::from(ev.position.y - origin.y),
-                )))
-            });
-        }
-    });
-    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _w, _cx| {
-        if !phase.bubble() || !ev.dragging() {
-            return;
-        }
-        DRAGGING.with(|d| {
-            if let Some(last) = d.get() {
-                let p = (
-                    f32::from(ev.position.x - origin.x),
-                    f32::from(ev.position.y - origin.y),
-                );
-                let (dx, dy) = ((p.0 - last.0) as f64, (p.1 - last.1) as f64);
-                if dx != 0.0 || dy != 0.0 {
-                    // 裸输入转发：Shift = 平移，默认 = 轨道（键位选择在壳，
-                    // 位移语义在渲染核心）。
-                    if ev.modifiers.shift {
-                        wbr::cam_pan(dx, dy);
-                    } else {
-                        wbr::cam_orbit(dx, dy);
-                    }
-                    d.set(Some(p));
-                }
-            }
-        });
-    });
-    window.on_mouse_event(move |_ev: &MouseUpEvent, phase, _w, _cx| {
-        if phase.bubble() {
-            DRAGGING.with(|d| d.set(None));
-        }
-    });
-    window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, _w, _cx| {
-        if !phase.bubble() || !in_bounds(ev.position) {
-            return;
-        }
-        let delta = match ev.delta {
-            ScrollDelta::Pixels(p) => f32::from(p.y),
-            ScrollDelta::Lines(p) => p.y * 20.0,
+impl Host {
+    /// 裸输入转发：拖拽位移（px）+ Shift 键位、滚轮像素 → 缩放乘子；
+    /// 灵敏度/换算/clamp 语义全在渲染核心（`wbr::CamOffset`）。
+    fn pointer(&mut self, input: PointerInput) -> bool {
+        let local = |p: Point<Pixels>, origin: Point<Pixels>| {
+            (f32::from(p.x - origin.x), f32::from(p.y - origin.y))
         };
-        wbr::cam_zoom((-delta as f64 * 0.0012).exp());
-    });
+        let changed = match input {
+            PointerInput::Press(position) => {
+                self.drag_from = Some(local(position, self.origin));
+                false
+            }
+            PointerInput::Release => {
+                self.drag_from = None;
+                false
+            }
+            PointerInput::Move {
+                position,
+                dragging,
+                shift,
+            } => match self.drag_from {
+                Some(_) if !dragging => {
+                    self.drag_from = None;
+                    false
+                }
+                Some(from) => {
+                    let p = local(position, self.origin);
+                    let (dx, dy) = ((p.0 - from.0) as f64, (p.1 - from.1) as f64);
+                    self.drag_from = Some(p);
+                    if dx == 0.0 && dy == 0.0 {
+                        false
+                    } else {
+                        // 键位选择在壳（Shift = 平移，默认 = 轨道），位移语义在
+                        // 渲染核心。
+                        if shift {
+                            wbr::cam_pan(dx, dy);
+                        } else {
+                            wbr::cam_orbit(dx, dy);
+                        }
+                        true
+                    }
+                }
+                None => false,
+            },
+            PointerInput::Scroll(pixels) => {
+                wbr::cam_zoom((-pixels as f64 * 0.0012).exp());
+                true
+            }
+        };
+        if changed {
+            self.dirty = true;
+        }
+        changed
+    }
+
+    /// Renders the last scene through `render` (paint or a native redraw),
+    /// with the interactive camera offset as it is now.
+    fn render_with(
+        &mut self,
+        render: impl FnOnce(&mut Presenter, &Gpu, &mut dyn FnMut(&wgpu::TextureView, (u32, u32))),
+    ) {
+        let Some(gpu) = self.gpu.clone() else {
+            return;
+        };
+        let Self {
+            renderer,
+            presenter,
+            scene,
+            ..
+        } = self;
+        let (Some(renderer), Some((scene, base_camera, base_view))) = (renderer.as_mut(), scene.as_mut())
+        else {
+            return;
+        };
+        let mut draw = |view: &wgpu::TextureView, size: (u32, u32)| {
+            // 基准相机（产品构建）→ 交互相机叠加（语义在渲染核心）。
+            let mut camera = *base_camera;
+            wbr::cam_apply(base_view.0, base_view.1, &mut camera, size.1 as f64);
+            scene.camera = camera;
+            renderer.render(scene, size.0, size.1, view);
+        };
+        render(presenter, &gpu, &mut draw);
+        self.dirty = false;
+    }
 }
 
 impl RenderViewportElement {
@@ -138,85 +170,6 @@ impl RenderViewportElement {
         );
         window.paint_quad(q);
     }
-
-    fn paint_scene(&mut self, window: &mut Window, bounds: Bounds<Pixels>) {
-        // 交互相机输入（gpui 每帧清监听，随 paint 重注册——输入事件自动
-        // 触发下一帧）。
-        register_cam_input(window, bounds);
-        let scale = window.scale_factor();
-        let w = (f32::from(bounds.size.width) * scale).round().max(1.0) as u32;
-        let h = (f32::from(bounds.size.height) * scale).round().max(1.0) as u32;
-        // 上限防超大视口。
-        let (w, h) = (w.min(4096), h.min(4096));
-        // 基准相机（产品构建）→ 交互相机叠加（语义在渲染核心）。
-        wbr::cam_apply(self.base_view.0, self.base_view.1, &mut self.scene.camera, h as f64);
-        // 框架共享 GPU 槽（Windows/Web 复用 gpui 渲染器设备，其余桌面
-        // 框架自建独立设备）；拿不到（无适配器）→ 深色底如实呈现。
-        let Some(gpu) = super::shared_gpu(window) else {
-            Self::paint_fallback(window, bounds);
-            return;
-        };
-        RENDERER.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            let renderer = slot.get_or_insert_with(|| {
-                wbr::Renderer::new(gpu.device.clone(), gpu.queue.clone(), gpu.target_format)
-            });
-            #[cfg(any(target_family = "wasm", target_os = "windows"))]
-            {
-                // 渲进 gpui 渲染器设备上的离屏目标 → `paint_surface`
-                // 零拷贝合成（纹理全程留 GPU；尺寸不变即复用目标）。
-                SURFACE_TARGET.with(|t| {
-                    let mut slot = t.borrow_mut();
-                    let reuse =
-                        slot.as_ref().is_some_and(|(tw, th, _)| *tw == w && *th == h);
-                    if !reuse {
-                        *slot = Some((
-                            w,
-                            h,
-                            gpui_wgpu::WgpuRenderTarget::new(
-                                gpu.context_handle(),
-                                gpui::size(
-                                    gpui::DevicePixels(w as i32),
-                                    gpui::DevicePixels(h as i32),
-                                ),
-                            ),
-                        ));
-                    }
-                    let target = &mut slot.as_mut().expect("just set").2;
-                    renderer.render(&self.scene, w, h, target.view());
-                    window.paint_surface(
-                        bounds,
-                        gpui::SurfaceSource::Texture {
-                            texture: target.texture(),
-                            size: target.size(),
-                        },
-                    );
-                });
-            }
-            #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
-            {
-                // 其余桌面：gpui 渲染器非 wgpu，纹理无法合成——回读位图贴图
-                // （headless 测试同路）。
-                if let Some(bytes) = renderer.render_readback(&self.scene, w, h) {
-                    let frame = image::Frame::new(
-                        image::ImageBuffer::from_raw(w, h, bytes)
-                            .expect("readback size matches target"),
-                    );
-                    let img = std::sync::Arc::new(gpui::RenderImage::new(vec![frame]));
-                    let _ = window.paint_image(
-                        bounds,
-                        bounds,
-                        gpui::Corners::all(gpui::px(0.)),
-                        img,
-                        0,
-                        false,
-                    );
-                } else {
-                    Self::paint_fallback(window, bounds);
-                }
-            }
-        });
-    }
 }
 
 impl gpui::IntoElement for RenderViewportElement {
@@ -229,7 +182,7 @@ impl gpui::IntoElement for RenderViewportElement {
 
 impl Element for RenderViewportElement {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = Hitbox;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -258,11 +211,37 @@ impl Element for RenderViewportElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _request_layout: &mut (),
-        _window: &mut Window,
-        _cx: &mut gpui::App,
-    ) {
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> Hitbox {
+        let host = HOST.with(Rc::clone);
+        let weak = Rc::downgrade(&host);
+        let mut state = host.borrow_mut();
+        state.origin = bounds.origin;
+        // The product rebuilt its scene for this frame: keep it (and its base
+        // camera) for the frames the viewport draws on its own.
+        let scene = std::mem::take(&mut self.scene);
+        let base_camera = scene.camera;
+        state.scene = Some((scene, base_camera, self.base_view));
+        state.dirty = true;
+        // 框架共享 GPU 槽；拿不到（无适配器）→ paint 深色底如实呈现。
+        if let Some(gpu) = super::shared_gpu(window) {
+            if state.renderer.is_none() {
+                state.renderer = Some(wbr::Renderer::new(
+                    gpu.device.clone(),
+                    gpu.queue.clone(),
+                    gpu.target_format,
+                ));
+            }
+            state.gpu = Some(gpu.clone());
+            state
+                .presenter
+                .prepaint(&gpu, bounds, window, cx, || native_hooks(weak));
+        }
+        drop(state);
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
     fn paint(
@@ -271,10 +250,57 @@ impl Element for RenderViewportElement {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _request_layout: &mut (),
-        _prepaint: &mut (),
+        hitbox: &mut Hitbox,
         window: &mut Window,
         _cx: &mut gpui::App,
     ) {
-        self.paint_scene(window, bounds);
+        let host = HOST.with(Rc::clone);
+        let native_input = {
+            let mut state = host.borrow_mut();
+            if state.gpu.is_none() || matches!(state.presenter, Presenter::Pending) {
+                drop(state);
+                Self::paint_fallback(window, bounds);
+                return;
+            }
+            let dirty = state.dirty;
+            let mut result = Ok(());
+            state.render_with(|presenter, gpu, draw| {
+                result = presenter.paint(gpu, bounds, dirty, window, draw);
+            });
+            if let Err(err) = result {
+                eprintln!("render viewport: {err:#}");
+                drop(state);
+                Self::paint_fallback(window, bounds);
+                return;
+            }
+            state.presenter.native_input()
+        };
+        if !native_input {
+            // 交互相机输入（gpui 每帧清监听，随 paint 重注册）。
+            let view = window.current_view();
+            super::present::listen_pointer(
+                window,
+                hitbox,
+                Rc::new(move |input| host.borrow_mut().pointer(input)),
+                view,
+            );
+        }
+    }
+}
+
+/// How the host's native surface draws and takes input on its own.
+fn native_hooks(host: Weak<RefCell<Host>>) -> NativeHooks {
+    let redraw = host.clone();
+    NativeHooks {
+        redraw: Box::new(move || {
+            if let Some(host) = redraw.upgrade() {
+                host.borrow_mut()
+                    .render_with(|presenter, _gpu, draw| presenter.redraw_native(draw));
+            }
+        }),
+        pointer: Rc::new(move |input| {
+            host.upgrade()
+                .is_some_and(|host| host.borrow_mut().pointer(input))
+        }),
     }
 }

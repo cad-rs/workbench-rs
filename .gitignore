@@ -5,8 +5,3 @@ products/product-*-web/dist/
 products/product-*-web/assets/fonts/
 # ZCode editor workspace state
 .zcode/
-# vendored crate registry artifacts
-vendor/gpui_ce_web/.cargo-ok
-vendor/gpui_ce_web/.cargo_vcs_info.json
-vendor/gpui_ce_web/Cargo.lock
-vendor/gpui_ce_web/Cargo.toml.orig

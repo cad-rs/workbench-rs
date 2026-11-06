@@ -1043,7 +1043,7 @@ impl WorkbenchAppBuilder {
 
     /// 声明产品额外需要的 GPU 设备需求（features / limits），在前端创建设备前
     /// 落位。类型由 GUI 前端解释（workbench-ui 期望
-    /// `gpui_wgpu::WgpuDeviceRequirements`），本层只透传 `Box<dyn Any>`
+    /// `workbench_ui::gpu_view::GpuRequirements`），本层只透传 `Box<dyn Any>`
     /// （GUI 无关契约不变）。典型用途：产品自己的渲染器需要高于平台基线的
     /// 限制（如计算着色器的 storage buffer 数）。
     pub fn with_gpu_requirements(mut self, requirements: Box<dyn std::any::Any>) -> Self {

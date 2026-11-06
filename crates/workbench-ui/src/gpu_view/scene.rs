@@ -1,12 +1,8 @@
 //! wgpu 渲染核心：自定义 WGSL shader、实体/线段两条管线、
-//! 离屏渲染目标（Bgra8Unorm，方便直接交给 gpui 的 RenderImage）与 GPU→CPU 回读。
+//! 场景缓冲与 uniform；渲染目标由 `present` 按平台提供。
 //! 移植自 gpui-wgpu 参考实现（javagg/gpui-demo）。
 
 use super::mesh::{self, LineVertex, Mesh, SolidVertex};
-#[cfg(not(any(target_family = "wasm", target_os = "windows")))]
-use super::gpu::Gpu;
-#[cfg(not(any(target_family = "wasm", target_os = "windows")))]
-use anyhow::Result;
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
@@ -290,7 +286,7 @@ impl Pipelines {
                 module: &shader,
                 entry_point: Some("vs_solid"),
                 compilation_options: Default::default(),
-                buffers: &[solid_vbl],
+                buffers: &[Some(solid_vbl)],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -316,7 +312,7 @@ impl Pipelines {
                 module: &shader,
                 entry_point: Some("vs_line"),
                 compilation_options: Default::default(),
-                buffers: &[line_vbl],
+                buffers: &[Some(line_vbl)],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -373,165 +369,3 @@ pub fn draw_scene(
     pass.draw(0..scene.line_verts, 0..1);
 }
 
-/// 离屏渲染目标：颜色纹理（Bgra8Unorm）+ 深度 + 回读缓冲。
-/// 仅非 Windows 桌面使用；web 与 Windows 走 `gpui_wgpu::WgpuRenderTarget`
-/// 共享设备的零拷贝通路。
-#[cfg(not(any(target_family = "wasm", target_os = "windows")))]
-pub struct Target {
-    color: wgpu::Texture,
-    pub view: wgpu::TextureView,
-    depth_view: wgpu::TextureView,
-    readback: wgpu::Buffer,
-    padded_bpr: u32,
-    pub size: (u32, u32),
-}
-
-#[cfg(not(any(target_family = "wasm", target_os = "windows")))]
-impl Target {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, size: (u32, u32)) -> Self {
-        let (w, h) = size;
-        let color = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("viewport-color"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            format,
-            view_formats: &[],
-        });
-        let view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("viewport-depth"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: wgpu::TextureFormat::Depth24Plus,
-            view_formats: &[],
-        });
-        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let bpr = w * 4;
-        let padded_bpr = bpr.div_ceil(256) * 256;
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("viewport-readback"),
-            size: (padded_bpr * h) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        Self {
-            color,
-            view,
-            depth_view,
-            readback,
-            padded_bpr,
-            size,
-        }
-    }
-
-    /// 渲染一帧并同步回读为紧排 BGRA 像素
-    pub fn render_and_read(
-        &mut self,
-        gpu: &Gpu,
-        scene: &Scene,
-        pipes: &Pipelines,
-        view_state: &ViewState,
-        uniforms: &Uniforms,
-    ) -> Result<Vec<u8>> {
-        let (w, h) = self.size;
-        gpu.queue.write_buffer(
-            &view_state.uniform_buf,
-            0,
-            bytemuck::bytes_of(uniforms),
-        );
-
-        let mut encoder =
-            gpu.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("viewport-encoder"),
-                });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("viewport-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.102,
-                            g: 0.110,
-                            b: 0.133,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-            draw_scene(&mut pass, scene, pipes, &view_state.bind_group);
-        }
-
-        encoder.copy_texture_to_buffer(
-            self.color.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &self.readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.padded_bpr),
-                    rows_per_image: None,
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        gpu.queue.submit([encoder.finish()]);
-
-        // 同步回读：演示交互帧率下，这个量级的拷贝完全可接受
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.readback
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
-        gpu.device.poll(wgpu::PollType::Wait {
-            timeout: None,
-            submission_index: None,
-        })?;
-        rx.recv()
-            .map_err(|_| anyhow::anyhow!("readback channel closed"))??;
-
-        let data = self.readback.slice(..).get_mapped_range();
-        let bpr = (w * 4) as usize;
-        let mut packed = Vec::with_capacity(h as usize * bpr);
-        for row in 0..h as usize {
-            let start = row * self.padded_bpr as usize;
-            packed.extend_from_slice(&data[start..start + bpr]);
-        }
-        drop(data);
-        self.readback.unmap();
-        Ok(packed)
-    }
-}

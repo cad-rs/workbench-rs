@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::rc::Rc;
 
 use thiserror::Error;
 
@@ -16,6 +17,11 @@ impl NodeId {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
+    }
+
+    /// The id whose [`Self::get`] is `value`, as a motion path names it.
+    pub(crate) const fn from_raw(value: u64) -> Self {
+        Self(value)
     }
 }
 
@@ -51,23 +57,179 @@ pub struct RetainedNode {
     kind: UiNodeKindTag,
     primitive: Option<crate::PrimitiveId>,
     component_root: Option<crate::ComponentInstancePath>,
+    forwarded_components: Option<std::rc::Rc<Vec<crate::ComponentInstancePath>>>,
     element_ref: Option<crate::ElementRef>,
     attributes: BTreeMap<String, crate::UiValue>,
     text: Option<String>,
     handlers: BTreeMap<String, Vec<crate::UiEventBinding>>,
     handler_payloads: BTreeMap<String, crate::UiValue>,
     scrollable: bool,
+    focus_styled: bool,
+    /// Whether the node's own style leaves its height to its content, so a
+    /// cache island can be pinned to the height it measures there.
+    sized_by_content: bool,
     canvas_commands: usize,
     canvas_scene: Option<crate::CanvasScene>,
     virtual_data_items: usize,
     virtual_realized_items: usize,
     children: Vec<RetainedChildLink>,
+    summary: SubtreeSummary,
+}
+
+/// What a retained subtree holds, kept on its root for the render path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SubtreeSummary {
+    /// Nodes in the subtree, its root included.
+    pub nodes: u32,
+    /// Nodes that a cached island cannot hold
+    /// ([`crate::renderer::island_hot`]).
+    pub hot: u32,
+    /// Nodes with a `group_hover` style, painted by an ancestor's hover.
+    pub group_hover: u32,
+    /// Nodes with a `group_focus` style, which follows an ancestor's focus.
+    pub group_focus: u32,
+    /// Nodes a commit's motion phase has to visit
+    /// ([`crate::motion::node_takes_motion`]).
+    pub motion: u32,
+    /// Nodes with exit motions, which leave a ghost when removed.
+    pub exit: u32,
+    /// Nodes that read a native signal: a binding, a signal style or a
+    /// signal-triggered progress motion.
+    pub signals: u32,
+    /// Virtual collections.
+    pub collections: u32,
+    /// Nodes the view looks up after a commit ([`RetainedNode::host_reads`]).
+    pub host: u32,
+    /// Retained pages and nodes that present a component, which page
+    /// visibility tracks.
+    pub pages: u32,
+    /// What the commit's resource budgets count.
+    pub resources: ResourceTotals,
+    /// The root itself lays out or moves its children in ways an island
+    /// below it cannot follow: Table layout or a scroll container.
+    pub opaque: bool,
+}
+
+/// The amounts of a subtree that a commit checks against its resource
+/// budgets, each summed with saturation as the check sums them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ResourceTotals {
+    pub handlers: usize,
+    pub layers: usize,
+    pub canvas_scenes: usize,
+    pub canvas_commands: usize,
+    pub virtual_data_items: usize,
+    pub virtual_realized_items: usize,
+}
+
+impl ResourceTotals {
+    fn of(node: &RetainedNode) -> Self {
+        Self {
+            handlers: node.handler_count(),
+            layers: usize::from(node.kind == UiNodeKindTag::Layer),
+            canvas_scenes: usize::from(node.kind == UiNodeKindTag::Canvas),
+            canvas_commands: node.canvas_commands,
+            virtual_data_items: node.virtual_data_items,
+            virtual_realized_items: node.virtual_realized_items,
+        }
+    }
+
+    const fn add(self, other: Self) -> Self {
+        Self {
+            handlers: self.handlers.saturating_add(other.handlers),
+            layers: self.layers.saturating_add(other.layers),
+            canvas_scenes: self.canvas_scenes.saturating_add(other.canvas_scenes),
+            canvas_commands: self.canvas_commands.saturating_add(other.canvas_commands),
+            virtual_data_items: self
+                .virtual_data_items
+                .saturating_add(other.virtual_data_items),
+            virtual_realized_items: self
+                .virtual_realized_items
+                .saturating_add(other.virtual_realized_items),
+        }
+    }
+}
+
+impl SubtreeSummary {
+    fn of(node: &UiNode) -> Self {
+        Self {
+            nodes: 1,
+            hot: u32::from(crate::renderer::island_hot(node)),
+            group_hover: u32::from(node.style().group_hover.is_some()),
+            group_focus: u32::from(node.style().group_focus.is_some()),
+            motion: u32::from(crate::motion::node_takes_motion(node)),
+            exit: u32::from(!node.exit_motions().is_empty()),
+            signals: u32::from(
+                node.signal_bindings().next().is_some()
+                    || node.signal_style().is_some()
+                    || node
+                        .progress_motions()
+                        .iter()
+                        .any(|binding| binding.signal_trigger.is_some()),
+            ),
+            collections: u32::from(matches!(
+                node.kind(),
+                crate::UiNodeKind::VirtualCollection { .. }
+            )),
+            resources: ResourceTotals::default(),
+            host: 0,
+            pages: 0,
+            opaque: node.table_layout().is_some() || crate::renderer::node_scrollable(node),
+        }
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            nodes: self.nodes.saturating_add(other.nodes),
+            hot: self.hot.saturating_add(other.hot),
+            group_hover: self.group_hover.saturating_add(other.group_hover),
+            group_focus: self.group_focus.saturating_add(other.group_focus),
+            motion: self.motion.saturating_add(other.motion),
+            exit: self.exit.saturating_add(other.exit),
+            signals: self.signals.saturating_add(other.signals),
+            collections: self.collections.saturating_add(other.collections),
+            host: self.host.saturating_add(other.host),
+            pages: self.pages.saturating_add(other.pages),
+            resources: self.resources.add(other.resources),
+            opaque: self.opaque,
+        }
+    }
 }
 
 impl RetainedNode {
+    /// Whether a view's walks after a commit may take the node: focus
+    /// (element refs, focus styles, clicks, tab stops, pages, navigation,
+    /// headings, primitives, overlays, focus-within listeners), scrolling
+    /// and primitive mounts.
+    pub(crate) fn host_reads(&self) -> bool {
+        self.element_ref.is_some()
+            || self.focus_styled
+            || self.scrollable
+            || self.primitive.is_some()
+            || self.kind == UiNodeKindTag::Overlay
+            || ["click", "focus_within_change"].into_iter().any(|event| {
+                self.handlers
+                    .get(event)
+                    .is_some_and(|handlers| !handlers.is_empty())
+            })
+            || self.attributes.get("tab_stop") == Some(&crate::UiValue::Bool(true))
+            || self.attributes.get("role") == Some(&crate::UiValue::String("heading".to_owned()))
+            || self
+                .attributes
+                .contains_key(crate::retained_page::PAGE_VISIBLE)
+            || self
+                .attributes
+                .contains_key(crate::retained_page::NAVIGATION_DEPTH)
+    }
+
     #[must_use]
     pub const fn id(&self) -> NodeId {
         self.id
+    }
+
+    /// What this node's subtree holds.
+    pub(crate) const fn summary(&self) -> SubtreeSummary {
+        self.summary
     }
 
     #[must_use]
@@ -95,6 +257,16 @@ impl RetainedNode {
         self.component_root.as_ref()
     }
 
+    pub(crate) fn presented_components(
+        &self,
+    ) -> impl Iterator<Item = &crate::ComponentInstancePath> {
+        self.component_root.iter().chain(
+            self.forwarded_components
+                .iter()
+                .flat_map(|owners| owners.iter()),
+        )
+    }
+
     #[must_use]
     pub const fn element_ref(&self) -> Option<&crate::ElementRef> {
         self.element_ref.as_ref()
@@ -115,8 +287,22 @@ impl RetainedNode {
         self.handlers.get(event).map_or(&[], Vec::as_slice)
     }
 
+    /// The payload set for `event` on the node, else the value of its last
+    /// handler declared with one.
     #[must_use]
     pub fn handler_payload(&self, event: &str) -> Option<&crate::UiValue> {
+        self.handler_payloads.get(event).or_else(|| {
+            self.event_handlers(event)
+                .iter()
+                .rev()
+                .find_map(crate::UiEventBinding::value)
+        })
+    }
+
+    /// The payload set for `event` on the node itself, which handlers without
+    /// their own value receive.
+    #[must_use]
+    pub(crate) fn node_payload(&self, event: &str) -> Option<&crate::UiValue> {
         self.handler_payloads.get(event)
     }
 
@@ -128,6 +314,16 @@ impl RetainedNode {
     #[must_use]
     pub const fn scrollable(&self) -> bool {
         self.scrollable
+    }
+
+    #[must_use]
+    pub const fn focus_styled(&self) -> bool {
+        self.focus_styled
+    }
+
+    /// Whether the node's base style leaves its height to its content.
+    pub(crate) const fn sized_by_content(&self) -> bool {
+        self.sized_by_content
     }
 
     #[must_use]
@@ -210,6 +406,9 @@ pub enum ReconcileError {
     FragmentDecoration,
 }
 
+/// A committed tree's nodes by id.
+pub(crate) type NodeTable = BTreeMap<NodeId, Rc<RetainedNode>>;
+
 /// One accepted declarative snapshot plus its stable runtime identity graph.
 ///
 /// Reconciliation builds a complete candidate map and only replaces live state
@@ -219,7 +418,9 @@ pub enum ReconcileError {
 pub struct RetainedUiTree {
     root: Option<UiNode>,
     root_id: Option<NodeId>,
-    nodes: BTreeMap<NodeId, RetainedNode>,
+    /// Shared with the tree's clones, and node by node with the trees an
+    /// unchanged subtree was kept from.
+    nodes: Rc<NodeTable>,
     next_id: u64,
     last_report: ReconcileReport,
 }
@@ -229,7 +430,7 @@ impl Default for RetainedUiTree {
         Self {
             root: None,
             root_id: None,
-            nodes: BTreeMap::new(),
+            nodes: Rc::default(),
             next_id: 1,
             last_report: ReconcileReport::default(),
         }
@@ -254,7 +455,34 @@ impl RetainedUiTree {
 
     #[must_use]
     pub fn node(&self, id: NodeId) -> Option<&RetainedNode> {
-        self.nodes.get(&id)
+        self.nodes.get(&id).map(|node| &**node)
+    }
+
+    /// Read one accepted declarative snapshot by retained identity. Walking
+    /// just its ancestor path avoids scanning unrelated subtrees when an
+    /// active native gesture validates its contract after a script commit.
+    pub(crate) fn snapshot_node(&self, id: NodeId) -> Option<&UiNode> {
+        let mut path = Vec::new();
+        let mut current = id;
+        while let Some(parent) = self.node(current)?.parent() {
+            path.push(current);
+            current = parent;
+        }
+        if Some(current) != self.root_id {
+            return None;
+        }
+        let mut snapshot = self.root.as_ref()?;
+        for child in path.into_iter().rev() {
+            let retained = self.node(current)?;
+            snapshot = snapshot
+                .retained_child_groups()
+                .into_iter()
+                .flat_map(|(_, children)| children)
+                .zip(retained.children())
+                .find_map(|(snapshot, link)| (link.node() == child).then_some(snapshot))?;
+            current = child;
+        }
+        Some(snapshot)
     }
 
     #[must_use]
@@ -265,12 +493,59 @@ impl RetainedUiTree {
     }
 
     pub fn nodes(&self) -> impl ExactSizeIterator<Item = &RetainedNode> {
-        self.nodes.values()
+        self.nodes.values().map(|node| &**node)
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// The resource totals summed over every node, as the summaries keep
+    /// them.
+    pub(crate) fn recounted_resources(&self) -> ResourceTotals {
+        self.nodes()
+            .fold(ResourceTotals::default(), |totals, node| {
+                totals.add(ResourceTotals::of(node))
+            })
+    }
+
+    /// The nodes for which [`RetainedNode::host_reads`] holds, found through
+    /// the subtrees that hold one.
+    pub(crate) fn host_nodes(&self) -> Vec<&RetainedNode> {
+        let mut found = Vec::new();
+        let mut stack = self.root_id.into_iter().collect::<Vec<_>>();
+        while let Some(id) = stack.pop() {
+            let Some(node) = self.node(id) else {
+                continue;
+            };
+            if node.summary.host == 0 {
+                continue;
+            }
+            if node.host_reads() {
+                found.push(node);
+            }
+            stack.extend(node.children.iter().map(|child| child.node));
+        }
+        debug_assert_eq!(
+            found.len(),
+            self.nodes().filter(|node| node.host_reads()).count(),
+            "the host summaries lost a node"
+        );
+        found
+    }
+
+    /// The tree's nodes, for a reader that outlives this borrow.
+    pub(crate) fn node_table(&self) -> Rc<NodeTable> {
+        Rc::clone(&self.nodes)
+    }
+
+    /// The summary of the whole tree, empty without a root.
+    pub(crate) fn summary(&self) -> SubtreeSummary {
+        self.root_id
+            .and_then(|id| self.node(id))
+            .map(RetainedNode::summary)
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -290,12 +565,14 @@ impl RetainedUiTree {
     /// Returns a structural error without changing the current snapshot, IDs,
     /// or allocation cursor.
     pub fn reconcile(&mut self, candidate: UiNode) -> Result<ReconcileReport, ReconcileError> {
+        // The new table starts as the old one: a subtree kept as it is costs
+        // nothing, and reconciled, mounted and unmounted nodes change it.
         let mut transaction = ReconcileTransaction {
             old_nodes: &self.nodes,
-            new_nodes: BTreeMap::new(),
+            new_nodes: (*self.nodes).clone(),
             next_id: self.next_id,
             report: ReconcileReport::default(),
-            reused: BTreeSet::new(),
+            unmounted: BTreeSet::new(),
         };
         let root_id = match (self.root.as_ref(), self.root_id) {
             (Some(old), Some(old_id)) if reusable(old, &candidate) => {
@@ -308,13 +585,35 @@ impl RetainedUiTree {
             (None, None) => transaction.reconcile_node(None, None, &candidate, None, false)?,
             _ => return Err(ReconcileError::RootStateMismatch),
         };
-        for old_id in self.nodes.keys().copied() {
-            if !transaction.reused.contains(&old_id)
-                && !transaction.report.unmounted.contains(&old_id)
-            {
-                transaction.report.unmounted.push(old_id);
+        // Every old node is reused or unmounted, so the table holds the new
+        // tree, which its root's summary counts; any other node is unmounted.
+        let live = transaction
+            .new_nodes
+            .get(&root_id)
+            .map_or(0, |root| root.summary.nodes as usize);
+        if transaction.new_nodes.len() != live {
+            let mut reachable = BTreeSet::new();
+            let mut stack = vec![root_id];
+            while let Some(id) = stack.pop() {
+                if reachable.insert(id)
+                    && let Some(node) = transaction.new_nodes.get(&id)
+                {
+                    stack.extend(node.children.iter().map(|child| child.node));
+                }
+            }
+            for old_id in self.nodes.keys().copied() {
+                if !reachable.contains(&old_id) && transaction.unmounted.insert(old_id) {
+                    transaction.report.unmounted.push(old_id);
+                    transaction.new_nodes.remove(&old_id);
+                }
             }
         }
+        transaction.report.preserved = self
+            .nodes
+            .keys()
+            .copied()
+            .filter(|id| !transaction.unmounted.contains(id))
+            .collect();
         transaction.report.sort();
 
         let ReconcileTransaction {
@@ -326,7 +625,7 @@ impl RetainedUiTree {
 
         self.root = Some(candidate);
         self.root_id = Some(root_id);
-        self.nodes = new_nodes;
+        self.nodes = Rc::new(new_nodes);
         self.next_id = next_id;
         self.last_report = report.clone();
         Ok(report)
@@ -334,11 +633,12 @@ impl RetainedUiTree {
 }
 
 struct ReconcileTransaction<'a> {
-    old_nodes: &'a BTreeMap<NodeId, RetainedNode>,
-    new_nodes: BTreeMap<NodeId, RetainedNode>,
+    old_nodes: &'a NodeTable,
+    new_nodes: NodeTable,
     next_id: u64,
     report: ReconcileReport,
-    reused: BTreeSet<NodeId>,
+    /// The ids in `report.unmounted`.
+    unmounted: BTreeSet<NodeId>,
 }
 
 impl ReconcileTransaction<'_> {
@@ -350,10 +650,16 @@ impl ReconcileTransaction<'_> {
         parent: Option<NodeId>,
         moved: bool,
     ) -> Result<NodeId, ReconcileError> {
+        // The same snapshot accepted again keeps its subtree: reconciling it
+        // would match every node to its old id and rebuild what it holds.
+        if let (Some(old_snapshot), Some(old_id)) = (old_snapshot, old_id)
+            && old_snapshot.ptr_eq(candidate)
+        {
+            self.keep_subtree(old_id, moved)?;
+            return Ok(old_id);
+        }
         validate_fragment(candidate)?;
         let id = if let Some(id) = old_id {
-            self.reused.insert(id);
-            self.report.preserved.push(id);
             if moved {
                 self.report.moved.push(id);
             }
@@ -446,48 +752,82 @@ impl ReconcileTransaction<'_> {
         candidate: &UiNode,
         children: Vec<RetainedChildLink>,
     ) {
-        self.new_nodes.insert(
+        let mut node = RetainedNode {
             id,
-            RetainedNode {
-                id,
-                parent,
-                key: candidate.key().map(|key| key.as_str().to_owned()),
-                kind: candidate.kind_tag(),
-                primitive: match candidate.kind() {
-                    crate::UiNodeKind::Custom { primitive } => Some(primitive.primitive.clone()),
-                    _ => None,
-                },
-                component_root: candidate.component_root().cloned(),
-                element_ref: candidate.element_ref().cloned(),
-                attributes: candidate.attributes().clone(),
-                text: match candidate.kind() {
-                    crate::UiNodeKind::Text { text } | crate::UiNodeKind::RichText { text, .. } => {
-                        Some(text.to_string())
-                    }
-                    _ => None,
-                },
-                handlers: candidate.handlers().clone(),
-                handler_payloads: candidate.handler_payloads().clone(),
-                scrollable: snapshot_scrollable(candidate),
-                canvas_commands: match candidate.kind() {
-                    crate::UiNodeKind::Canvas { scene } => scene.complexity(),
-                    _ => 0,
-                },
-                canvas_scene: match candidate.kind() {
-                    crate::UiNodeKind::Canvas { scene } => Some(scene.clone()),
-                    _ => None,
-                },
-                virtual_data_items: match candidate.kind() {
-                    crate::UiNodeKind::VirtualCollection { spec } => spec.data.len(),
-                    _ => 0,
-                },
-                virtual_realized_items: match candidate.kind() {
-                    crate::UiNodeKind::VirtualCollection { spec } => spec.realized.len(),
-                    _ => 0,
-                },
-                children,
+            parent,
+            key: candidate.key().map(|key| key.as_str().to_owned()),
+            kind: candidate.kind_tag(),
+            primitive: match candidate.kind() {
+                crate::UiNodeKind::Custom { primitive } => Some(primitive.primitive.clone()),
+                _ => None,
             },
-        );
+            component_root: candidate.component_root().cloned(),
+            forwarded_components: candidate.forwarded_components().cloned(),
+            element_ref: candidate.element_ref().cloned(),
+            attributes: candidate.attributes().clone(),
+            text: match candidate.kind() {
+                crate::UiNodeKind::Text { text } | crate::UiNodeKind::RichText { text, .. } => {
+                    Some(text.to_string())
+                }
+                _ => None,
+            },
+            handlers: candidate.handlers().clone(),
+            handler_payloads: candidate.handler_payloads().clone(),
+            scrollable: snapshot_scrollable(candidate),
+            focus_styled: candidate.style().focus.is_some(),
+            sized_by_content: crate::renderer::island_root_sized_by_content(
+                &candidate.style().base,
+            ),
+            canvas_commands: match candidate.kind() {
+                crate::UiNodeKind::Canvas { scene } => scene.complexity(),
+                _ => 0,
+            },
+            canvas_scene: match candidate.kind() {
+                crate::UiNodeKind::Canvas { scene } => Some(scene.clone()),
+                _ => None,
+            },
+            virtual_data_items: match candidate.kind() {
+                crate::UiNodeKind::VirtualCollection { spec } => spec.data.len(),
+                _ => 0,
+            },
+            virtual_realized_items: match candidate.kind() {
+                crate::UiNodeKind::VirtualCollection { spec } => spec.realized.len(),
+                _ => 0,
+            },
+            children,
+            summary: SubtreeSummary::default(),
+        };
+        // Children are inserted before their parent.
+        node.summary = node
+            .children
+            .iter()
+            .filter_map(|link| self.new_nodes.get(&link.node))
+            .fold(
+                SubtreeSummary {
+                    resources: ResourceTotals::of(&node),
+                    host: u32::from(node.host_reads()),
+                    pages: u32::from(
+                        node.attributes
+                            .contains_key(crate::retained_page::PAGE_VISIBLE)
+                            || node.presented_components().next().is_some(),
+                    ),
+                    ..SubtreeSummary::of(candidate)
+                },
+                |summary, child| summary.add(child.summary),
+            );
+        self.new_nodes.insert(id, Rc::new(node));
+    }
+
+    /// Keeps the old subtree at `root` as it is, as a reconcile of the same
+    /// snapshot would: the new table already holds it.
+    fn keep_subtree(&mut self, root: NodeId, moved: bool) -> Result<(), ReconcileError> {
+        if !self.old_nodes.contains_key(&root) {
+            return Err(ReconcileError::MissingNode(root));
+        }
+        if moved {
+            self.report.moved.push(root);
+        }
+        Ok(())
     }
 
     fn allocate(&mut self) -> Result<NodeId, ReconcileError> {
@@ -501,7 +841,7 @@ impl ReconcileTransaction<'_> {
     }
 
     fn collect_unmounted(&mut self, id: NodeId) -> Result<(), ReconcileError> {
-        if self.report.unmounted.contains(&id) {
+        if self.unmounted.contains(&id) {
             return Ok(());
         }
         let node = self
@@ -511,7 +851,9 @@ impl ReconcileTransaction<'_> {
         for child in &node.children {
             self.collect_unmounted(child.node)?;
         }
+        self.unmounted.insert(id);
         self.report.unmounted.push(id);
+        self.new_nodes.remove(&id);
         Ok(())
     }
 }
@@ -644,9 +986,188 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(after, vec![before[1], before[0]]);
-        assert!(report.mounted.is_empty());
-        assert!(report.unmounted.is_empty());
+        assert_eq!(report.mounted, [] as [crate::retained::NodeId; 0]);
+        assert_eq!(report.unmounted, [] as [crate::retained::NodeId; 0]);
         assert_eq!(report.moved, before);
+    }
+
+    #[test]
+    fn a_shared_subtree_is_kept_as_a_rebuilt_one_would_be() {
+        let block = |label: &str| {
+            UiNode::column(
+                (0..4)
+                    .map(|index| {
+                        UiNode::row(vec![
+                            UiNode::text(format!("{label} {index}")),
+                            keyed_text("detail", "detail"),
+                        ])
+                        .with_key(format!("r{index}"))
+                    })
+                    .collect(),
+            )
+        };
+        let page = |shared: &UiNode, moved: bool, extra: &str| {
+            let mut children = vec![shared.clone(), keyed_text("extra", extra)];
+            if moved {
+                children.reverse();
+            }
+            UiNode::column(children)
+        };
+        let shared = block("Row").with_key("shared");
+        let mut kept = RetainedUiTree::new();
+        let mut rebuilt = RetainedUiTree::new();
+        kept.reconcile(page(&shared, false, "one")).unwrap();
+        rebuilt
+            .reconcile(page(&block("Row").with_key("shared"), false, "one"))
+            .unwrap();
+        for (moved, extra) in [(false, "two"), (true, "three"), (true, "three")] {
+            let kept_report = kept.reconcile(page(&shared, moved, extra)).unwrap();
+            let rebuilt_report = rebuilt
+                .reconcile(page(&block("Row").with_key("shared"), moved, extra))
+                .unwrap();
+            assert_eq!(kept_report, rebuilt_report);
+            assert!(kept.nodes().eq(rebuilt.nodes()));
+        }
+    }
+
+    /// Random trees of keyed and unkeyed rows, columns and texts, edited
+    /// from one commit to the next by replacing, removing, inserting and
+    /// reordering children while sharing the subtrees an edit leaves: each
+    /// commit equals the commit of the same tree rebuilt without sharing, and
+    /// its report accounts for every old and new node.
+    #[test]
+    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
+    fn random_edits_reconcile_as_rebuilt_trees_do() {
+        struct Random(u64);
+        impl Random {
+            fn next(&mut self, below: u64) -> u64 {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                self.0 % below
+            }
+        }
+        fn leaf(random: &mut Random, label: u64) -> UiNode {
+            let node = UiNode::text(format!("t{label}"));
+            if random.next(2) == 0 {
+                node.with_key(format!("k{label}"))
+            } else {
+                node
+            }
+        }
+        fn tree(random: &mut Random, depth: u32, label: &mut u64) -> UiNode {
+            *label += 1;
+            if depth == 0 || random.next(4) == 0 {
+                return leaf(random, *label);
+            }
+            let children = (0..random.next(4))
+                .map(|_| tree(random, depth - 1, label))
+                .collect();
+            let node = if random.next(2) == 0 {
+                UiNode::column(children)
+            } else {
+                UiNode::row(children)
+            };
+            if random.next(3) == 0 {
+                node.with_key(format!("b{label}"))
+            } else {
+                node
+            }
+        }
+        fn edit(random: &mut Random, node: &UiNode, label: &mut u64) -> UiNode {
+            let crate::UiNodeKind::Box { children } = node.kind() else {
+                return if random.next(4) == 0 {
+                    tree(random, 2, label)
+                } else {
+                    node.clone()
+                };
+            };
+            if random.next(5) == 0 {
+                return node.clone();
+            }
+            let mut children = children.clone();
+            match random.next(5) {
+                0 if !children.is_empty() => {
+                    let index = random.next(children.len() as u64) as usize;
+                    children.remove(index);
+                }
+                1 => {
+                    let index = random.next(children.len() as u64 + 1) as usize;
+                    children.insert(index, tree(random, 2, label));
+                }
+                2 if children.len() > 1 => children.reverse(),
+                _ => {
+                    for child in &mut children {
+                        *child = edit(random, child, label);
+                    }
+                }
+            }
+            like(node, children)
+        }
+        // A box like `node` holding `children`.
+        fn like(node: &UiNode, children: Vec<UiNode>) -> UiNode {
+            let edited = if node.style().base.direction == Some(crate::FlexDirection::Row) {
+                UiNode::row(children)
+            } else {
+                UiNode::column(children)
+            };
+            match node.key() {
+                Some(key) => edited.with_key(key.as_str()),
+                None => edited,
+            }
+        }
+        // A copy that shares no node with the original.
+        fn rebuilt(node: &UiNode) -> UiNode {
+            match node.kind() {
+                crate::UiNodeKind::Box { children } => {
+                    like(node, children.iter().map(rebuilt).collect())
+                }
+                crate::UiNodeKind::Text { text } => {
+                    let copy = UiNode::text(text.to_string());
+                    match node.key() {
+                        Some(key) => copy.with_key(key.as_str()),
+                        None => copy,
+                    }
+                }
+                _ => unreachable!("the trees hold boxes and texts"),
+            }
+        }
+        for seed in 1..=300_u64 {
+            let mut random = Random(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+            let mut label = 0;
+            let mut current = UiNode::column(vec![tree(&mut random, 4, &mut label)]);
+            let mut shared = RetainedUiTree::new();
+            let mut fresh = RetainedUiTree::new();
+            for step in 0..6 {
+                let old_ids = shared
+                    .nodes()
+                    .map(RetainedNode::id)
+                    .collect::<BTreeSet<_>>();
+                let shared_report = shared.reconcile(current.clone()).unwrap();
+                let fresh_report = fresh.reconcile(rebuilt(&current)).unwrap();
+                assert_eq!(shared_report, fresh_report, "seed {seed} step {step}");
+                assert!(shared.nodes().eq(fresh.nodes()), "seed {seed} step {step}");
+                let accounted = shared_report
+                    .preserved
+                    .iter()
+                    .chain(&shared_report.unmounted)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(accounted, old_ids, "seed {seed} step {step}");
+                let live = shared
+                    .nodes()
+                    .map(RetainedNode::id)
+                    .collect::<BTreeSet<_>>();
+                let expected = shared_report
+                    .preserved
+                    .iter()
+                    .chain(&shared_report.mounted)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(live, expected, "seed {seed} step {step}");
+                current = edit(&mut random, &current, &mut label);
+            }
+        }
     }
 
     #[test]
@@ -709,10 +1230,12 @@ mod tests {
             keyed_text("shared", "content"),
             crate::OverlayNodeSpec {
                 id: crate::OverlayId::new("overlay"),
+                owner: None,
                 parent: None,
                 kind: crate::OverlayKind::Popover,
                 initial_focus: crate::OverlayInitialFocus::Panel,
                 placement: crate::OverlayPlacement::Bottom,
+                align: crate::OverlayAlign::Center,
                 anchor: None,
                 open: true,
                 gap: 0.0,

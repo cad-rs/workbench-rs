@@ -18,7 +18,7 @@ crates/
                         commands, tasks, documents, workspace/Ribbon model
   workbench-core        Platform runtime: assembly, command dispatch, tasks/async executor,
                         autosave, layout persistence, selfcheck
-  workbench-ui          gpui frontend (gpui-ce + gpui-component + gpui-rhai script views)
+  workbench-ui          gpui frontend (gpui-fast + gpui-component + gpui-rhai script views)
   workbench-rhai        Rhai script plugin host (Host API v1: commands, toolbar,
                         script UI panels)
 workbenches/
@@ -42,10 +42,14 @@ only in `workbench-ui`; plugin scripts live in `plugins/`.
 > `workbench-ui` and the gpui products were renamed accordingly
 > (`product-demo`, `product-web`). See docs/plan.md §15.
 
-> **gpui base is temporarily a git fork** ([patch.crates-io] →
-> https://github.com/javagg/gpui-ce): it carries wgpu rendering fixes
-> pending upstream merge. Remove the patch section in the root Cargo.toml to
-> switch back to the crates.io release once merged.
+> **gpui base is gpui-fast from git** (https://github.com/longbridge/gpui-fast,
+> main): the web GPU viewport needs `WebPlatform::wgpu_context` and
+> `WgpuDynamicTexture`, which no crates.io release carries yet. gpui-component
+> and gpui-rhai come from crates.io; `[patch.crates-io]` points the `gpui-pre`
+> snapshots they build on at the same gpui-fast commit (see the root
+> Cargo.toml and `.vendor/gpui-pre-compat`). GPU viewports present through
+> a DirectComposition surface on Windows and a GPUI dynamic texture on the
+> web (`crates/workbench-ui/src/gpu_view/present.rs`).
 
 ## Quick start
 
@@ -244,10 +248,10 @@ Plugin directories are scanned from `./plugins` and the user config directory
 
 ## Publishing (crates.io)
 
-**Publishing is on hold.** The gpui base currently resolves to the
-javagg/gpui-ce git fork through `[patch.crates-io]`, so a crates.io release
-of the `workbench-*` crates would not build from the registry alone. Once the
-wgpu fixes are merged upstream and the patch is removed, publishing resumes
+**Publishing is on hold.** The gpui base currently resolves to gpui-fast
+from git (and wgpu to the git revision gpui-fast pins), so a crates.io release
+of the `workbench-*` crates would not build from the registry alone. Once a
+gpui-fast release carries what the viewports need, publishing resumes
 in dependency order (`workbench-api` → `workbench-core` → the rest);
 `workbench-rhai` and `workbench-ui` are the current publishable set,
 `product-demo` / `product-web` stay `publish = false`.

@@ -1,98 +1,157 @@
-//! Platform-shared wgpu device context.
+//! The wgpu device every GPU view in the process renders on.
 //!
-//! Every GPU view in the process renders on this one device. On Windows / Web
-//! the gpui renderer already owns a wgpu device (DX12 / WebGPU) and a texture
-//! created on any other device cannot be composited into its surface, so the
-//! handle is taken from the window and kept alive here. On other desktops gpui
-//! uses its own renderer, so an independent device is created and frames are
-//! rendered offscreen and read back for compositing.
-//!
-//! Ported from the gpui-wgpu reference implementation (javagg/gpui-demo).
+//! On the web, GPUI's renderer is wgpu itself, and a viewport can only reach
+//! the screen as a texture GPUI samples (`WgpuDynamicTexture`), which has to
+//! live on GPUI's own device: so the device is the one the web platform
+//! hands out. On the desktop GPUI renders with Direct3D 11 (Windows) or Metal
+//! (macOS) — there is no wgpu device to share — so the viewports get a device
+//! of their own: DX12 on Windows, where frames go to a swap chain on a
+//! DirectComposition visual inside GPUI's window, and the platform's primary
+//! backend elsewhere, where frames are read back.
 
-#[cfg(not(any(target_family = "wasm", target_os = "windows")))]
+#[cfg(not(target_family = "wasm"))]
 use anyhow::{Context as _, Result};
+
+/// Extra device features and limits a product's own renderer needs, beyond
+/// the viewport baseline.
+///
+/// Hand it to `WorkbenchAppBuilder::with_gpu_requirements` (boxed); the
+/// frontend applies it before the first GPU view creates the device. On the
+/// web the device is GPUI's and already exists, so requirements are checked
+/// against it instead and a shortfall is logged.
+#[derive(Clone, Debug, Default)]
+pub struct GpuRequirements {
+    /// Features OR-ed onto the baseline (none).
+    pub features: wgpu::Features,
+    /// Limits merged with the baseline: upper bounds take the larger value,
+    /// alignments and other lower bounds the smaller one.
+    pub limits: Option<wgpu::Limits>,
+}
+
+impl GpuRequirements {
+    /// The limits to request: `base` raised (or tightened) to what the
+    /// product asked for.
+    #[cfg(not(target_family = "wasm"))]
+    fn merged_limits(&self, base: wgpu::Limits) -> wgpu::Limits {
+        match &self.limits {
+            Some(extra) => base.or_better_values_from(extra),
+            None => base,
+        }
+    }
+}
+
+thread_local! {
+    static REQUIREMENTS: std::cell::RefCell<GpuRequirements> =
+        std::cell::RefCell::new(GpuRequirements::default());
+}
+
+/// Record what the product needs from the device. Takes effect only before
+/// the device is created (the first GPU view to paint creates it).
+pub(crate) fn set_requirements(requirements: GpuRequirements) {
+    REQUIREMENTS.with(|r| *r.borrow_mut() = requirements);
+}
+
+fn requirements() -> GpuRequirements {
+    REQUIREMENTS.with(|r| r.borrow().clone())
+}
 
 /// The one wgpu device/queue every GPU view in the process renders on.
 ///
-/// Plugin-provided WebGPU views obtain this through
-/// [`super::shared_gpu`](crate::gpu_view::shared_gpu) and build their own
-/// pipelines, textures and render targets on it. Sharing the device is not
-/// optional on Windows / Web: `paint_surface` composites a texture produced by
-/// gpui's own renderer, so the texture must live on that renderer's device.
+/// Plugin-provided views obtain it through
+/// [`shared_gpu`](crate::gpu_view::shared_gpu) and build their own
+/// pipelines on it. Render targets must use [`Gpu::target_format`].
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    /// Surface format every offscreen target uses.
+    /// The color format every viewport frame is rendered in.
     pub target_format: wgpu::TextureFormat,
-    /// Keeps gpui's wgpu context alive (shared-device path).
-    #[cfg(any(target_family = "wasm", target_os = "windows"))]
-    pub handle: gpui_wgpu::WgpuContextHandle,
+    /// Desktop: the instance and adapter the device came from (Windows makes
+    /// composition swap chains with them).
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) instance: wgpu::Instance,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) adapter: wgpu::Adapter,
+    /// Web: GPUI's context, which dynamic textures are allocated from.
+    #[cfg(target_family = "wasm")]
+    pub(crate) context: gpui_wgpu::WgpuContext,
 }
 
 impl Gpu {
-    /// The gpui renderer context handle (needed to build a `WgpuRenderTarget`).
-    #[cfg(any(target_family = "wasm", target_os = "windows"))]
-    pub fn context_handle(&self) -> &gpui_wgpu::WgpuContextHandle {
-        &self.handle
-    }
-
-    /// Windows: take the shared wgpu context from the gpui window. Returns
-    /// `None` before the first frame (renderer not ready yet); callers retry.
-    #[cfg(target_os = "windows")]
-    pub fn from_window(window: &gpui::Window) -> Option<Self> {
-        let handle = gpui_wgpu::WgpuContextHandle::from_window(window)?;
-        // DX12 device errors are dispatched asynchronously; without a callback
-        // they are silently dropped.
-        handle
-            .device()
-            .on_uncaptured_error(std::sync::Arc::new(|error| {
-                eprintln!("wgpu uncaptured error: {error}");
-            }));
-        Some(Self {
-            device: handle.device().clone(),
-            queue: handle.queue().clone(),
-            target_format: handle.texture_format(),
-            handle,
-        })
-    }
-
-    /// Web: same shared-device path as Windows (gpui's web renderer is WebGPU).
+    /// Web: GPUI's own device, from the platform's wgpu context.
     #[cfg(target_family = "wasm")]
-    pub fn from_window(window: &gpui::Window) -> Option<Self> {
-        let handle = gpui_wgpu::WgpuContextHandle::from_window(window)?;
-        Some(Self {
-            device: handle.device().clone(),
-            queue: handle.queue().clone(),
-            target_format: handle.texture_format(),
-            handle,
-        })
+    pub(crate) fn from_web_context(context: gpui_wgpu::WgpuContext) -> Self {
+        let wanted = requirements();
+        let missing = wanted.features - context.device.features();
+        if !missing.is_empty() {
+            eprintln!(
+                "gpu viewport: GPUI's web device lacks features the product asked for: {missing:?}"
+            );
+        }
+        Self {
+            device: (*context.device).clone(),
+            queue: (*context.queue).clone(),
+            target_format: context.color_texture_format(),
+            context,
+        }
     }
 
-    /// Other desktops: create a standalone device.
-    #[cfg(not(any(target_family = "wasm", target_os = "windows")))]
-    pub fn new() -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    /// Desktop: a device of the viewports' own.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn new() -> Result<Self> {
+        // Windows: frames go to a DirectComposition visual, which only the
+        // DX12 backend can present to.
+        #[cfg(target_os = "windows")]
+        let backends = wgpu::Backends::DX12;
+        #[cfg(not(target_os = "windows"))]
+        let backends = wgpu::Backends::PRIMARY;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends,
+            flags: wgpu::InstanceFlags::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            display: None,
+        });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))
         .context("no suitable GPU adapter found")?;
 
+        let wanted = requirements();
+        let limits = wanted.merged_limits(wgpu::Limits::default().using_resolution(adapter.limits()));
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("workbench-gpu-viewport-device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: Default::default(),
-            trace: wgpu::Trace::Off,
+            required_features: wanted.features,
+            required_limits: limits,
+            ..Default::default()
         }))
         .context("failed to open wgpu device")?;
+        // Device errors are dispatched asynchronously; wgpu's default
+        // handler panics, which would take the UI thread down with it.
+        device.on_uncaptured_error(std::sync::Arc::new(|error: wgpu::Error| {
+            eprintln!("gpu viewport: wgpu error: {error}");
+        }));
 
         Ok(Self {
             device,
             queue,
+            // Matches GPUI's own (non-sRGB) BGRA targets, so colors written by
+            // the viewport pipelines come out as GPUI would show them; also
+            // the readback path's byte order.
             target_format: wgpu::TextureFormat::Bgra8Unorm,
+            instance,
+            adapter,
         })
+    }
+
+    /// Adapter summary for diagnostics ("name (backend)").
+    pub fn adapter_summary(&self) -> String {
+        #[cfg(not(target_family = "wasm"))]
+        let info = self.adapter.get_info();
+        #[cfg(target_family = "wasm")]
+        let info = self.context.adapter.get_info();
+        format!("{} ({:?})", info.name, info.backend)
     }
 }

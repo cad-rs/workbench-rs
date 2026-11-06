@@ -9,10 +9,10 @@
 //!
 //! Key design:
 //! - **Two presentation paths**: [`Renderer::render`] draws straight into
-//!   the host's color view (Windows/Web shells composite that texture via
-//!   gpui `paint_surface` — the frame never leaves the GPU);
+//!   the host's color view (a swap-chain image on Windows, a texture GPUI
+//!   samples on the web — the frame never leaves the GPU);
 //!   [`Renderer::render_readback`] maps back a tightly-packed BGRA bitmap
-//!   (headless pixel tests / non-Windows shells falling back to
+//!   (headless pixel tests / other desktop shells falling back to
 //!   `paint_image`).
 //! - **Screen-space line width**: line segments are not 1px `LineList` —
 //!   the vertex shader expands each segment (one instance = both ends)
@@ -55,7 +55,7 @@ pub struct LineVertexGpu {
 }
 
 /// 相机：正交投影（yaw/pitch 度 + 场域包围盒）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct OrthoCamera {
     pub yaw_deg: f32,
     pub pitch_deg: f32,
@@ -77,6 +77,8 @@ struct FrameUniform {
 }
 
 /// 渲染场景（纯数据；产品侧几何构建产出后转入 GPU 顶点）。
+/// `Default` 是空场景（宿主元素把产品的场景移走后留下的占位）。
+#[derive(Default)]
 pub struct RenderScene {
     /// 不透明桶（depth write on；alpha 语义恒 1）。
     pub tris: Vec<RenderVertex>,
@@ -744,7 +746,7 @@ impl Renderer {
                     module,
                     entry_point: Some("vs_main"),
                     compilation_options: Default::default(),
-                    buffers: &vb_layout,
+                    buffers: &vb_layout.map(Some),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module,
@@ -912,7 +914,7 @@ impl Renderer {
                 module: &module,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: size_of::<RenderVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -932,7 +934,7 @@ impl Renderer {
                             shader_location: 2,
                         },
                     ],
-                }],
+                })],
             },
             fragment: None,
             primitive: wgpu::PrimitiveState::default(),
@@ -1244,7 +1246,7 @@ impl Renderer {
     }
 
     /// 渲一帧到宿主颜色目标：mvp/头灯 uniform 更新 + 顶点上传 + 绘制编码
-    /// （纹理全程留 GPU——壳层 `paint_surface` 合成；视口按需渲染，非每帧
+    /// （纹理全程留 GPU——壳层按平台上屏；视口按需渲染，非每帧
     /// 热路径）。
     pub fn render(
         &mut self,
@@ -1388,8 +1390,8 @@ impl Renderer {
                 b: scene.bg[2] as f64,
                 a: scene.bg[3] as f64,
             });
-            // 渲进 MSAA 附件，resolve 落到宿主颜色 view（paint_surface 的
-            // 离屏纹理 / readback 纹理均为 RENDER_ATTACHMENT 用法）。
+            // 渲进 MSAA 附件，resolve 落到宿主颜色 view（交换链图像 / 动态
+            // 纹理 / readback 纹理均为 RENDER_ATTACHMENT 用法）。
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("wb-render-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1483,7 +1485,7 @@ impl Renderer {
             .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
             .ok()?;
         rx.recv().ok()?.ok()?;
-        let data = slice.get_mapped_range().to_vec();
+        let data = slice.get_mapped_range().ok()?.to_vec();
         buf.unmap();
         // 去行 padding。
         let w = t.width as usize;
@@ -1505,6 +1507,7 @@ pub fn adapter_info() -> Option<String> {
         power_preference: wgpu::PowerPreference::LowPower,
         compatible_surface: None,
         force_fallback_adapter: false,
+        apply_limit_buckets: false,
     }))
     .ok()?;
     let info = adapter.get_info();

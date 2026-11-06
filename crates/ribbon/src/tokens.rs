@@ -7,7 +7,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use gpui::{ColorExt as _, Hsla, hsla, rgb, rgb_to_hsla};
+use gpui::{Hsla, hsla, rgb};
 
 // -- Theme selection --------------------------------------------------------
 
@@ -71,22 +71,22 @@ fn pick(dark: Hsla, light: Hsla) -> Hsla {
 
 /// Ribbon body background (`COL_TOOLBAR`).
 pub fn ribbon_bg() -> Hsla {
-    pick(rgb_to_hsla(rgb(0x333640)), rgb_to_hsla(rgb(0xF3F2F1)))
+    pick(Hsla::from(rgb(0x333640)), Hsla::from(rgb(0xF3F2F1)))
 }
 
 /// Tab strip background, one step darker than the panel (`COL_BG`).
 pub fn tab_strip_bg() -> Hsla {
-    pick(rgb_to_hsla(rgb(0x292B33)), rgb_to_hsla(rgb(0xE8E6E3)))
+    pick(Hsla::from(rgb(0x292B33)), Hsla::from(rgb(0xE8E6E3)))
 }
 
 /// Non-active tab text (`LIGHT_GRAY`).
 pub fn tab_text() -> Hsla {
-    pick(rgb_to_hsla(rgb(0xC7C7CC)), rgb_to_hsla(rgb(0x4A4A4A)))
+    pick(Hsla::from(rgb(0xC7C7CC)), Hsla::from(rgb(0x4A4A4A)))
 }
 
 /// Active tab text (white / near-black).
 pub fn tab_active_text() -> Hsla {
-    pick(rgb_to_hsla(rgb(0xFFFFFF)), rgb_to_hsla(rgb(0x1A1A1A)))
+    pick(Hsla::from(rgb(0xFFFFFF)), Hsla::from(rgb(0x1A1A1A)))
 }
 
 /// Active tab 2px indicator bar (accent).
@@ -96,7 +96,7 @@ pub fn tab_active_bar() -> Hsla {
 
 /// Tab hover background.
 pub fn tab_hover_bg() -> Hsla {
-    pick(rgb_to_hsla(rgb(0x3D404D)), rgb_to_hsla(rgb(0xD9D7D4)))
+    pick(Hsla::from(rgb(0x3D404D)), Hsla::from(rgb(0xD9D7D4)))
 }
 
 /// Button resting background (transparent, melts into `ribbon_bg`).
@@ -106,12 +106,12 @@ pub fn btn_rest() -> Hsla {
 
 /// Button hover background.
 pub fn btn_hover() -> Hsla {
-    pick(rgb_to_hsla(rgb(0x4D5261)), rgb_to_hsla(rgb(0xE0DFDC)))
+    pick(Hsla::from(rgb(0x4D5261)), Hsla::from(rgb(0xE0DFDC)))
 }
 
 /// Button pressed background.
 pub fn btn_pressed() -> Hsla {
-    pick(rgb_to_hsla(rgb(0x424754)), rgb_to_hsla(rgb(0xD4D2CF)))
+    pick(Hsla::from(rgb(0x424754)), Hsla::from(rgb(0xD4D2CF)))
 }
 
 /// Checked toggle background (accent at 25% alpha).
@@ -125,13 +125,13 @@ pub fn btn_checked_bg() -> Hsla {
 pub fn accent() -> Hsla {
     match accent_override() {
         Some(packed) => hsla_from_packed(packed),
-        None => rgb_to_hsla(rgb(0x338CF2)),
+        None => Hsla::from(rgb(0x338CF2)),
     }
 }
 
 /// Decode a packed `0xRRGGBBAA` value into an [`Hsla`].
 fn hsla_from_packed(packed: u32) -> Hsla {
-    rgb_to_hsla(gpui::rgba(packed))
+    Hsla::from(gpui::rgba(packed))
 }
 
 // Amber accent for contextual tab indicators is introduced together with
@@ -140,12 +140,12 @@ fn hsla_from_packed(packed: u32) -> Hsla {
 
 /// Usable button label / icon color (white on dark, near-black on light).
 pub fn text() -> Hsla {
-    pick(rgb_to_hsla(rgb(0xFFFFFF)), rgb_to_hsla(rgb(0x242424)))
+    pick(Hsla::from(rgb(0xFFFFFF)), Hsla::from(rgb(0x242424)))
 }
 
 /// Disabled label / icon color.
 pub fn text_disabled() -> Hsla {
-    pick(rgb_to_hsla(rgb(0x80808C)), rgb_to_hsla(rgb(0x9A9A9A)))
+    pick(Hsla::from(rgb(0x80808C)), Hsla::from(rgb(0x9A9A9A)))
 }
 
 /// Secondary text (group captions).
@@ -155,12 +155,12 @@ pub fn text_secondary() -> Hsla {
 
 /// Ribbon bottom 1px border.
 pub fn ribbon_border() -> Hsla {
-    pick(rgb_to_hsla(rgb(0x1A1A1F)), rgb_to_hsla(rgb(0xD0CECD)))
+    pick(Hsla::from(rgb(0x1A1A1F)), Hsla::from(rgb(0xD0CECD)))
 }
 
 /// Group vertical separator line and combo box outline.
 pub fn group_sep() -> Hsla {
-    pick(rgb_to_hsla(rgb(0x4D4F5C)), rgb_to_hsla(rgb(0xC8C6C4)))
+    pick(Hsla::from(rgb(0x4D4F5C)), Hsla::from(rgb(0xC8C6C4)))
 }
 
 /// Fully transparent color.

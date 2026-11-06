@@ -83,9 +83,14 @@ fn live_names(snap: &ShellSnapshot) -> HashSet<&'static str> {
 
 /// The gpui-rhai view domain, shared between the root view (which mounts) and
 /// the script panels (which draw the mounted view).
+///
+/// Desktop only: gpui-rhai does not build for wasm, and the web product loads
+/// no script plugins. On the web a script panel shows a diagnostic instead.
 #[derive(Default)]
 pub(crate) struct ScriptRuntime {
+    #[cfg(not(target_family = "wasm"))]
     host: Option<gpui_rhai::ScriptViewHost>,
+    #[cfg(not(target_family = "wasm"))]
     views: HashMap<String, gpui_rhai::ScriptViewHandle>,
     errors: HashMap<String, String>,
 }
@@ -93,8 +98,17 @@ pub(crate) struct ScriptRuntime {
 pub(crate) type SharedScripts = Rc<RefCell<ScriptRuntime>>;
 
 impl ScriptRuntime {
+    /// Web: script views are unavailable; remember that as the panel's error.
+    #[cfg(target_family = "wasm")]
+    pub(crate) fn mount(&mut self, panel_id: &str, _script: &str, _window: &mut Window, _cx: &mut App) {
+        self.errors
+            .entry(panel_id.to_string())
+            .or_insert_with(|| "Web 端不支持脚本视图（gpui-rhai 仅支持桌面）".to_string());
+    }
+
     /// Mount a script panel's view unless it is mounted already. Failures are
     /// remembered and not retried (the pre-dock front end behaved the same).
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn mount(&mut self, panel_id: &str, script: &str, window: &mut Window, cx: &mut App) {
         if self.views.contains_key(panel_id) || self.errors.contains_key(panel_id) {
             return;
@@ -146,6 +160,17 @@ impl ScriptRuntime {
                 .child(format!("脚本面板加载失败：{err}"))
                 .into_any_element();
         }
+        self.mounted_element(panel_id)
+    }
+
+    /// Web: nothing is ever mounted (`mount` records an error instead).
+    #[cfg(target_family = "wasm")]
+    fn mounted_element(&self, _panel_id: &str) -> AnyElement {
+        div().into_any_element()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn mounted_element(&self, panel_id: &str) -> AnyElement {
         match self.views.get(panel_id) {
             Some(handle) => match handle.flex_item() {
                 Ok(item) => match self.host.as_ref() {

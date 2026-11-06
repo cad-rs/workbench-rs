@@ -30,12 +30,7 @@ const CANVAS_VIEW: &str = "example.canvas";
 
 /// 0xRRGGBB to the Hsla that gpui's text and background styles take.
 fn rgb(v: u32) -> Hsla {
-    gpui::rgb_to_hsla(gpui::Rgba::new(
-        ((v >> 16) & 0xFF) as f32 / 255.0,
-        ((v >> 8) & 0xFF) as f32 / 255.0,
-        (v & 0xFF) as f32 / 255.0,
-        1.0,
-    ))
+    gpui::rgb(v).into()
 }
 
 fn bg_panel() -> Hsla {
@@ -695,13 +690,13 @@ fn kv(key: &str, value: String) -> Div {
 
 /// A barely-visible white, for the canvas grid lines.
 fn grid_line() -> Hsla {
-    gpui::rgb_to_hsla(gpui::Rgba::new(1.0, 1.0, 1.0, 0.045))
+    gpui::Hsla::from(gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.045 })
 }
 
 /// A shape colour from a hue in degrees.
 fn hue_color(hue: f32) -> Hsla {
     let (r, g, b) = hsl_to_rgb(hue, 0.65, 0.55);
-    gpui::rgb_to_hsla(gpui::Rgba::new(r, g, b, 1.0))
+    gpui::Hsla::from(gpui::Rgba { r, g, b, a: 1.0 })
 }
 
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {

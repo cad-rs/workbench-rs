@@ -1,10 +1,10 @@
 //! Example product: workbench-rs compiled to wasm32 and served by trunk
-//! (WebGPU rendering via gpui-ce's `gpui_web` platform backend).
+//! (WebGPU rendering via gpui-fast's `gpui_web` platform backend).
 //!
 //! The web slice mirrors the desktop product but without the script plugin
 //! stage (script loading from plugin directories is a desktop convenience).
-//! `workbench_ui::run` is platform-agnostic: `gpui_platform::application()`
-//! selects the WebPlatform on wasm, initializes WebGPU asynchronously and
+//! `workbench_ui::run` builds the WebPlatform itself on wasm (the GPU
+//! viewports render on its wgpu context), initializes WebGPU asynchronously and
 //! then opens the window.
 //!
 //! Browser requirements: WebGPU (Chrome/Edge 113+; local file:// is not
@@ -12,6 +12,25 @@
 //!
 //! Run: `trunk serve` in this directory (needs `rustup target add
 //! wasm32-unknown-unknown` and `cargo install trunk`).
+
+/// The example module plus the GPU viewport demo views, as product-demo
+/// assembles them (the views are frontend types, so they are registered here
+/// rather than in wb-example). On the web they render on GPUI's own wgpu
+/// device, into a texture GPUI samples.
+#[cfg(target_arch = "wasm32")]
+struct WebWorkbench;
+
+#[cfg(target_arch = "wasm32")]
+impl workbench_api::Workbench for WebWorkbench {
+    fn id(&self) -> workbench_api::WorkbenchId {
+        workbench_api::WorkbenchId::new("product-web")
+    }
+
+    fn init(&self, reg: &mut workbench_api::Registry) {
+        wb_example::ExampleWorkbench.init(reg);
+        workbench_ui::gpu_view::register_views(reg);
+    }
+}
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
@@ -22,11 +41,12 @@ fn main() {
         "Workbench Demo (Web)",
     )
     .with_backend_label("gpui-web")
-    .with_workbench(wb_example::ExampleWorkbench)
+    .with_workbench(WebWorkbench)
     .with_assets(wb_example::example_assets())
     .create_default_document(true)
     .open_on_start("example.welcome", false)
-    .open_on_start("example.canvas", true);
+    .open_on_start("example.canvas", true)
+    .open_on_start("example.gpu3d", false);
 
     if let Err(e) = workbench_ui::run(builder, "Workbench Demo (Web)") {
         web_sys::console::error_1(&format!("run failed: {e}").into());
