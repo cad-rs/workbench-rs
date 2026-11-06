@@ -1,6 +1,6 @@
 target/
 # trunk build artifacts (web demo)
-products/product-*-web/dist/
+products/*/dist/
 # web demos CJK fallback font (copied from the local machine, not distributable)
 products/product-*-web/assets/fonts/
 # ZCode editor workspace state
