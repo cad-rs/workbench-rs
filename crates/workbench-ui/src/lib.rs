@@ -21,6 +21,9 @@ use workbench_core::AppRuntime;
 
 pub mod gpu_view;
 
+/// gpui-component's default icons (embedded on the web too).
+mod component_assets;
+
 /// About dialog overlay (product brand: logo / name / version / links).
 pub(crate) mod about;
 
@@ -47,10 +50,10 @@ type SharedCore = std::rc::Rc<Mutex<AppRuntime>>;
 const LATIN_FONT: &[u8] = include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf");
 
 /// 组合资源源：产品资源优先，gpui-component 内置图标资源兜底。
-/// （桌面为 RustEmbed 静态表；Web 端按需从同源/CDN 拉取 icons/*.svg）
+/// （组件图标在桌面与 Web 都编入二进制，见 component_assets）
 struct WbAssets {
     app: Arc<dyn wb::AssetSource>,
-    component: gpui_component_assets::Assets,
+    component: component_assets::ComponentAssets,
 }
 
 impl gpui::AssetSource for WbAssets {
@@ -956,7 +959,7 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
             gpu_view::set_web_platform(platform.clone());
             let app = gpui::Application::with_platform(platform).with_assets(WbAssets {
                 app: assets,
-                component: gpui_component_assets::Assets::new(""),
+                component: component_assets::ComponentAssets::new(""),
             });
             let handle =
                 app.run_embedded(launch_app(core, title, smoke, fonts, gpu_requirements, dock, theme_name, window_icon));
@@ -972,7 +975,7 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
         // 产品资源源 + gpui-component 内置资源兜底
         let app = gpui_platform::application().with_assets(WbAssets {
             app: assets,
-            component: gpui_component_assets::Assets::new(""),
+            component: component_assets::ComponentAssets::new(""),
         });
         app.run(launch_app(
             core,
@@ -1167,7 +1170,7 @@ mod tests {
         );
         let assets = WbAssets {
             app,
-            component: gpui_component_assets::Assets::new(""),
+            component: component_assets::ComponentAssets::new(""),
         };
         let listed = assets.list("").expect("list root");
         let has = |p: &str| listed.iter().any(|s| s.as_ref() == p);
