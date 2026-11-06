@@ -8,6 +8,7 @@
 //! stage.
 
 use gpui::{div, prelude::*, px, AnyElement, Div, InteractiveElement, IntoElement};
+use gpui_component::scroll::ScrollableElement as _;
 use workbench_api as wb;
 use wb::{Color, PanelDef, Registry};
 
@@ -108,6 +109,7 @@ impl wb::ViewInstance for DiagnosticsPanel {
             .flex_col()
             .p_3()
             .children(rows)
+            .overflow_y_scrollbar()
             .into_any_element();
         Some(Box::new(element))
     }
@@ -207,6 +209,7 @@ impl wb::ViewInstance for PluginsPanel {
             .gap_1()
             .p_3()
             .children(rows)
+            .overflow_y_scrollbar()
             .into_any_element();
         Some(Box::new(element))
     }
@@ -249,6 +252,7 @@ impl wb::ViewInstance for SettingsPanel {
             .p_3()
             .gap_1()
             .children(rows)
+            .overflow_y_scrollbar()
             .into_any_element();
         Some(Box::new(element))
     }
