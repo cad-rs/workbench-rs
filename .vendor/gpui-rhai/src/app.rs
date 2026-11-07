@@ -299,6 +299,8 @@ struct ScriptViewHostState {
     container_bounds: Option<Bounds<Pixels>>,
     #[allow(dead_code)]
     escape_interceptor: Option<Subscription>,
+    #[allow(dead_code)]
+    keystroke_observer: Option<Subscription>,
 }
 
 struct HostInteractionLifecycle {
@@ -388,9 +390,11 @@ impl ScriptViewHost {
             frame_active: false,
             container_bounds: None,
             escape_interceptor: None,
+            keystroke_observer: None,
         }));
         let weak = Rc::downgrade(&inner);
         let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
+            DISPATCHING_KEYSTROKE.with(|current| current.replace(Some(event.keystroke.clone())));
             if event.keystroke.key.as_str() != "escape" {
                 return;
             }
@@ -403,12 +407,21 @@ impl ScriptViewHost {
             }
         });
         inner.borrow_mut().escape_interceptor = Some(interceptor);
+        // Observers run once the keystroke's dispatch has ended.
+        inner.borrow_mut().keystroke_observer = Some(cx.observe_keystrokes(|_, _, _| {
+            DISPATCHING_KEYSTROKE.with(|current| current.replace(None));
+        }));
         Ok(Self { inner })
     }
 
     #[must_use]
     pub fn window_id(&self) -> String {
         self.inner.borrow().window_id.clone()
+    }
+
+    /// The native window this Host's views are mounted in, once one is.
+    pub(crate) fn native_window(&self) -> Option<AnyWindowHandle> {
+        self.inner.borrow().native_window
     }
 
     /// Restrict this Host's overlays to an explicit absolute rectangle.
@@ -760,6 +773,31 @@ struct ScriptViewHostFrame {
     child: Option<AnyElement>,
 }
 
+thread_local! {
+    /// The keystroke GPUI is dispatching, from the Host's interceptor (which
+    /// runs before key bindings) until its keystroke observers run.
+    static DISPATCHING_KEYSTROKE: RefCell<Option<gpui::Keystroke>> = const { RefCell::new(None) };
+}
+
+/// The keystroke being dispatched, if a key dispatch is under way.
+pub(crate) fn dispatching_keystroke() -> Option<gpui::Keystroke> {
+    DISPATCHING_KEYSTROKE.with(|current| current.borrow().clone())
+}
+
+/// Bumped each time a host frame lays out and read by every runtime view's
+/// render. gpui-fast draws a view again from its last frame while nothing it
+/// read changed; a view that reads this is never drawn from a frame older than
+/// the host frame around it, whose layout clears the window registries the
+/// view's prepaint fills. Under gpui-pre it is an unobserved global.
+#[derive(Default)]
+pub(crate) struct HostFrameEpoch(u64);
+
+impl gpui::Global for HostFrameEpoch {}
+
+pub(crate) fn read_host_frame_epoch(cx: &App) {
+    let _ = cx.try_global::<HostFrameEpoch>();
+}
+
 impl Element for ScriptViewHostFrame {
     type RequestLayoutState = AnyElement;
     type PrepaintState = ();
@@ -810,6 +848,8 @@ impl Element for ScriptViewHostFrame {
                 std::mem::take(&mut state.pending_focus_recovery),
             )
         };
+        let epoch = cx.default_global::<HostFrameEpoch>();
+        epoch.0 = epoch.0.wrapping_add(1);
         overlays.begin_host_frame(viewport);
         self.host.interactions().begin_frame();
         if pending
@@ -2253,6 +2293,12 @@ pub trait ScriptViewExtension {
     ) -> Result<(), String> {
         Ok(())
     }
+
+    /// Runs with the application at each delivery poll of a mounted view
+    /// (within a frame while it is active), for platform work a capability
+    /// handler queued: handlers get no `App`. `window` is the view's native
+    /// window. [`crate::system::SystemServices`] posts notifications here.
+    fn poll(&self, _window: Option<AnyWindowHandle>, _cx: &mut App) {}
 }
 
 /// Every extension's [`ScriptViewExtension::configure_engine`], then every
@@ -2315,7 +2361,7 @@ pub struct FileScriptView {
     viewport_breakpoints: ViewportBreakpoints,
     calendar_clock: crate::CalendarClock,
     wall_clock: crate::WallClock,
-    runtime_clock: crate::RuntimeClock,
+    runtime_clock: Option<crate::RuntimeClock>,
     fonts: Vec<crate::FontSource>,
     token_base: Option<String>,
     theme_token_overrides: ThemeTokenOverrides,
@@ -2335,7 +2381,7 @@ impl FileScriptView {
             viewport_breakpoints: ViewportBreakpoints::default(),
             calendar_clock: crate::CalendarClock::default(),
             wall_clock: crate::WallClock::default(),
-            runtime_clock: crate::RuntimeClock::default(),
+            runtime_clock: None,
             fonts: Vec::new(),
             token_base: None,
             theme_token_overrides: ThemeTokenOverrides::default(),
@@ -2401,7 +2447,7 @@ impl FileScriptView {
 
     #[must_use]
     pub fn runtime_clock(mut self, clock: crate::RuntimeClock) -> Self {
-        self.runtime_clock = clock;
+        self.runtime_clock = Some(clock);
         self
     }
 
@@ -2496,7 +2542,7 @@ impl FileScriptView {
         runtime_state.responsive = ResponsiveRuntime::new(self.viewport_breakpoints);
         runtime_state.calendar_clock = self.calendar_clock;
         runtime_state.wall_clock = self.wall_clock;
-        runtime_state.clock = self.runtime_clock;
+        runtime_state.clock = self.runtime_clock.clone().unwrap_or_default();
         runtime_state.key_bindings.clone_from(&self.key_bindings);
         runtime_state.locale = load_locale_directory(engine.engine(), &ui_root.join("locales"))?;
         let themes = load_theme_directory(
@@ -2548,6 +2594,7 @@ impl FileScriptView {
             style_path,
             development: self.development,
             factory,
+            executor_clock: self.runtime_clock.is_none(),
             key_bindings: self.key_bindings,
             fonts,
             #[cfg(feature = "dev-reload")]
@@ -2573,7 +2620,7 @@ pub struct EmbeddedScriptView {
     viewport_breakpoints: ViewportBreakpoints,
     calendar_clock: crate::CalendarClock,
     wall_clock: crate::WallClock,
-    runtime_clock: crate::RuntimeClock,
+    runtime_clock: Option<crate::RuntimeClock>,
     fonts: Vec<crate::FontSource>,
     token_base: Option<String>,
     profile_source: Option<String>,
@@ -2606,7 +2653,7 @@ impl EmbeddedScriptView {
             viewport_breakpoints: ViewportBreakpoints::default(),
             calendar_clock: crate::CalendarClock::default(),
             wall_clock: crate::WallClock::default(),
-            runtime_clock: crate::RuntimeClock::default(),
+            runtime_clock: None,
             fonts: Vec::new(),
             token_base: None,
             profile_source: None,
@@ -2712,7 +2759,7 @@ impl EmbeddedScriptView {
 
     #[must_use]
     pub fn runtime_clock(mut self, clock: crate::RuntimeClock) -> Self {
-        self.runtime_clock = clock;
+        self.runtime_clock = Some(clock);
         self
     }
 
@@ -2809,7 +2856,7 @@ impl EmbeddedScriptView {
         runtime_state.responsive = ResponsiveRuntime::new(self.viewport_breakpoints);
         runtime_state.calendar_clock = self.calendar_clock;
         runtime_state.wall_clock = self.wall_clock;
-        runtime_state.clock = self.runtime_clock;
+        runtime_state.clock = self.runtime_clock.clone().unwrap_or_default();
         runtime_state.key_bindings.clone_from(&self.key_bindings);
         runtime_state.locale = load_embedded_locales(engine.engine(), self.locales)?;
         runtime_state.theme = Some(validated_themes(
@@ -2866,6 +2913,7 @@ impl EmbeddedScriptView {
             style_path: PathBuf::new(),
             development: self.development,
             factory,
+            executor_clock: self.runtime_clock.is_none(),
             key_bindings: self.key_bindings,
             fonts: self.fonts,
             #[cfg(feature = "dev-reload")]
@@ -3618,6 +3666,18 @@ fn window_command_is_current(
             }))
 }
 
+/// The runtime clock a mounted view uses unless its Host sets one: GPUI's
+/// executor clock, which is the system clock in an application and the test
+/// scheduler's in a test, where `advance_clock` moves timers and motion along
+/// with GPUI's own timers instead of waiting on real time.
+struct ExecutorRuntimeClock(gpui::BackgroundExecutor);
+
+impl crate::RuntimeClockSource for ExecutorRuntimeClock {
+    fn now(&self) -> Instant {
+        self.0.now()
+    }
+}
+
 pub struct PreparedScriptView {
     engine: RuntimeEngine,
     theme: ThemeVariant,
@@ -3627,6 +3687,8 @@ pub struct PreparedScriptView {
     style_path: PathBuf,
     development: bool,
     factory: Rc<ScriptWindowFactory>,
+    /// The Host set no runtime clock: mounting installs GPUI's.
+    executor_clock: bool,
     key_bindings: Vec<KeyBindingSpec>,
     fonts: Vec<crate::FontSource>,
     #[cfg(feature = "dev-reload")]
@@ -3718,6 +3780,11 @@ impl PreparedScriptView {
                 host.unregister_view(&config.view_id, &mount_lease);
             })?;
         let window_id = host.window_id();
+        if self.executor_clock {
+            self.factory.runtime.borrow_mut().clock = crate::RuntimeClock::from_source(
+                ExecutorRuntimeClock(cx.background_executor().clone()),
+            );
+        }
         self.factory
             .runtime
             .borrow_mut()
@@ -3815,6 +3882,7 @@ impl PreparedScriptView {
                 scroll_anchors: BTreeMap::new(),
                 text_selection: crate::renderer::TextSelectionRegistry::default(),
                 last_motion_sample: None,
+                motion_waits_for_clock: false,
                 state: entity_view_state,
                 direct_signal_access: Rc::new(Cell::new(false)),
                 pending_interaction_cancels: BTreeSet::new(),
@@ -3888,6 +3956,7 @@ pub struct ScriptApplication {
     show_error_banner: bool,
     mirror_errors_to_stderr: bool,
     window_drag_areas: bool,
+    app_identity: Option<(String, String)>,
 }
 
 impl ScriptApplication {
@@ -3900,6 +3969,7 @@ impl ScriptApplication {
             show_error_banner: true,
             mirror_errors_to_stderr: true,
             window_drag_areas: false,
+            app_identity: None,
         }
     }
 
@@ -3949,6 +4019,15 @@ impl ScriptApplication {
         self
     }
 
+    /// The application's identifier (reverse DNS, `com.example.app`) and
+    /// name, which Linux and Windows show on system notifications. macOS takes
+    /// both from the bundle's `Info.plist` instead (see [`crate::system`]).
+    #[must_use]
+    pub fn app_identity(mut self, identifier: impl Into<String>, name: impl Into<String>) -> Self {
+        self.app_identity = Some((identifier.into(), name.into()));
+        self
+    }
+
     /// Run this prepared view as a standalone GPUI application.
     ///
     /// # Errors
@@ -3964,9 +4043,13 @@ impl ScriptApplication {
         let show_error_banner = self.show_error_banner;
         let mirror_errors_to_stderr = self.mirror_errors_to_stderr;
         let window_drag_areas = self.window_drag_areas;
+        let app_identity = self.app_identity;
         prepared.factory.show_error_banner.set(show_error_banner);
         gpui_platform::application().run(move |cx: &mut App| {
             install(cx);
+            if let Some((identifier, name)) = &app_identity {
+                cx.set_app_identity(identifier, name);
+            }
             let host = match ScriptViewHost::new("main", cx) {
                 Ok(host) => host,
                 Err(error) => {
@@ -4229,6 +4312,7 @@ fn open_secondary_window(
                 scroll_anchors: BTreeMap::new(),
                 text_selection: crate::renderer::TextSelectionRegistry::default(),
                 last_motion_sample: None,
+                motion_waits_for_clock: false,
                 state: entity_view_state,
                 direct_signal_access: Rc::new(Cell::new(false)),
                 pending_interaction_cancels: BTreeSet::new(),
@@ -4561,6 +4645,10 @@ struct ScriptHostView {
     scroll_anchors: BTreeMap<crate::NodeId, ScrollAnchor>,
     text_selection: crate::renderer::TextSelectionRegistry,
     last_motion_sample: Option<Instant>,
+    /// Motion still runs but the last sample saw the runtime clock where the
+    /// one before saw it, so no animation frame was asked for; the next poll
+    /// that finds the clock moved repaints instead.
+    motion_waits_for_clock: bool,
     state: Rc<Cell<ScriptViewState>>,
     direct_signal_access: Rc<Cell<bool>>,
     pending_interaction_cancels: BTreeSet<crate::interaction::InteractionOwner>,
@@ -5181,6 +5269,7 @@ fn resolve_root_theme_from_runtime(
 
 impl Render for ScriptHostView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::app::read_host_frame_epoch(cx);
         if self.state.get() != ScriptViewState::Active {
             return div().into_any_element();
         }
@@ -5548,6 +5637,7 @@ impl HostFrame {
             scroll_handles: &view.scroll_handles,
             scroll_anchors: &view.scroll_anchors,
             wheel_parents: &[],
+            key_captures: &[],
             intrinsic_size: None,
             virtual_requests: &snapshot.virtual_requests,
             text_selection: &view.text_selection,
@@ -5716,6 +5806,7 @@ impl ScriptHostView {
         let clock_advanced = self.last_motion_sample != Some(now);
         self.last_motion_sample = Some(now);
         let (frame, events) = sample_motion_domain(&mut runtime, domain, now);
+        self.motion_waits_for_clock = frame.needs_frame && !clock_advanced;
         (clock_advanced && frame.needs_frame, events)
     }
 
@@ -7764,6 +7855,10 @@ impl ScriptHostView {
         if self.state.get() == ScriptViewState::Disposed {
             return;
         }
+        let window = self.host.native_window();
+        for extension in self.factory.extensions.iter() {
+            extension.poll(window, cx);
+        }
         self.report_presentation_diagnostics(cx);
         self.process_window_commands(cx);
         self.sync_program();
@@ -7794,6 +7889,12 @@ impl ScriptHostView {
         };
         let has_script_work =
             !deliveries.is_empty() || dirty || pending_dispatch || virtual_requests;
+        if self.motion_waits_for_clock
+            && self.last_motion_sample != Some(runtime.borrow().clock.now())
+        {
+            self.motion_waits_for_clock = false;
+            cx.notify();
+        }
         if !has_script_work && !repaint {
             return;
         }
@@ -8796,7 +8897,7 @@ mod tests {
                 crate::Rgba8::from_rgb_hex(0x00aa_55cc),
             )]),
             radii: BTreeMap::from([
-                ("sm".to_owned(), crate::Length::Pixels(4.0)),
+                ("pill".to_owned(), crate::Length::Pixels(4.0)),
                 ("md".to_owned(), crate::Length::Pixels(7.0)),
                 ("lg".to_owned(), crate::Length::Pixels(10.0)),
             ]),

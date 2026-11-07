@@ -80,7 +80,7 @@ fn render_Tag(ctx, props) {
             .with_style(ctx.component_style("close", style()
                 .width(px(14)).height(px(14)).items_center().justify_center()
                 .text_color(if disabled { theme_color("disabled") } else { tag_foreground(variant) })
-                .radius(theme_radius("sm")).hover(style().background(theme_color("surface_hover")))))
+                .radius(theme_radius("pill")).hover(style().background(theme_color("surface_hover")))))
             .accessibility_role("button")
             .accessibility_label(props.text);
         if !disabled && "on_close" in props && props.on_close != () {
@@ -91,7 +91,7 @@ fn render_Tag(ctx, props) {
     row(children)
         .with_style(ctx.component_style("root",
             style().height(px(22)).padding_x(theme_spacing("xs")).gap(theme_spacing("xs")).items_center()
-                .radius(theme_radius("sm"))
+                .radius(theme_radius("pill"))
                 .border(px(1)).border_color(tag_border(variant))
                 .background(tag_color(variant))
                 .typography("body_small").font_weight(700)

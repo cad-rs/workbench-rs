@@ -122,7 +122,7 @@ pub(super) const DOCS: &[ScriptFnDoc] = &[
     ScriptFnDoc {
         signature: "cancel_timeout(_: &mut UiContext, _: string) -> core::result::Result<bool,alloc::boxed::Box<rhai::types::error::EvalAltResult>>",
         params: &["key"],
-        doc: "Cancels this component's declared `timeout` `key` until its declaration changes; returns `false` when no such timer is active.",
+        doc: "Cancels this component's declared `timeout` or `interval` `key` until its declaration changes; returns `false` when no such timer is active.",
     },
     ScriptFnDoc {
         signature: "clear_close_handler(_: &mut UiContext) -> core::result::Result<(),alloc::boxed::Box<rhai::types::error::EvalAltResult>>",
@@ -327,7 +327,7 @@ pub(super) const DOCS: &[ScriptFnDoc] = &[
     ScriptFnDoc {
         signature: "pause_timeout(_: &mut UiContext, _: string) -> core::result::Result<bool,alloc::boxed::Box<rhai::types::error::EvalAltResult>>",
         params: &["key"],
-        doc: "Pauses this component's declared `timeout` `key`; returns `false` when no such timer is active. Not allowed during render.",
+        doc: "Pauses this component's declared `timeout` or `interval` `key`; returns `false` when no such timer is active. Not allowed during render.",
     },
     ScriptFnDoc {
         signature: "play_motion(_: &mut UiContext, _: gpui_rhai::motion::MotionHandle) -> core::result::Result<(),alloc::boxed::Box<rhai::types::error::EvalAltResult>>",
@@ -352,7 +352,7 @@ pub(super) const DOCS: &[ScriptFnDoc] = &[
     ScriptFnDoc {
         signature: "resume_timeout(_: &mut UiContext, _: string) -> core::result::Result<bool,alloc::boxed::Box<rhai::types::error::EvalAltResult>>",
         params: &["key"],
-        doc: "Clears an explicit pause of this component's declared `timeout` `key`; returns `false` when no such timer is active.",
+        doc: "Clears an explicit pause of this component's declared `timeout` or `interval` `key`; returns `false` when no such timer is active.",
     },
     ScriptFnDoc {
         signature: "scroll_into_view(_: &mut UiContext, _: ElementRef) -> core::result::Result<(),alloc::boxed::Box<rhai::types::error::EvalAltResult>>",
@@ -530,6 +530,16 @@ pub(super) const DOCS: &[ScriptFnDoc] = &[
         signature: "theme_variants(_: &mut UiContext) -> array",
         params: &[],
         doc: "Lists every loaded theme variant as `#{ family, name, mode }`, ordered by family and name, for a theme picker.",
+    },
+    ScriptFnDoc {
+        signature: "theme_colors(_: &mut UiContext, _: string, _: string) -> core::result::Result<alloc::collections::btree::map::BTreeMap<smartstring::SmartString<smartstring::config::LazyCompact>,rhai::types::dynamic::Dynamic>,alloc::boxed::Box<rhai::types::error::EvalAltResult>>",
+        params: &["family", "name"],
+        doc: "Returns every color of the theme variant `family`/`name`, as the token base, color expressions and Host overrides resolve them, keyed by token name (`namespace.name` for namespaced colors). Values are literal colors for any color style, so a theme picker draws swatches of variants other than the one shown; throws for an unknown variant.",
+    },
+    ScriptFnDoc {
+        signature: "theme_colors(_: &mut UiContext, _: string, _: string, _: array) -> core::result::Result<alloc::collections::btree::map::BTreeMap<smartstring::SmartString<smartstring::config::LazyCompact>,rhai::types::dynamic::Dynamic>,alloc::boxed::Box<rhai::types::error::EvalAltResult>>",
+        params: &["family", "name", "keys"],
+        doc: "Returns the named colors of the theme variant `family`/`name`, such as `[\"surface\", \"text_primary\", \"accent\"]`; throws for an unknown variant or color.",
     },
     ScriptFnDoc {
         signature: "today(_: &mut UiContext) -> core::result::Result<alloc::string::String,alloc::boxed::Box<rhai::types::error::EvalAltResult>>",

@@ -227,7 +227,7 @@ pub(super) const DOCS: &[ScriptFnDoc] = &[
     ScriptFnDoc {
         signature: "error_boundary(_: UiNode, _: UiNode) -> UiNode",
         params: &["child", "fallback"],
-        doc: "Wraps `child` so that a native rendering failure in its subtree shows `fallback` instead.",
+        doc: "Wraps `child` so that a native rendering failure in its subtree, or a mistake in the tree it declares (two siblings with one key), shows `fallback` instead.",
     },
     ScriptFnDoc {
         signature: "error_boundary_lazy(_: Fn, _: Fn) -> core::result::Result<gpui_rhai::node::UiNode,alloc::boxed::Box<rhai::types::error::EvalAltResult>>",
@@ -268,6 +268,11 @@ pub(super) const DOCS: &[ScriptFnDoc] = &[
         signature: "image_source(_: types::dynamic::Dynamic) -> core::result::Result<gpui_rhai::node::UiNode,alloc::boxed::Box<rhai::types::error::EvalAltResult>>",
         params: &["source"],
         doc: "Creates an image node from `source`, an `AssetId` or an image handle; other values are rejected.",
+    },
+    ScriptFnDoc {
+        signature: "interval(_: string, _: i64, _: bool, _: Fn, _: types::dynamic::Dynamic) -> core::result::Result<(),alloc::boxed::Box<rhai::types::error::EvalAltResult>>",
+        params: &["key", "period_ms", "paused", "callback", "payload"],
+        doc: "Declares repeating timer `key` during formal render that calls `callback(ctx, payload)` every `period_ms` (16 ms to 24 h) while not `paused`; a late tick is one call, not several. Shares keys with `timeout`.",
     },
     ScriptFnDoc {
         signature: "is_native_collection(_: types::dynamic::Dynamic) -> bool",

@@ -1,9 +1,11 @@
-# workbench-rs: gpui-rhai 0.4.1 as published on crates.io, with these local
+# workbench-rs: gpui-rhai 0.4.2 as published on crates.io, with these local
 # changes (search for "workbench-rs:"):
 # - the gpui-pre snapshot pins move from =0.3.9 to =0.3.11 (one gpui core with
-#   gpui-component 0.9; see the root Cargo.toml);
-# - keystrokes parse with `parse_with_os` and `KeyBinding::load` takes the App
-#   (gpui-fast's keystroke API);
+#   gpui-component 0.9; see the root Cargo.toml). The backend stays the
+#   `gpui-pre` feature; upstream's `gpui-fast` feature pins gpui-fast =0.1.9,
+#   whose keystroke API predates the core this workspace builds on;
+# - keystrokes parse with `parse_with_os`, `KeyBindingSpec::to_gpui` and
+#   `KeyBinding::load` take the App (gpui-fast's keystroke API);
 # - wasm32: `web_time::Instant` replaces `std::time::Instant` (similar gets
 #   `wasm32_web_time` to match), jiff gets `js`,
 #   and `PrimitivePlatform` has a `Web` variant.
@@ -21,9 +23,9 @@
 
 [package]
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.99"
 name = "gpui-rhai"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["GPUI Rhai contributors"]
 build = false
 include = [
@@ -54,8 +56,16 @@ resolver = "2"
 
 [features]
 charts = []
-default = []
+default = ["gpui-pre"]
 dev-reload = ["dep:notify"]
+gpui-fast = [
+    "dep:gpui-fast",
+    "dep:gpui-fast-platform",
+]
+gpui-pre = [
+    "dep:gpui",
+    "dep:gpui_platform",
+]
 grain-backend = ["rhai/grain"]
 
 [lib]
@@ -70,8 +80,32 @@ version = "5.4.2"
 # both resolve to the one gpui-fast core (see the root Cargo.toml).
 version = "=0.3.11"
 features = ["font-kit"]
+optional = true
 default-features = false
 package = "gpui-pre"
+
+[dependencies.gpui-fast]
+version = "=0.1.9"
+features = [
+    "font-kit",
+    "wayland",
+    "x11",
+]
+optional = true
+default-features = false
+package = "gpui-fast"
+
+[dependencies.gpui-fast-platform]
+version = "=0.1.9"
+features = [
+    "font-kit",
+    "runtime_shaders",
+    "wayland",
+    "x11",
+]
+optional = true
+default-features = false
+package = "gpui-fast-platform"
 
 [dependencies.gpui_platform]
 # workbench-rs: was =0.3.9 (as above).
@@ -82,6 +116,7 @@ features = [
     "wayland",
     "x11",
 ]
+optional = true
 default-features = false
 package = "gpui-pre-platform"
 
@@ -193,6 +228,28 @@ default-features = false
 
 [dev-dependencies.tempfile]
 version = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2]
+version = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
+version = "0.3"
+features = [
+    "std",
+    "NSApplication",
+    "NSDockTile",
+    "NSResponder",
+]
+default-features = false
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
+version = "0.3"
+features = [
+    "std",
+    "NSBundle",
+    "NSString",
+]
+default-features = false
 
 [lints.clippy]
 module_name_repetitions = "allow"

@@ -1020,7 +1020,8 @@ impl RuntimeEngine {
             started,
             result.is_ok(),
         );
-        let mut ast = result.map_err(|error| RuntimeError::Compile(error.into()))?;
+        let mut ast = result
+            .map_err(|error| RuntimeError::Compile(explain_keyword_name(source, error).into()))?;
         validate_runtime_ast(&ast)?;
         ast.set_source(source_name);
         Ok(CompiledUi { ast, generation })
@@ -1049,7 +1050,12 @@ impl RuntimeEngine {
             started,
             result.is_ok(),
         );
-        let mut ast = result.map_err(RuntimeError::Compile)?;
+        let mut ast = result.map_err(|error| match *error {
+            EvalAltResult::ErrorParsing(kind, position) => RuntimeError::Compile(
+                explain_keyword_name(source, rhai::ParseError(Box::new(kind), position)).into(),
+            ),
+            error => RuntimeError::Compile(Box::new(error)),
+        })?;
         validate_literal_imports(&ast)?;
         validate_runtime_ast(&ast)?;
         ast.set_source(source_name);
@@ -2500,7 +2506,7 @@ impl RuntimeEngine {
     }
 
     /// Configure parser depth independently of execution/recursion/data limits.
-    /// Defaults are global=64/function=32 in both debug and release. Zero
+    /// Defaults are global=64/function=64 in both debug and release. Zero
     /// normalizes to one rather than adopting Rhai's unlimited convention.
     pub fn set_expression_depth_limits(&mut self, global: usize, functions: usize) {
         self.engine
@@ -2751,13 +2757,61 @@ pub(crate) const RHAI_MAX_MAP_SIZE: usize = 100_000;
 pub(crate) const RHAI_MAX_STRING_SIZE: usize = 1_048_576;
 pub(crate) const RHAI_MAX_DATA_DEPTH: usize = 64;
 
+/// The parser's expression depth at the top level and inside a function. A
+/// builder-style style chain in a node in a closure costs a level per call, so
+/// 32 in a function rejected ordinary view code; 64 still stays clear of the
+/// main thread's stack, where scripts compile and run.
+pub(crate) const EXPRESSION_DEPTHS: (usize, usize) = (64, 64);
+
+/// Rhai reports a keyword where a name belongs as a missing name: `import
+/// "components/switch" as switch;` fails with "Expecting name of a variable".
+/// Say which keyword it was instead.
+pub(crate) fn explain_keyword_name(source: &str, error: rhai::ParseError) -> rhai::ParseError {
+    let rhai::ParseError(kind, position) = &error;
+    let (Some(line), Some(column)) = (position.line(), position.position()) else {
+        return error;
+    };
+    let word: String = source
+        .lines()
+        .nth(line - 1)
+        .unwrap_or_default()
+        .chars()
+        .skip(column - 1)
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect();
+    // `word` holds only identifier characters, so any token it spells is a keyword.
+    if rhai::Token::lookup_symbol_from_syntax(&word).is_none() {
+        return error;
+    }
+    let misuse = match &**kind {
+        rhai::ParseErrorType::VariableExpected => "name a variable or an import alias".to_owned(),
+        rhai::ParseErrorType::FnMissingName => "name a function".to_owned(),
+        rhai::ParseErrorType::PropertyExpected => {
+            format!("name a property; index it as `[\"{word}\"]`")
+        }
+        rhai::ParseErrorType::MissingToken(token, description)
+            if token == "}" && description.contains("object map literal") =>
+        {
+            format!("be a bare map key; quote it as `\"{word}\"`")
+        }
+        _ => return error,
+    };
+    let message = format!("`{word}` is a Rhai keyword and cannot {misuse}");
+    rhai::ParseError(
+        Box::new(rhai::ParseErrorType::BadInput(
+            rhai::LexError::ImproperSymbol(word, message),
+        )),
+        *position,
+    )
+}
+
 fn configure_engine_limits(engine: &mut Engine) {
     crate::invocation::register_named_functions(engine);
     engine.set_max_call_levels(64);
     // Explicit defaults avoid Rhai's profile-dependent parser defaults. A
     // trusted Host may configure these separately; ordinary applications do
     // not inherit another application's deeper expression policy.
-    engine.set_max_expr_depths(64, 32);
+    engine.set_max_expr_depths(EXPRESSION_DEPTHS.0, EXPRESSION_DEPTHS.1);
     // Rhai's counter is evaluator-local and cloned into stored callback
     // contexts. The runtime's progress adapter enforces one cumulative budget
     // across nested evaluators and starts delayed callbacks with fresh quota.
@@ -3641,83 +3695,94 @@ fn register_effect_api(engine: &mut Engine, active: &ActiveComponentRenderState)
 }
 
 fn register_timer_api(engine: &mut Engine, active: &ActiveComponentRenderState) {
-    let active = Rc::clone(active);
-    FuncRegistration::new("timeout")
-        .in_global_namespace()
-        .register_into_engine(
-            engine,
-            move |call: rhai::NativeCallContext<'_>,
-                  key: ImmutableString,
-                  delay_ms: rhai::INT,
-                  paused: bool,
-                  callback: FnPtr,
-                  payload: Dynamic|
-                  -> Result<(), Box<EvalAltResult>> {
-                let (component, context, generation) = {
-                    let guard = active.try_borrow().map_err(|_| {
+    // `timeout` fires once; `interval` fires every period until removed,
+    // changed or cancelled. Both share one key space per component.
+    for (name, repeat) in [("timeout", false), ("interval", true)] {
+        let active = Rc::clone(active);
+        FuncRegistration::new(name)
+            .in_global_namespace()
+            .register_into_engine(
+                engine,
+                move |call: rhai::NativeCallContext<'_>,
+                      key: ImmutableString,
+                      delay_ms: rhai::INT,
+                      paused: bool,
+                      callback: FnPtr,
+                      payload: Dynamic|
+                      -> Result<(), Box<EvalAltResult>> {
+                    let (component, context, generation) = {
+                        let guard = active.try_borrow().map_err(|_| {
+                            Box::new(component_render_error(
+                                "component render stack is already borrowed",
+                            ))
+                        })?;
+                        let render = guard.as_ref().ok_or_else(|| {
+                            Box::new(component_render_error(format!(
+                                "{name} may run only during formal component render"
+                            )))
+                        })?;
+                        let context = render.contexts.last().cloned().ok_or_else(|| {
+                            Box::new(component_render_error(
+                                "component render context stack is empty",
+                            ))
+                        })?;
+                        (context.component_path().clone(), context, render.generation)
+                    };
+                    let delay_ms = u64::try_from(delay_ms).map_err(|_| {
+                        Box::new(component_render_error(format!(
+                            "{name} delay must be a positive integer"
+                        )))
+                    })?;
+                    let id = crate::TimerId::new(component.clone(), key.to_string())
+                        .map_err(|error| Box::new(component_render_error(error.to_string())))?;
+                    let payload = UiValue::from_dynamic(payload)
+                        .map_err(|error| Box::new(component_render_error(error.to_string())))?;
+                    let native_context =
+                        crate::invocation::ScriptInvocationContext::capture_retained(&call);
+                    let mut callback = ScriptCallback::try_from_fn_ptr(callback, generation)
+                        .map_err(|error| Box::new(component_render_error(error.to_string())))?;
+                    callback.bind_component_scope_if_unset(
+                        &component,
+                        context.component_incarnation(),
+                        context.event_schemas().clone(),
+                    );
+                    callback.bind_native_context_if_unset(native_context);
+                    let descriptor = crate::TimerDescriptor::new(
+                        id.clone(),
+                        Duration::from_millis(delay_ms),
+                        paused,
+                        callback,
+                        payload,
+                    )
+                    .and_then(|descriptor| {
+                        if repeat {
+                            descriptor.repeating()
+                        } else {
+                            Ok(descriptor)
+                        }
+                    })
+                    .map_err(|error| Box::new(component_render_error(error.to_string())))?;
+                    let mut guard = active.try_borrow_mut().map_err(|_| {
                         Box::new(component_render_error(
                             "component render stack is already borrowed",
                         ))
                     })?;
-                    let render = guard.as_ref().ok_or_else(|| {
-                        Box::new(component_render_error(
-                            "timeout may run only during formal component render",
-                        ))
+                    let render = guard.as_mut().ok_or_else(|| {
+                        Box::new(component_render_error(format!(
+                            "{name} may run only during formal component render"
+                        )))
                     })?;
-                    let context = render.contexts.last().cloned().ok_or_else(|| {
-                        Box::new(component_render_error(
-                            "component render context stack is empty",
-                        ))
-                    })?;
-                    (context.component_path().clone(), context, render.generation)
-                };
-                let delay_ms = u64::try_from(delay_ms).map_err(|_| {
-                    Box::new(component_render_error(
-                        "timeout delay must be a positive integer",
-                    ))
-                })?;
-                let id = crate::TimerId::new(component.clone(), key.to_string())
-                    .map_err(|error| Box::new(component_render_error(error.to_string())))?;
-                let payload = UiValue::from_dynamic(payload)
-                    .map_err(|error| Box::new(component_render_error(error.to_string())))?;
-                let native_context =
-                    crate::invocation::ScriptInvocationContext::capture_retained(&call);
-                let mut callback = ScriptCallback::try_from_fn_ptr(callback, generation)
-                    .map_err(|error| Box::new(component_render_error(error.to_string())))?;
-                callback.bind_component_scope_if_unset(
-                    &component,
-                    context.component_incarnation(),
-                    context.event_schemas().clone(),
-                );
-                callback.bind_native_context_if_unset(native_context);
-                let descriptor = crate::TimerDescriptor::new(
-                    id.clone(),
-                    Duration::from_millis(delay_ms),
-                    paused,
-                    callback,
-                    payload,
-                )
-                .map_err(|error| Box::new(component_render_error(error.to_string())))?;
-                let mut guard = active.try_borrow_mut().map_err(|_| {
-                    Box::new(component_render_error(
-                        "component render stack is already borrowed",
-                    ))
-                })?;
-                let render = guard.as_mut().ok_or_else(|| {
-                    Box::new(component_render_error(
-                        "timeout may run only during formal component render",
-                    ))
-                })?;
-                if render.timers.insert(id.clone(), descriptor).is_some() {
-                    return Err(Box::new(component_render_error(format!(
-                        "timeout `{}` is declared more than once in `{}`",
-                        id.key(),
-                        id.component()
-                    ))));
-                }
-                Ok(())
-            },
-        );
+                    if render.timers.insert(id.clone(), descriptor).is_some() {
+                        return Err(Box::new(component_render_error(format!(
+                            "{name} `{}` is declared more than once in `{}`",
+                            id.key(),
+                            id.component()
+                        ))));
+                    }
+                    Ok(())
+                },
+            );
+    }
 }
 
 fn register_signal_api(engine: &mut Engine, active: &ActiveComponentRenderState) {
@@ -6031,9 +6096,49 @@ mod tests {
     }
 
     #[test]
+    fn a_keyword_used_as_a_name_is_named_in_the_parse_error() {
+        let mut runtime = RuntimeEngine::new();
+        for (source, expected) in [
+            (
+                "import \"components/switch\" as switch;\nfn view(ctx) { text(\"\") }",
+                "`switch` is a Rhai keyword and cannot name a variable or an import alias",
+            ),
+            (
+                "fn view(ctx) { let loop = 1; text(\"\") }",
+                "`loop` is a Rhai keyword and cannot name a variable or an import alias",
+            ),
+            (
+                "fn switch() { 1 }\nfn view(ctx) { text(\"\") }",
+                "`switch` is a Rhai keyword and cannot name a function",
+            ),
+            (
+                "fn view(ctx) { let options = #{ switch: 1 }; text(\"\") }",
+                "`switch` is a Rhai keyword and cannot be a bare map key; quote it as `\"switch\"`",
+            ),
+            (
+                "fn view(ctx) { let options = #{}; text(`${options.switch}`) }",
+                "`switch` is a Rhai keyword and cannot name a property; index it as `[\"switch\"]`",
+            ),
+        ] {
+            let error = runtime
+                .compile_named("ui/main.rhai", source)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains(expected), "{source}: {error}");
+        }
+        let error = runtime
+            .compile_named("ui/main.rhai", "fn view(ctx) { let a = 1 else 2; a }")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(!error.contains("keyword"), "{error}");
+    }
+
+    #[test]
     fn host_policies_are_independent_and_reload_candidates_do_not_share_mutable_quota() {
         let mut engine = RuntimeEngine::new();
-        assert_eq!(engine.expression_depth_limits(), (64, 32));
+        assert_eq!(engine.expression_depth_limits(), (64, 64));
         engine.set_operation_limit(2_000_000);
         engine.set_expression_depth_limits(80, 64);
         assert_eq!(engine.engine().max_call_levels(), 64);

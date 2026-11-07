@@ -2461,13 +2461,16 @@ dependencies = [
 
 [[package]]
 name = "gpui-rhai"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "event-listener",
  "gpui-pre",
  "gpui-pre-platform",
  "image",
  "jiff",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "pulldown-cmark",
  "regex",
  "resvg 0.45.1",

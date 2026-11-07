@@ -88,8 +88,9 @@ gpui-web = { package = "gpui_web", git = "https://github.com/longbridge/gpui-fas
 gpui-component = "0.9.0"
 gpui-component-assets = { package = "gpui-kit-assets", version = "0.9.0" }
 # Rhai script views. Resolves to the vendored copy (see
-# [patch.crates-io]), whose `gpui-pre` pin is moved to =0.3.11.
-gpui-rhai = { version = "=0.4.1", default-features = false }
+# [patch.crates-io]), whose `gpui-pre` pin is moved to =0.3.11. 0.4.2 gates its
+# backends behind features, so `gpui-pre` is named explicitly.
+gpui-rhai = { version = "=0.4.2", default-features = false, features = ["gpui-pre"] }
 
 # GPU viewport (workbench-ui's native view extension). The version must match the wgpu
 # gpui-fast pins: the web viewport uses GPUI's device and textures directly, so the types
@@ -129,11 +130,14 @@ gpui-pre = { path = ".vendor/gpui-pre-compat/gpui-pre" }
 gpui-pre-macros = { path = ".vendor/gpui-pre-compat/gpui-pre-macros" }
 gpui-pre-platform = { path = ".vendor/gpui-pre-compat/gpui-pre-platform" }
 gpui-pre-sum-tree = { path = ".vendor/gpui-pre-compat/gpui-pre-sum-tree" }
-# gpui-rhai 0.4.1 pins the older =0.3.9 snapshot, and Cargo admits only one
-# semver-compatible `gpui-pre` per graph. The vendored copy is the published
-# 0.4.1 package with that pin moved to =0.3.11, gpui-fast's keystroke API and
-# wasm32 fixes (listed at the top of its Cargo.toml). Drop it once a gpui-rhai
-# release pins the snapshot gpui-component does and builds for wasm.
+# gpui-rhai 0.4.2 still pins the older =0.3.9 snapshot on its default backend,
+# and Cargo admits only one semver-compatible `gpui-pre` per graph. The vendored
+# copy is the published 0.4.2 package with that pin moved to =0.3.11,
+# gpui-fast's keystroke API and wasm32 fixes (listed at the top of its
+# Cargo.toml). Its `gpui-fast` feature is no way out: it pins gpui-fast =0.1.9,
+# whose keystroke API predates the core this workspace builds on. Drop the
+# vendored copy once a release pins the snapshot gpui-component does, matches
+# this core's keystroke API and builds for wasm.
 gpui-rhai = { path = ".vendor/gpui-rhai" }
 
 # gpui-fast's own workspace patches. Patches don't cross workspaces, so a
