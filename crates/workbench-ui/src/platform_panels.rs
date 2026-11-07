@@ -427,28 +427,37 @@ fn parse_hex_color(s: &str) -> Option<Color> {
 /// Called from the frontend's assembly stage, before `platform_cmds::register`
 /// builds the "窗口" toolbar group — so the group picks these up with the rest.
 pub fn register(reg: &mut Registry) {
-    reg.register_panel(PanelDef::new(
-        "app.panel.diagnostics",
-        "诊断",
-        wb::DockArea::Right,
-        320.0,
-        2,
-        || Box::new(DiagnosticsPanel),
-    ));
-    reg.register_panel(PanelDef::new(
-        "app.panel.plugins",
-        "插件",
-        wb::DockArea::Right,
-        320.0,
-        3,
-        || Box::new(PluginsPanel),
-    ));
-    reg.register_panel(PanelDef::new(
-        "app.panel.settings",
-        "设置",
-        wb::DockArea::Right,
-        320.0,
-        4,
-        || Box::new(SettingsPanel),
-    ));
+    reg.register_panel(
+        PanelDef::new(
+            "app.panel.diagnostics",
+            "诊断",
+            wb::DockArea::Right,
+            320.0,
+            2,
+            || Box::new(DiagnosticsPanel),
+        )
+        .icon(workbench_core::assets::icons::DIAGNOSTICS),
+    );
+    reg.register_panel(
+        PanelDef::new(
+            "app.panel.plugins",
+            "插件",
+            wb::DockArea::Right,
+            320.0,
+            3,
+            || Box::new(PluginsPanel),
+        )
+        .icon(workbench_core::assets::icons::PLUGINS),
+    );
+    reg.register_panel(
+        PanelDef::new(
+            "app.panel.settings",
+            "设置",
+            wb::DockArea::Right,
+            320.0,
+            4,
+            || Box::new(SettingsPanel),
+        )
+        .icon(workbench_core::assets::icons::SETTINGS),
+    );
 }

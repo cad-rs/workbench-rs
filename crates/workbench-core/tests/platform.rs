@@ -19,14 +19,17 @@ impl wb::Workbench for TestWb {
         reg.register_view(wb::ViewDef::new("test.view", "测试视图", true, || {
             Box::new(TestView)
         }));
-        reg.register_panel(wb::PanelDef::new(
-            "test.panel",
-            "测试面板",
-            wb::DockArea::Left,
-            200.0,
-            0,
-            || Box::new(TestView),
-        ));
+        reg.register_panel(
+            wb::PanelDef::new(
+                "test.panel",
+                "测试面板",
+                wb::DockArea::Left,
+                200.0,
+                0,
+                || Box::new(TestView),
+            )
+            .icon("wb-std/test-panel.svg"),
+        );
         reg.register_document_type(wb::DocumentTypeDef {
             id: wb::DocumentTypeId::new("test.shapes"),
             title: "图形文档".to_string(),
@@ -126,6 +129,11 @@ fn 装配_注册与面板命令() {
     assert!(a.command_title("test.cmd").is_some());
     // 平台为每个面板注册了 toggle 命令
     assert!(a.command_title("app.toggle_panel.test.panel").is_some());
+    // toggle 命令继承面板自带的图标（面板拥有路径，平台只转发）
+    assert_eq!(
+        a.command_icon("app.toggle_panel.test.panel").as_deref(),
+        Some("wb-std/test-panel.svg")
+    );
     assert!(a.command_title("app.undo").is_some());
     assert_eq!(a.host.ws.work_mode, "A");
 }

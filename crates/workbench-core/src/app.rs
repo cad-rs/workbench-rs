@@ -1209,12 +1209,12 @@ impl WorkbenchAppBuilder {
         }
 
         // 平台命令（含每个面板的显示/隐藏命令与“窗口”工具栏组）
-        let panel_ids: Vec<(String, String)> = registry
+        let panels: Vec<(String, String, Option<String>)> = registry
             .panels
             .iter()
-            .map(|p| (p.id.0.clone(), p.title.clone()))
+            .map(|p| (p.id.0.clone(), p.title.clone(), p.icon.clone()))
             .collect();
-        platform_cmds::register(&mut registry, &panel_ids);
+        platform_cmds::register(&mut registry, &panels);
 
         // 注册表 → 运行时
         for def in std::mem::take(&mut registry.doc_types) {

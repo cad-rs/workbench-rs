@@ -22,7 +22,15 @@ fn product_assets_resolve_ribbon_icon_paths() {
 #[test]
 fn standard_assets_resolve_platform_icon_paths() {
     let std = workbench_core::assets::standard_assets();
-    for path in ["wb-std/new.svg", "wb-std/open.svg", "wb-std/save.svg"] {
+    for path in [
+        "wb-std/new.svg",
+        "wb-std/open.svg",
+        "wb-std/save.svg",
+        "wb-std/diagnostics.svg",
+        "wb-std/plugins.svg",
+        "wb-std/settings.svg",
+        "wb-std/about.svg",
+    ] {
         assert!(std.load(path).is_some(), "standard asset missing: {path}");
     }
 }

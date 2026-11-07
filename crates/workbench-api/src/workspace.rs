@@ -246,7 +246,8 @@ pub struct PanelDef {
     pub id: PanelId,
     pub title: String,
     /// 图标资源路径（如 `"icons/explorer.svg"`，由产品的 AssetSource 解析）；
-    /// 面板头展示用，None 时回退为纯文本。
+    /// 面板头展示用，None 时回退为纯文本。平台的面板开关命令（Home 页
+    /// 「窗口」组）沿用同一路径，使 ribbon 与面板头显示同一图标。
     pub icon: Option<String>,
     /// 脚本面板：gpui-rhai 脚本文件路径（由 gpui 前端挂载渲染）。
     /// 设置后面板内容完全由脚本定义，`factory` 不再被调用。
