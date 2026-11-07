@@ -551,15 +551,14 @@ fn 工作区_单例视图与布局恢复() {
 fn 布局_核心保存加载往返() {
     let dir = std::env::temp_dir().join("workbench-rs-test");
     let _ = std::fs::create_dir_all(&dir);
-    let a = builder()
+    let mut a = builder()
         .with_layout_path(dir.join("roundtrip.json"))
         .build()
         .unwrap();
-    a.save_layout(
-        serde_json::json!({ "adapter": "test" }),
-        Some(serde_json::json!({ "center": { "panel_name": "StackPanel" } })),
-    )
-    .unwrap();
+    let ui = serde_json::json!({ "adapter": "test" });
+    let dock = serde_json::json!({ "center": { "panel_name": "StackPanel" } });
+    assert_eq!(a.save_layout(ui.clone(), Some(dock.clone())), Ok(true));
+    assert_eq!(a.save_layout(ui, Some(dock)), Ok(false), "an unchanged layout isn't rewritten");
     let mut b = builder()
         .with_layout_path(dir.join("roundtrip.json"))
         .build()
@@ -896,4 +895,36 @@ fn 存储_未注册的提供者记录错误() {
         .log
         .entries()
         .any(|e| e.message.contains("没有 `nowhere` 存储")));
+}
+
+#[test]
+fn 自动保存_崩溃后恢复且干净退出后清空() {
+    let dir = std::env::temp_dir().join(format!("workbench-rs-autosave-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let session = || builder().with_layout_path(dir.join("layout.json")).build().unwrap();
+
+    // Session 1 autosaves a dirty document, then crashes: no clean-exit marker.
+    let mut a = session();
+    let doc = a.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), "草稿").unwrap();
+    a.host.docs.commit(doc, "edit", true, Box::new(TestDoc)).unwrap();
+    assert_eq!(a.autosave_now(), Ok(1));
+    let state = a.state().clone();
+    drop(a);
+    state.remove("autosave/session.clean");
+
+    // Session 2 recovers it (dirty, no file), autosaves again, exits cleanly.
+    let mut b = session();
+    let recovered: Vec<_> = b.host.docs.docs().filter(|d| d.title == "[恢复] 草稿").collect();
+    assert_eq!(recovered.len(), 1);
+    assert!(recovered[0].dirty && recovered[0].location.is_none());
+    assert_eq!(b.autosave_now(), Ok(1));
+    drop(b);
+
+    // Session 3 follows a clean exit: nothing is recovered, and session 2's
+    // autosave is cleared rather than kept for some later crash.
+    let c = session();
+    assert!(!c.host.docs.docs().any(|d| d.title.starts_with("[恢复]")));
+    assert!(c.state().keys("autosave/").is_empty());
+    drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
 }

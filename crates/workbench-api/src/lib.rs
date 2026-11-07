@@ -33,6 +33,7 @@ pub mod product;
 pub mod registry;
 pub mod services;
 pub mod settings;
+pub mod state;
 pub mod storage;
 pub mod tasks;
 pub mod view;
@@ -69,6 +70,7 @@ pub use product::{I18nSection, ProductProfile, ProductToml};
 pub use registry::Registry;
 pub use services::{AppServices, FileThen, PluginEntry, RuntimeStats, ServiceHost};
 pub use settings::{SettingKind, SettingScope, SettingSpec, Settings};
+pub use state::StateStore;
 pub use storage::{Location, Storage, StorageFuture, StorageProvider};
 pub use tasks::{
     task_channel, DocCommit, ProgressHandle, TaskCtx, TaskEvent, TaskEventRx, TaskFailure,

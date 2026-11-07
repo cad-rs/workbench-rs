@@ -8,9 +8,11 @@
 //! 并经 `app.settings.set` 命令写回（写入侧做类型校验与范围钳制）。
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::Value;
+
+use crate::state::StateStore;
 
 /// A registered setting's value type (drives the control the settings panel
 /// renders and the validation `app.settings.set` performs).
@@ -101,35 +103,35 @@ impl SettingSpec {
 #[derive(Default)]
 pub struct Settings {
     values: BTreeMap<String, Value>,
-    path: Option<PathBuf>,
+    /// Where the values persist, and under which key; None keeps them in
+    /// memory only.
+    store: Option<(Arc<dyn StateStore>, String)>,
 }
 
 impl Settings {
-    /// 从 JSON 文件加载；文件不存在/解析失败时返回空设置（解析失败记录由调用方处理）。
-    pub fn load(path: &Path) -> (Self, Option<String>) {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(_) => return (Self { values: BTreeMap::new(), path: Some(path.to_path_buf()) }, None),
+    /// 从状态存储的 `key` 加载 JSON；不存在/解析失败时返回空设置（解析失败
+    /// 的消息由调用方记录）。之后的写入都落到同一个 `key`。
+    pub fn load(store: Arc<dyn StateStore>, key: &str) -> (Self, Option<String>) {
+        let parsed = store.read(key).map(|bytes| {
+            std::str::from_utf8(&bytes)
+                .map_err(|e| e.to_string())
+                .and_then(|text| serde_json::from_str(text).map_err(|e| e.to_string()))
+        });
+        let (values, error) = match parsed {
+            None => (BTreeMap::new(), None),
+            Some(Ok(values)) => (values, None),
+            Some(Err(e)) => (BTreeMap::new(), Some(format!("设置文件解析失败，已重置: {e}"))),
         };
-        match serde_json::from_str::<BTreeMap<String, Value>>(&text) {
-            Ok(values) => (
-                Self { values, path: Some(path.to_path_buf()) },
-                None,
-            ),
-            Err(e) => (
-                Self { values: BTreeMap::new(), path: Some(path.to_path_buf()) },
-                Some(format!("设置文件解析失败，已重置: {e}")),
-            ),
-        }
+        let settings = Self {
+            values,
+            store: Some((store, key.to_string())),
+        };
+        (settings, error)
     }
 
-    /// 无持久化路径的内存设置（测试用）。
+    /// 不持久化的内存设置（测试用）。
     pub fn in_memory() -> Self {
         Self::default()
-    }
-
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
     }
 
     pub fn get(&self, key: &str) -> Option<&Value> {
@@ -173,16 +175,13 @@ impl Settings {
         self.values.keys().map(|k| k.as_str())
     }
 
-    /// 全量保存到关联路径。
+    /// 全量保存到状态存储（内存设置无操作）。
     pub fn save(&self) -> Result<(), String> {
-        let Some(path) = &self.path else {
+        let Some((store, key)) = &self.store else {
             return Ok(());
         };
         let json = serde_json::to_string_pretty(&self.values).map_err(|e| e.to_string())?;
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        std::fs::write(path, json).map_err(|e| format!("写入设置 {}: {e}", path.display()))
+        store.write(key, json.as_bytes())
     }
 }
 

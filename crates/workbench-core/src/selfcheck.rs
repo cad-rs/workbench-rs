@@ -164,42 +164,28 @@ fn prepare_probe_document(app: &mut AppRuntime, title: &str) -> bool {
     }
 }
 
-/// The bytes `autosave_now` persisted for `title` (the `<title>_.<ext>` file).
+/// The bytes `autosave_now` persisted for `title` (its `autosave/<title>_.<ext>`
+/// entry).
 fn read_autosaved_bytes(app: &AppRuntime, title: &str) -> Option<Vec<u8>> {
-    let dir = app.layout_path().parent()?.join("autosave");
     let safe: String = title
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
         .collect();
-    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().map(|x| x == "json").unwrap_or(false) {
-            continue;
-        }
-        let Some(stem) = path.file_stem() else { continue };
-        if stem.to_string_lossy().starts_with(&safe) {
-            return std::fs::read(&path).ok();
-        }
-    }
-    None
+    let state = app.state();
+    let key = state
+        .keys(&format!("autosave/{safe}"))
+        .into_iter()
+        .find(|key| !key.ends_with(".json"))?;
+    state.read(&key)
 }
 
-/// How many content files the autosave directory currently holds (metadata
+/// How many content entries the autosave area currently holds (metadata
 /// `.json` sidecars excluded).
 fn count_autosave_files(app: &AppRuntime) -> usize {
-    let Some(dir) = app.layout_path().parent() else {
-        return 0;
-    };
-    let Ok(entries) = std::fs::read_dir(dir.join("autosave")) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter(|e| {
-            let p = e.path();
-            !p.extension().map(|x| x == "json").unwrap_or(false)
-                && p.file_stem().is_some()
-        })
+    app.state()
+        .keys("autosave/")
+        .iter()
+        .filter(|key| !key.ends_with(".json"))
         .count()
 }
 
@@ -665,13 +651,8 @@ pub fn run(app: &mut AppRuntime) -> i32 {
 
     // 16.（阶段 5）设置服务：写入 → 重新加载 → 读回
     let settings_ok = {
-        let path = app
-            .layout_path()
-            .parent()
-            .map(|d| d.join("settings.json"))
-            .expect("布局路径应有父目录");
         let ok = app.host.settings.set("selfcheck.key", serde_json::json!(42)).is_ok();
-        let (reloaded, err) = api::Settings::load(&path);
+        let (reloaded, err) = api::Settings::load(app.state().clone(), crate::app::SETTINGS);
         ok && err.is_none() && reloaded.get_f64("selfcheck.key", 0.0) == 42.0
     };
     checks.push(Check::new(

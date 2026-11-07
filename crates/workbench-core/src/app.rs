@@ -18,6 +18,17 @@ use crate::platform_cmds;
 /// 调用历史环形缓冲容量。
 const INVOCATION_HISTORY: usize = 100;
 
+/// Autosave and crash recovery run on the desktop only: a web page has no
+/// clean exit to tell a crash from a closed tab, and its state store
+/// (localStorage) holds little, and only text.
+const AUTOSAVE: bool = cfg!(not(target_arch = "wasm32"));
+/// Where autosaves live in the state store.
+const AUTOSAVE_DIR: &str = "autosave/";
+/// Written on a clean exit; missing at startup means the last session crashed.
+const CLEAN_EXIT: &str = "autosave/session.clean";
+/// The settings' key in the state store.
+pub(crate) const SETTINGS: &str = "settings.json";
+
 /// 平台运行时。UI 线程所有；前端在自己的定时器上调用 [`AppRuntime::frame_tick`]
 /// （与视图渲染解耦：gpui 只在失效时重画，渲染驱动的泵在 UI 空闲时停转）。
 pub struct AppRuntime {
@@ -28,9 +39,12 @@ pub struct AppRuntime {
     /// 产品身份与品牌（product.toml；未提供时为 builder 的默认值）。
     profile: api::ProductProfile,
     snapshot: CtxSnapshot,
-    layout_path: PathBuf,
-    /// 自动保存目录（`<配置目录>/autosave`）。
-    autosave_dir: PathBuf,
+    /// The app's own state: settings, layout, autosaves, the clean-exit marker.
+    state: Arc<dyn api::StateStore>,
+    /// The layout's key in `state`.
+    layout_key: String,
+    /// The layout as last loaded or saved, so an unchanged one isn't rewritten.
+    saved_layout: Option<String>,
     /// 距上次自动保存的累计秒数。
     autosave_accum: f32,
     dispatch_depth: u32,
@@ -172,8 +186,9 @@ impl AppRuntime {
             .collect()
     }
 
-    pub fn layout_path(&self) -> &PathBuf {
-        &self.layout_path
+    /// Where the app's own state lives (settings, layout, autosaves).
+    pub fn state(&self) -> &Arc<dyn api::StateStore> {
+        &self.state
     }
 
     // ---- 帧驱动 ----
@@ -307,7 +322,7 @@ impl AppRuntime {
             .get_f64("autosave.interval_secs", 30.0)
             .max(5.0) as f32;
         self.autosave_accum += dt_secs.max(0.0);
-        if self.autosave_accum >= interval {
+        if AUTOSAVE && self.autosave_accum >= interval {
             self.autosave_accum = 0.0;
             match self.autosave_now() {
                 Ok(saved) => changed |= saved > 0,
@@ -373,11 +388,16 @@ impl AppRuntime {
     }
 
     // ---- 自动保存与崩溃恢复（阶段 5：§18）----
+    //
+    // 自动保存是状态存储里 `autosave/` 下的成对条目：内容 `<标题>_.<ext>`
+    // 与元数据 `<标题>_.json`；干净退出时写入 `autosave/session.clean`。
 
-    /// 立即把所有脏文档序列化写入自动保存目录（`<id>_<标题>.<ext>`）。
-    /// 不改动文档的 dirty/path 状态——用户保存流程不受影响。
+    /// 立即把所有脏文档序列化写入自动保存区（`autosave/<标题>_.<ext>`）。
+    /// 不改动文档的 dirty/location 状态——用户保存流程不受影响。
     pub fn autosave_now(&mut self) -> Result<usize, String> {
-        let _ = std::fs::create_dir_all(&self.autosave_dir);
+        if !AUTOSAVE {
+            return Err("Web 版暂不支持自动保存".to_string());
+        }
         let dirty: Vec<(api::DocumentId, String, String)> = {
             let host = &self.host;
             host.docs
@@ -409,13 +429,13 @@ impl AppRuntime {
                 .chars()
                 .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
                 .collect();
-            let file = self.autosave_dir.join(format!("{}_.{}", safe_title, ext));
-            std::fs::write(&file, &bytes).map_err(|e| format!("{}: {e}", file.display()))?;
-            // 恢复时按扩展名匹配文档类型，因此需要记录真实类型；用旁车 JSON 记录
+            self.state
+                .write(&format!("{AUTOSAVE_DIR}{safe_title}_.{ext}"), &bytes)?;
+            // 元数据旁车：恢复时的原标题（以及真实类型，供诊断）
             let meta = serde_json::json!({ "doc_id": id.0, "type_id": type_id.0, "title": title });
-            let _ = std::fs::write(
-                self.autosave_dir.join(format!("{}_.json", safe_title)),
-                meta.to_string(),
+            let _ = self.state.write(
+                &format!("{AUTOSAVE_DIR}{safe_title}_.json"),
+                meta.to_string().as_bytes(),
             );
             saved += 1;
         }
@@ -426,59 +446,57 @@ impl AppRuntime {
         Ok(saved)
     }
 
-    /// 启动恢复：检测上次异常退出（clean 标记缺失）时，从自动保存目录恢复文档。
-    /// 自动保存产物为成对文件：`<标题>.<ext>`（内容）+ `<标题>.json`(元数据)。
-    /// 返回恢复的文档标题列表。
-    #[cfg(not(target_arch = "wasm32"))]
-    fn recover_autosaves(&mut self) -> Vec<String> {
-        let marker = self.autosave_marker_path();
-        let mut recovered = Vec::new();
-        let entries = match std::fs::read_dir(&self.autosave_dir) {
-            Ok(e) => e,
-            Err(_) => return recovered,
+    /// 启动时：上次异常退出（没有干净退出标记）就恢复自动保存的文档。上次
+    /// 干净退出、或恢复出了文档，都清空自动保存区——旧会话的自动保存不该在
+    /// 以后的某次崩溃后冒出来；一个都没恢复成功时保留，留待排查。
+    fn restore_session(&mut self) {
+        let crashed = self.state.read(CLEAN_EXIT).is_none();
+        let recovered = if crashed {
+            self.host.log.warn("[会话] 上次未正常退出，尝试恢复自动保存…");
+            self.recover_autosaves()
+        } else {
+            0
         };
-        let mut meta_files: Vec<_> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
-            .collect();
-        meta_files.sort();
-        for meta_path in meta_files {
-            let stem = match meta_path.file_stem().map(|s| s.to_string_lossy().to_string()) {
-                Some(s) => s,
-                None => continue,
+        if !crashed || recovered > 0 {
+            for key in self.state.keys(AUTOSAVE_DIR) {
+                self.state.remove(&key);
+            }
+        }
+    }
+
+    /// 重新打开自动保存区里的文档（标记为未保存），返回恢复的个数。
+    fn recover_autosaves(&mut self) -> usize {
+        let keys = self.state.keys(AUTOSAVE_DIR);
+        let mut recovered = 0;
+        for (meta_key, stem) in keys.iter().filter_map(|k| Some((k, k.strip_suffix(".json")?))) {
+            // 同名内容条目，扩展名即文档类型的扩展名
+            let content = keys.iter().find_map(|key| {
+                let ext = key.strip_prefix(stem)?.strip_prefix('.')?;
+                (ext != "json").then_some((key, ext))
+            });
+            let Some((content_key, ext)) = content else { continue };
+            let Some(meta) = self
+                .state
+                .read(meta_key)
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            else {
+                continue;
             };
-            let meta: serde_json::Value = match std::fs::read_to_string(&meta_path)
-                .ok()
-                .and_then(|t| serde_json::from_str(&t).ok())
-            {
-                Some(m) => m,
-                None => continue,
-            };
-            // 找同 stem 的内容文件（扩展名即文档类型扩展名，open_file 按它匹配类型）
-            let doc_file = match std::fs::read_dir(&self.autosave_dir) {
-                Ok(entries) => entries
-                    .flatten()
-                    .map(|e| e.path())
-                    .find(|p| {
-                        p.extension().map(|x| x == "json") != Some(true)
-                            && p.file_stem().map(|s| s == stem.as_str()).unwrap_or(false)
-                    }),
-                Err(_) => None,
-            };
-            let Some(doc_file) = doc_file else { continue };
+            let name = stem.strip_prefix(AUTOSAVE_DIR).unwrap_or(stem);
             let title = format!(
                 "[恢复] {}",
-                meta.get("title").and_then(|t| t.as_str()).unwrap_or(&stem)
+                meta.get("title").and_then(|t| t.as_str()).unwrap_or(name)
             );
-            // The recovered document gets no file: the autosave copy is
-            // deleted below, so its first save asks where to put it.
+            // The recovered document gets no file: its first save asks where
+            // to put it.
             let restored = self
                 .host
                 .docs
-                .type_for(&api::Location::local(&doc_file))
+                .find_type_by_extension(ext)
+                .map(|def| def.id.clone())
+                .ok_or_else(|| format!("没有登记 .{ext} 扩展名的文档类型"))
                 .and_then(|type_id| {
-                    let bytes = std::fs::read(&doc_file).map_err(|e| e.to_string())?;
+                    let bytes = self.state.read(content_key).ok_or("内容已不在")?;
                     self.host.docs.open_bytes(&type_id, &title, None, &bytes)
                 });
             match restored {
@@ -487,37 +505,20 @@ impl AppRuntime {
                         d.dirty = true; // 恢复内容必须由用户确认后保存
                     }
                     self.host.docs.set_active(Some(id));
-                    recovered.push(title);
+                    recovered += 1;
                 }
                 Err(e) => self
                     .host
                     .log
-                    .warn(format!("自动保存恢复失败 {doc_file:?}: {e}")),
+                    .warn(format!("自动保存恢复失败 {content_key}: {e}")),
             }
         }
-        if !recovered.is_empty() {
+        if recovered > 0 {
             self.host.log.warn(format!(
-                "检测到上次异常退出，已恢复 {} 个自动保存文档（标记为未保存，请确认后保存）",
-                recovered.len()
+                "检测到上次异常退出，已恢复 {recovered} 个自动保存文档（标记为未保存，请确认后保存）"
             ));
         }
-        // 恢复完成后（或上次干净退出）清理自动保存目录，避免重复恢复
-        if marker.exists() || !recovered.is_empty() {
-            for file in std::fs::read_dir(&self.autosave_dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-            {
-                let _ = std::fs::remove_file(file.path());
-            }
-        }
         recovered
-    }
-
-    /// 会话干净退出标记路径。
-    #[cfg(not(target_arch = "wasm32"))]
-    fn autosave_marker_path(&self) -> PathBuf {
-        self.autosave_dir.join("session.clean")
     }
 
     // ---- 帧统计（阶段 5：诊断面板）----
@@ -796,28 +797,31 @@ impl AppRuntime {
     // ---- 布局持久化（design.md §6.5） ----
 
     /// 保存布局；`ui` 为 GUI 前端私有物理布局数据，`dock` 为停靠区物理布局
-    /// （前端 `DockArea::dump` 的序列化结果）。
+    /// （前端 `DockArea::dump` 的序列化结果）。返回是否写入：与上次加载或
+    /// 保存的布局相同时不重写（Web 端定期调用）。
     pub fn save_layout(
-        &self,
+        &mut self,
         ui: serde_json::Value,
         dock: Option<serde_json::Value>,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<bool, String> {
         let mut file = self.host.ws.save_layout();
         file.ui = Some(ui);
         file.dock = dock;
         let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-        if let Some(dir) = self.layout_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        if self.saved_layout.as_deref() == Some(json.as_str()) {
+            return Ok(false);
         }
-        std::fs::write(&self.layout_path, json)
-            .map_err(|e| format!("写入布局 {} 失败: {e}", self.layout_path.display()))?;
-        Ok(self.layout_path.clone())
+        let written = self.state.write(&self.layout_key, json.as_bytes());
+        // Remembered even when the write failed: a failing store is retried
+        // when the layout changes, not on every call.
+        self.saved_layout = Some(json);
+        written.map(|()| true)
     }
 
     /// 尝试加载布局：应用核心部分（面板/标签/模式），返回前端私有部分供适配器恢复。
     /// 未注册的面板/视图被跳过并记录诊断（验收 #9）。
     pub fn load_layout(&mut self) -> Option<RestoredLayout> {
-        let text = std::fs::read_to_string(&self.layout_path).ok()?;
+        let text = String::from_utf8(self.state.read(&self.layout_key)?).ok()?;
         let file: api::LayoutFile = match serde_json::from_str(&text) {
             Ok(f) => f,
             Err(e) => {
@@ -831,6 +835,8 @@ impl AppRuntime {
         for msg in skipped {
             self.host.log.warn(msg);
         }
+        self.saved_layout = Some(text);
+        self.snapshot = self.make_snapshot();
         self.host.log.info("已恢复上次的工作区布局");
         Some(RestoredLayout {
             ui: file.ui,
@@ -966,11 +972,10 @@ impl Drop for AppRuntime {
     fn drop(&mut self) {
         // 通知异步执行器工作线程退出
         self.shutdown.store(true, Ordering::Relaxed);
-        // 会话干净退出标记（阶段 5：崩溃恢复）。必须与 `build()` 检查的
-        // `autosave_marker_path()` 同路径，否则标记永远读不到，每次启动都会
-        // 被判为异常退出而重跑恢复。
-        let _ = std::fs::create_dir_all(&self.autosave_dir);
-        let _ = std::fs::write(self.autosave_dir.join("session.clean"), b"ok");
+        // 会话干净退出标记（阶段 5：崩溃恢复），下次启动由 `restore_session` 检查。
+        if AUTOSAVE {
+            let _ = self.state.write(CLEAN_EXIT, b"ok");
+        }
         let _ = self.host.settings.save();
     }
 }
@@ -1169,6 +1174,10 @@ impl WorkbenchAppBuilder {
         self
     }
 
+    /// The layout file. On the desktop its directory holds the rest of the
+    /// app's state too (settings, autosaves); the default is the product's
+    /// config directory. The web keeps state in localStorage and uses only
+    /// the file name.
     pub fn with_layout_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.layout_path = Some(path.into());
         self
@@ -1343,16 +1352,10 @@ impl WorkbenchAppBuilder {
             host.log.error(format!("[插件] 拒绝加载 {id}：{reason}"));
         }
 
-        // 布局路径 + 设置 + 自动保存目录（阶段 5）
-        let layout_path = self.layout_path.clone().unwrap_or_else(|| {
-            default_layout_dir(&self.product_id).join("layout.json")
-        });
-        let config_dir = layout_path
-            .parent()
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let autosave_dir = config_dir.join("autosave");
-        let (settings, settings_err) = api::Settings::load(&config_dir.join("settings.json"));
+        // 状态存储：布局 + 设置 + 自动保存（阶段 5）
+        let (state, layout_key) =
+            crate::state::open(&self.product_id, self.layout_path.as_deref());
+        let (settings, settings_err) = api::Settings::load(state.clone(), SETTINGS);
         host.settings = settings;
         if let Some(e) = settings_err {
             host.log.warn(format!("[设置] {e}"));
@@ -1442,8 +1445,9 @@ impl WorkbenchAppBuilder {
                     ..Default::default()
                 }),
             snapshot: CtxSnapshot::default(),
-            layout_path,
-            autosave_dir,
+            state,
+            layout_key,
+            saved_layout: None,
             autosave_accum: 0.0,
             dispatch_depth: 0,
             executor,
@@ -1459,17 +1463,8 @@ impl WorkbenchAppBuilder {
         runtime.snapshot = runtime.make_snapshot();
 
         // 崩溃恢复：上次会话无 clean 标记 → 恢复自动保存文档（阶段 5）。
-        // Web（wasm32）无文件系统、无跨会话状态，跳过恢复流程。
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let marker = runtime.autosave_marker_path();
-            let crashed = !marker.exists();
-            if crashed {
-                runtime.host.log.warn("[会话] 上次未正常退出，尝试恢复自动保存…");
-                runtime.recover_autosaves();
-            }
-            // 删除标记：本会话结束时由 Drop 重新写入
-            let _ = std::fs::remove_file(&marker);
+        if AUTOSAVE {
+            runtime.restore_session();
         }
 
         // 默认文档
@@ -1506,7 +1501,7 @@ impl WorkbenchAppBuilder {
         }
 
         // 初始视图（布局文件已存在时由适配器负责恢复布局，不再叠加初始视图）
-        if !runtime.layout_path.exists() {
+        if runtime.state.read(&runtime.layout_key).is_none() {
             for (vt, bind) in &self.open_on_start {
                 if let Err(e) = api::AppServices::open_view(&mut runtime, vt, *bind) {
                     runtime.host.log.warn(format!("打开初始视图 {vt} 失败: {e}"));
@@ -1514,29 +1509,6 @@ impl WorkbenchAppBuilder {
             }
         }
         Ok(runtime)
-    }
-}
-
-/// 默认布局目录：Windows 用 %APPDATA%/<product_id>，其他平台 ~/.config/<product_id>。
-/// Web（wasm32）无文件系统：返回占位路径（布局读写按失败处理，布局不落盘）。
-fn default_layout_dir(product_id: &str) -> PathBuf {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = product_id;
-        PathBuf::from("/wb-web")
-    }
-    #[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
-    {
-        std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join(product_id)
-    }
-    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
-    {
-        std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join(".config").join(product_id))
-            .unwrap_or_else(std::env::temp_dir)
     }
 }
 

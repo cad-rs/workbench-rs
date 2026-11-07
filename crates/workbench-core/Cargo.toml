@@ -27,6 +27,8 @@ blocking = { workspace = true }
 # gets a stub AccountService from its product, if any).
 ureq = { workspace = true }
 
-# Web (wasm32): async executor drives futures on the main thread
+# Web (wasm32): async executor drives futures on the main thread; app state
+# (settings, layout) lives in localStorage
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = { workspace = true }
+web-sys = { workspace = true, features = ["Storage"] }

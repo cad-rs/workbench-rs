@@ -193,6 +193,19 @@ fn publish_runtime_dispatcher(core: &SharedCore) {
 /// 面板现在是独立实体，而 dock 用 gpui 的**缓存视图**通路绘制面板内容
 /// （面板实体被 notify 时其子树才重新渲染）。旧布局把面板画在根视图的子树
 /// 里，notify 根视图就够；这层镜像保持"任何输入都驱动每个视口重绘"的语义。
+/// Save the workspace layout: the core's model plus the dock area's physical
+/// layout. Returns whether anything was written (an unchanged layout isn't).
+fn save_layout(
+    core: &SharedCore,
+    root: &gpui::Entity<RootView>,
+    cx: &App,
+) -> Result<bool, String> {
+    let dock = root.read(cx).dock.as_ref().and_then(|shell| shell.dump(cx));
+    core.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .save_layout(serde_json::Value::Null, dock)
+}
+
 fn notify(weak: &gpui::WeakEntity<RootView>, cx: &mut App) {
     let Some(entity) = weak.upgrade() else {
         return;
@@ -1092,18 +1105,12 @@ fn launch_app(
         let core_save = core.clone();
         cx.on_window_closed(move |cx, _| {
             if let Some(root) = &root_entity {
-                let dump = {
-                    let view = root.read(cx);
-                    view.dock.as_ref().and_then(|shell| shell.dump(cx))
-                };
-                let result = core_save
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .save_layout(serde_json::Value::Null, dump);
-                // 存盘失败（只读目录、Web 无文件系统）只记日志，不阻断退出。
+                // 存盘失败（只读目录等）只记日志，不阻断退出。
+                let result = save_layout(&core_save, root, cx);
                 let mut core = core_save.lock().unwrap_or_else(|p| p.into_inner());
                 match result {
-                    Ok(path) => core.host.log.info(format!("已保存布局 {}", path.display())),
+                    Ok(true) => core.host.log.info("已保存布局"),
+                    Ok(false) => {}
                     Err(e) => core.host.log.warn(format!("保存布局失败: {e}")),
                 }
             }
@@ -1112,6 +1119,28 @@ fn launch_app(
             }
         })
         .detach();
+
+        // A browser tab closes without a window-closed event, so the web
+        // saves the layout as it goes; an unchanged layout isn't rewritten.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(weak) = weak_root.clone() {
+            let core_web = core.clone();
+            cx.spawn(async move |cx: &mut gpui::AsyncApp| loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(2))
+                    .await;
+                cx.update(|cx| {
+                    let Some(root) = weak.upgrade() else {
+                        return;
+                    };
+                    if let Err(e) = save_layout(&core_web, &root, cx) {
+                        let mut core = core_web.lock().unwrap_or_else(|p| p.into_inner());
+                        core.host.log.warn(format!("保存布局失败: {e}"));
+                    }
+                });
+            })
+            .detach();
+        }
 
         cx.spawn(async move |cx: &mut gpui::AsyncApp| loop {
             cx.background_executor()

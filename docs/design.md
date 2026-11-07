@@ -719,14 +719,18 @@ documents it must later save back:
   providers' listing API. The browser's own picker and downloads only serve
   "import local file" / "export to local file" commands: they yield one-off
   bytes, not a location that can be saved back.
-- **App state** (settings, layout, autosave, the session marker) is not user
-  files and needs no picker: a key-value store, files in the config directory
-  on the desktop and OPFS on the web.
+- **App state** (settings, layout, autosaves, the clean-exit marker) is not
+  user files and needs no picker: a small synchronous key-value store
+  (`workbench_api::StateStore`), files in the config directory on the desktop
+  and localStorage on the web. The web saves the layout every couple of
+  seconds (a closed tab fires no window-closed event). Autosave and crash
+  recovery stay desktop-only: a page has no clean exit to tell a crash from a
+  closed tab.
 
-Status: providers, `Location`, the async open/save path and the local file
-system provider are in place. Next: the app-state store (so the web build
-persists settings and layout), the in-app picker with an OPFS provider and
-import/export, then cloud providers with version-checked writes.
+Status: providers, `Location`, the async open/save path, the local file
+system provider and the app-state store are in place. Next: the in-app picker
+with an OPFS provider and import/export, then cloud providers with
+version-checked writes.
 
 ### 12.2 Transactions and undo/redo
 

@@ -18,6 +18,7 @@ mod local_files;
 pub mod platform_cmds;
 pub mod product;
 pub mod selfcheck;
+mod state;
 
 pub use app::{AppRuntime, PluginStage, WorkbenchAppBuilder};
 pub use executor::AsyncExecutor;
