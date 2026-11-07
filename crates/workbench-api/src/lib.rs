@@ -49,7 +49,7 @@ pub use account::{
     AccountService, AccountUser, DeviceAuthRequest, PollResult, SLOW_DOWN_INTERVAL_SECS,
 };
 pub use assets::{AssetSource, ChainedAssets, StaticAssets};
-pub use asyncrt::sleep;
+pub use asyncrt::{sleep, BoxFuture};
 pub use command::{
     AsyncJob, AsyncJobFactory, AsyncSpec, AsyncStarter, BackgroundStarter, ComboState, CommandArgs,
     CommandCtx, CommandDef, CommandExecution, CommandInvocation, CommandKind, CommandResult,

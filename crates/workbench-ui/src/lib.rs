@@ -27,8 +27,9 @@ mod component_assets;
 /// About dialog overlay (product brand: logo / name / version / links).
 pub(crate) mod about;
 
-/// Settings text-edit overlay (gpui-component Input hosted at root level).
+/// In-app file picker overlay (open/save for browser storage, cloud stores).
 mod file_picker;
+/// Settings text-edit overlay (gpui-component Input hosted at root level).
 pub(crate) mod text_edit;
 
 /// Built-in platform panels (diagnostics / plugins).
@@ -201,23 +202,25 @@ fn publish_runtime_dispatcher(core: &SharedCore) {
     }));
 }
 
+/// Save the workspace layout: the core's model plus the dock area's physical
+/// layout. Returns whether anything was written (an unchanged layout isn't);
+/// a failure (read-only directory, full browser storage) is logged.
+fn save_layout(core: &SharedCore, root: &gpui::Entity<RootView>, cx: &App) -> bool {
+    let dock = root.read(cx).dock.as_ref().and_then(|shell| shell.dump(cx));
+    let mut core = core.lock().unwrap_or_else(|p| p.into_inner());
+    match core.save_layout(serde_json::Value::Null, dock) {
+        Ok(written) => written,
+        Err(e) => {
+            core.host.log.warn(format!("Failed to save the layout: {e}"));
+            false
+        }
+    }
+}
+
 /// Panels are now independent entities, and the dock draws panel content through gpui's
 /// **cached view** path (a panel entity's subtree re-renders only when that entity is notified).
 /// The old layout drew the panels inside the root view's subtree, so notifying the root view was
 /// enough; this mirroring keeps the "any input drives a repaint of every viewport" semantics.
-/// Save the workspace layout: the core's model plus the dock area's physical
-/// layout. Returns whether anything was written (an unchanged layout isn't).
-fn save_layout(
-    core: &SharedCore,
-    root: &gpui::Entity<RootView>,
-    cx: &App,
-) -> Result<bool, String> {
-    let dock = root.read(cx).dock.as_ref().and_then(|shell| shell.dump(cx));
-    core.lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .save_layout(serde_json::Value::Null, dock)
-}
-
 fn notify(weak: &gpui::WeakEntity<RootView>, cx: &mut App) {
     let Some(entity) = weak.upgrade() else {
         return;
@@ -1142,14 +1145,11 @@ fn launch_app(
         // wouldn't get saved (verified in practice).
         let core_save = core.clone();
         cx.on_window_closed(move |cx, _| {
+            // A failed save is only logged; it doesn't block exit.
             if let Some(root) = &root_entity {
-                // A failed save (read-only directory etc.) is only logged; it doesn't block exit.
-                let result = save_layout(&core_save, root, cx);
-                let mut core = core_save.lock().unwrap_or_else(|p| p.into_inner());
-                match result {
-                    Ok(true) => core.host.log.info("Layout saved"),
-                    Ok(false) => {}
-                    Err(e) => core.host.log.warn(format!("Failed to save the layout: {e}")),
+                if save_layout(&core_save, root, cx) {
+                    let mut core = core_save.lock().unwrap_or_else(|p| p.into_inner());
+                    core.host.log.info("Layout saved");
                 }
             }
             if cx.windows().is_empty() {
@@ -1168,12 +1168,8 @@ fn launch_app(
                     .timer(std::time::Duration::from_secs(2))
                     .await;
                 cx.update(|cx| {
-                    let Some(root) = weak.upgrade() else {
-                        return;
-                    };
-                    if let Err(e) = save_layout(&core_web, &root, cx) {
-                        let mut core = core_web.lock().unwrap_or_else(|p| p.into_inner());
-                        core.host.log.warn(format!("Failed to save the layout: {e}"));
+                    if let Some(root) = weak.upgrade() {
+                        save_layout(&core_web, &root, cx);
                     }
                 });
             })

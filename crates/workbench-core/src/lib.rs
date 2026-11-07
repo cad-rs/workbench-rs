@@ -11,11 +11,14 @@ pub mod account;
 pub mod app;
 pub mod assets;
 pub mod cli;
-pub mod dialog;
+#[cfg(not(target_arch = "wasm32"))]
+mod dialog;
 pub mod executor;
 pub mod file_picker;
 #[cfg(not(target_arch = "wasm32"))]
 mod local_files;
+#[cfg(target_arch = "wasm32")]
+mod js;
 #[cfg(target_arch = "wasm32")]
 mod opfs;
 pub mod platform_cmds;

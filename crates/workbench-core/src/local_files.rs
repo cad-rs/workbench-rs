@@ -13,11 +13,6 @@ impl api::StorageProvider for LocalFiles {
         "Local files"
     }
 
-    /// The OS's own open/save dialogs browse the local file system.
-    fn native_picker(&self) -> bool {
-        true
-    }
-
     fn read(&self, key: &str) -> api::StorageFuture<Vec<u8>> {
         let path = PathBuf::from(key);
         Box::pin(blocking::unblock(move || {

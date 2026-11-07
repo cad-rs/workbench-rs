@@ -6,6 +6,14 @@
 
 use std::time::Duration;
 
+/// A boxed future the platform runs for you. It is `Send` on the desktop,
+/// where it runs on the platform's executor threads; on the web it runs on
+/// the page's only thread, and the JS promises it awaits are not `Send`.
+#[cfg(not(target_arch = "wasm32"))]
+pub type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
+#[cfg(target_arch = "wasm32")]
+pub type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T>>>;
+
 /// Async sleep: wait for a while inside an async command body without blocking the thread.
 ///
 /// Platform commands/views/Workbenches should use this rather than depending directly on a

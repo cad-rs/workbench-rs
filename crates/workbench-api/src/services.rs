@@ -289,19 +289,22 @@ pub trait AppServices {
     fn disable_plugin(&mut self, plugin_id: &str) -> Result<Vec<String>, String>;
     /// Run an autosave right now and return the number of documents saved (phase 5).
     fn autosave_now(&mut self) -> Result<usize, String>;
-    /// Request a native file dialog (non-blocking).
-    ///
-    /// A blocking OS modal loop must never run on the UI thread: it re-enters the window state
-    /// borrow from gpui's window procedure and wedges the render loop (the process goes
-    /// Responding=False). The dialog therefore runs on a background thread, and `action` is
-    /// called on the UI thread on the next frame tick with the chosen file (`None` = cancelled).
-    /// Only one dialog may be in flight at a time.
+    /// Ask the user for a file (non-blocking): an open dialog, or a save
+    /// dialog suggesting `default_name`. Storage the in-app picker browses
+    /// (the browser's, cloud stores) gets that picker; the local file system
+    /// alone gets the OS's own dialog, run off the UI thread (its modal loop
+    /// would wedge gpui's render loop). Either way `action` runs on the UI
+    /// thread with the pick (`None`: cancelled), through
+    /// [`Self::finish_file_dialog`]. One dialog at a time.
     fn request_file_dialog(
         &mut self,
         extensions: Vec<String>,
         default_name: Option<String>,
         action: Box<dyn FnOnce(&mut dyn AppServices, Option<Location>)>,
     );
+    /// Close the file dialog in flight with the user's pick (`None`:
+    /// cancelled) and run its action.
+    fn finish_file_dialog(&mut self, picked: Option<Location>);
     /// Run `io` off the UI thread (file and network I/O, waiting on the
     /// browser); what it resolves to runs on the UI thread on a later frame
     /// tick. [`crate::CommandCtx::read_file`] and its siblings build on this.
@@ -311,13 +314,8 @@ pub trait AppServices {
 /// What to do on the UI thread once some I/O has finished.
 pub type UiThen = Box<dyn FnOnce(&mut dyn AppServices) + Send>;
 
-/// I/O for [`AppServices::spawn_io`]. It is `Send` on the desktop, where it
-/// runs on the platform's executor threads; on the web it runs on the page's
-/// only thread, and the JS promises it awaits are not `Send`.
-#[cfg(not(target_arch = "wasm32"))]
-pub type IoTask = std::pin::Pin<Box<dyn std::future::Future<Output = UiThen> + Send>>;
-#[cfg(target_arch = "wasm32")]
-pub type IoTask = std::pin::Pin<Box<dyn std::future::Future<Output = UiThen>>>;
+/// I/O for [`AppServices::spawn_io`].
+pub type IoTask = crate::asyncrt::BoxFuture<UiThen>;
 
 /// What to do on the UI thread with a file operation's result.
 pub type FileThen<T> = Box<dyn FnOnce(&mut dyn AppServices, Result<T, String>) + Send>;

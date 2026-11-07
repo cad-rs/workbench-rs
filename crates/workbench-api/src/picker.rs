@@ -5,7 +5,7 @@
 //! in [`crate::WorkspaceState::file_picker`] and lists folders into it; the
 //! frontend draws it and reports the user's moves back.
 
-use crate::storage::{split_file_name, Entry, Location};
+use crate::storage::{has_extension, with_extension, Entry, Location};
 
 pub struct FilePicker {
     /// The suggested file name for a save picker; None for an open picker.
@@ -92,11 +92,13 @@ impl FilePicker {
     /// The file name a save writes for the typed `name`: the first
     /// extension is added when the name has none of the accepted ones.
     pub fn file_name(&self, name: &str) -> String {
-        let name = name.trim();
-        match self.extensions.first() {
-            Some(ext) if !self.accepts(name) => format!("{name}.{ext}"),
-            _ => name.to_string(),
-        }
+        with_extension(name, &self.extensions)
+    }
+
+    /// Where a save of the typed `name` goes: in the folder shown, with an
+    /// accepted extension. None for a blank name.
+    pub fn target(&self, name: &str) -> Option<Location> {
+        (!name.trim().is_empty()).then(|| self.dir().child(&self.file_name(name)))
     }
 
     /// The listed file called `name`, if any (a save over it overwrites).
@@ -106,8 +108,7 @@ impl FilePicker {
     }
 
     fn accepts(&self, name: &str) -> bool {
-        let ext = split_file_name(name).1.unwrap_or_default().to_lowercase();
-        self.extensions.is_empty() || self.extensions.contains(&ext)
+        has_extension(name, &self.extensions)
     }
 }
 
@@ -166,5 +167,9 @@ mod tests {
         picker.listed(&picker.dir(), Ok(vec![entry("part.rcad", false)]));
         assert!(picker.existing("part.rcad").is_some());
         assert!(picker.existing("other.rcad").is_none());
+
+        assert_eq!(picker.target("  "), None);
+        picker.enter(&entry("sub", true));
+        assert_eq!(picker.target("part"), Some(Location::new("opfs", "docs/sub/part.rcad")));
     }
 }

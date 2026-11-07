@@ -433,7 +433,7 @@ impl DocumentService {
     //
     // The service only encodes and decodes: reading and writing the file goes
     // through the storage provider that holds it, off the UI thread (see
-    // `AppServices::read_file`). Opening is `type_for` → read → `open_bytes`;
+    // `CommandCtx::read_file`). Opening is `type_for` → read → `open_bytes`;
     // saving is `begin_save` → write → `finish_save`.
 
     /// The document type registered for the extension of `file_name`.

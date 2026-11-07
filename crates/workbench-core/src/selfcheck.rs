@@ -82,7 +82,7 @@ pub fn crash_probe_recover(mut session_b: AppRuntime, dir: &std::path::Path) -> 
         .find(|d| d.title.starts_with(RECOVERED_PREFIX))
         .map(|d| d.id);
     let content_ok = match (recovered_id, expected.as_deref()) {
-        (Some(id), Some(bytes)) => serialize_doc(&session_b, id)
+        (Some(id), Some(bytes)) => session_b.host.docs.encode(id).ok()
             .map(|b| b == bytes)
             .unwrap_or(false),
         _ => false,
@@ -169,13 +169,9 @@ fn prepare_probe_document(app: &mut AppRuntime, title: &str) -> bool {
 /// The bytes `autosave_now` persisted for `title` (its `autosave/<title>_.<ext>`
 /// entry).
 fn read_autosaved_bytes(app: &AppRuntime, title: &str) -> Option<Vec<u8>> {
-    let safe: String = title
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
     let state = app.state();
     let key = state
-        .keys(&format!("autosave/{safe}"))
+        .keys(&crate::app::autosave_stem(title))
         .into_iter()
         .find(|key| !key.ends_with(".json"))?;
     state.read(&key)
@@ -185,17 +181,10 @@ fn read_autosaved_bytes(app: &AppRuntime, title: &str) -> Option<Vec<u8>> {
 /// `.json` sidecars excluded).
 fn count_autosave_files(app: &AppRuntime) -> usize {
     app.state()
-        .keys("autosave/")
+        .keys(crate::app::AUTOSAVE_DIR)
         .iter()
         .filter(|key| !key.ends_with(".json"))
         .count()
-}
-
-/// Serialize a document through its registered type (platform-agnostic read).
-fn serialize_doc(app: &AppRuntime, id: api::DocumentId) -> Option<Vec<u8>> {
-    let doc = app.host.docs.get(id)?;
-    let def = app.host.docs.type_of(&doc.type_id)?;
-    (def.serialize)(doc.content.as_ref()).ok()
 }
 
 /// Launch one crash-probe phase as a subprocess. Times out instead of hanging
@@ -450,19 +439,19 @@ pub fn run(app: &mut AppRuntime) -> i32 {
 
     // 8. Save / open (precondition: an active document exists)
     let doc_id = app.snapshot().active_document.as_ref().map(|d| d.id);
-    if doc_id.is_some() {
+    if let Some(id) = doc_id {
         let dir = std::env::temp_dir().join("workbench-rs-selfcheck");
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join(format!(
-            "check.{}",
-            doc_id
-                .and_then(|id| app.host.docs.get(id))
-                .and_then(|d| app.host.docs.type_of(&d.type_id).and_then(|t| t.extensions.first().cloned()))
-                .unwrap_or_else(|| "dat".to_string())
-        ));
+        let ext = app
+            .host
+            .docs
+            .get(id)
+            .and_then(|d| app.host.docs.type_of(&d.type_id))
+            .and_then(|t| t.extensions.first().cloned())
+            .unwrap_or_else(|| "dat".to_string());
+        let path = dir.join(format!("check.{ext}"));
         let _ = std::fs::remove_file(&path);
         let location = api::Location::local(&path);
-        let id = doc_id.expect("checked above");
         // Both go through the storage provider off the UI thread; pump until
         // their results have been applied.
         let started = crate::platform_cmds::save_document(
@@ -828,14 +817,7 @@ fn shape_count(app: &AppRuntime) -> usize {
     let Some(summary) = app.snapshot().active_document.as_ref() else {
         return 0;
     };
-    let doc_id = summary.id;
-    let Some(doc) = app.host.docs.get(doc_id) else {
-        return 0;
-    };
-    let Some(def) = app.host.docs.type_of(&doc.type_id) else {
-        return 0;
-    };
-    let Ok(bytes) = (def.serialize)(doc.content.as_ref()) else {
+    let Ok(bytes) = app.host.docs.encode(summary.id) else {
         return 0;
     };
     serde_json::from_slice::<serde_json::Value>(&bytes)

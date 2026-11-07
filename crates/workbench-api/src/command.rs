@@ -420,9 +420,8 @@ impl<'a> CommandCtx<'a> {
     pub fn run_with(&mut self, command: &str, args: CommandArgs) -> CommandResult {
         self.app.dispatch(command, &args)
     }
-    /// Request a native file dialog (non-blocking). The dialog runs on a background thread and
-    /// `action` is called on the UI thread on the next frame tick; see
-    /// [`AppServices::request_file_dialog`].
+    /// Ask the user for a file (non-blocking); `action` runs on the UI thread
+    /// with the pick. See [`AppServices::request_file_dialog`].
     pub fn request_file_dialog(
         &mut self,
         extensions: Vec<String>,

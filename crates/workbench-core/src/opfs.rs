@@ -5,7 +5,7 @@
 //! Only the asynchronous API is used: the synchronous access handles exist in
 //! workers only, and the app runs on the page's thread.
 
-use js_sys::{Promise, Reflect, Uint8Array};
+use js_sys::Reflect;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
@@ -13,6 +13,8 @@ use web_sys::{
     FileSystemGetFileOptions, FileSystemHandle, FileSystemHandleKind, FileSystemWritableFileStream,
 };
 use workbench_api as api;
+
+use crate::js::{blob_bytes, js_error, resolve};
 
 /// The provider id the web build registers OPFS under.
 pub(crate) const ID: &str = "opfs";
@@ -28,8 +30,7 @@ impl api::StorageProvider for Opfs {
         let key = key.to_string();
         Box::pin(async move {
             let file: web_sys::File = resolve(file_handle(&key, false).await?.get_file()).await?;
-            let buffer = JsFuture::from(file.array_buffer()).await.map_err(js_error)?;
-            Ok(Uint8Array::new(&buffer).to_vec())
+            blob_bytes(&file).await
         })
     }
 
@@ -65,7 +66,7 @@ impl api::StorageProvider for Opfs {
                 let item: FileSystemHandle = next.value().unchecked_into();
                 let name = item.name();
                 listing.push(api::Entry {
-                    key: if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") },
+                    key: api::storage::join_key(&dir, &name),
                     is_dir: item.kind() == FileSystemHandleKind::Directory,
                     name,
                 });
@@ -102,24 +103,6 @@ async fn file_handle(key: &str, create: bool) -> Result<FileSystemFileHandle, St
     resolve(dir_handle(dir, create).await?.get_file_handle_with_options(name, &options)).await
 }
 
-async fn resolve<T: JsCast>(promise: Promise) -> Result<T, String> {
-    Ok(JsFuture::from(promise).await.map_err(js_error)?.unchecked_into())
-}
-
 fn has_method(object: &JsValue, name: &str) -> bool {
     Reflect::get(object, &name.into()).is_ok_and(|method| method.is_function())
-}
-
-/// A user-readable message for a rejected file-system promise.
-fn js_error(error: JsValue) -> String {
-    let Some(error) = error.dyn_ref::<web_sys::DomException>() else {
-        return format!("{error:?}");
-    };
-    match error.name().as_str() {
-        "NotFoundError" => "not found".to_string(),
-        "TypeMismatchError" => "a file and a folder have the same name".to_string(),
-        "QuotaExceededError" => "browser storage is full".to_string(),
-        "NoModificationAllowedError" => "the file is in use by another tab".to_string(),
-        _ => error.message(),
-    }
 }

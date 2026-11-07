@@ -41,11 +41,9 @@ mod desktop {
 
     /// Windows: `%APPDATA%/<product_id>`; elsewhere `~/.config/<product_id>`.
     pub(super) fn config_dir(product_id: &str) -> PathBuf {
-        #[cfg(target_os = "windows")]
-        let base = std::env::var_os("APPDATA").map(PathBuf::from);
-        #[cfg(not(target_os = "windows"))]
-        let base = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"));
-        base.unwrap_or_else(std::env::temp_dir).join(product_id)
+        crate::cli::user_config_home()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(product_id)
     }
 
     /// Keys are paths under a directory.
@@ -83,10 +81,7 @@ mod desktop {
             let mut keys: Vec<String> = entries
                 .flatten()
                 .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
-                .map(|entry| {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if dir.is_empty() { name } else { format!("{dir}/{name}") }
-                })
+                .map(|entry| api::storage::join_key(dir, &entry.file_name().to_string_lossy()))
                 .filter(|key| key.starts_with(prefix))
                 .collect();
             keys.sort();

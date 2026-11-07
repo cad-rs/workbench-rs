@@ -114,11 +114,7 @@ impl Settings {
     /// Load JSON from `key` in the state store; returns empty settings when it is missing or
     /// fails to parse (the caller logs the parse error). Later writes all go to the same `key`.
     pub fn load(store: Arc<dyn StateStore>, key: &str) -> (Self, Option<String>) {
-        let parsed = store.read(key).map(|bytes| {
-            std::str::from_utf8(&bytes)
-                .map_err(|e| e.to_string())
-                .and_then(|text| serde_json::from_str(text).map_err(|e| e.to_string()))
-        });
+        let parsed = store.read(key).map(|bytes| serde_json::from_slice(&bytes));
         let (values, error) = match parsed {
             None => (BTreeMap::new(), None),
             Some(Ok(values)) => (values, None),

@@ -24,7 +24,18 @@ const INVOCATION_HISTORY: usize = 100;
 /// (localStorage) holds little, and only text.
 const AUTOSAVE: bool = cfg!(not(target_arch = "wasm32"));
 /// Where autosaves live in the state store.
-const AUTOSAVE_DIR: &str = "autosave/";
+pub(crate) const AUTOSAVE_DIR: &str = "autosave/";
+
+/// The state-store key of a document's autosave without its extension
+/// (`autosave/<title>_`): the content is `<stem>.<ext>`, its metadata
+/// `<stem>.json`. The title is cut down to characters safe in a file name.
+pub(crate) fn autosave_stem(title: &str) -> String {
+    let safe: String = title
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    format!("{AUTOSAVE_DIR}{safe}_")
+}
 /// Written on a clean exit; missing at startup means the last session crashed.
 const CLEAN_EXIT: &str = "autosave/session.clean";
 /// The settings' key in the state store.
@@ -57,11 +68,9 @@ pub struct AppRuntime {
     /// design.md §16.4).
     invocations: VecDeque<InvocationRecord>,
     invocation_seq: u64,
-    /// The file dialog in flight: a native dialog (run on a background thread, its result
-    /// drained per frame) or the in-app picker (`ws.file_picker`, ended by
-    /// [`Self::finish_pick`]).
+    /// The file dialog in flight (the in-app picker or the OS's dialog); both
+    /// end in [`api::AppServices::finish_file_dialog`].
     dialog_in_flight: Option<FileDialogRequest>,
-    dialog_result_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
     /// Finished I/O's continuations ([`api::AppServices::spawn_io`]), run by
     /// `frame_tick`.
     io_done_tx: std::sync::mpsc::Sender<api::UiThen>,
@@ -70,10 +79,8 @@ pub struct AppRuntime {
     io_pending: usize,
 }
 
-/// A UI action that needs a native dialog. The dialog runs on a background thread (a blocking
-/// rfd call must never enter the UI thread: it starves the gpui event loop and triggers a
-/// re-entrant borrow inside the window), the result comes back over a channel, and
-/// [`AppRuntime::frame_tick`] drains it and runs `action` on the UI thread.
+/// A UI action waiting for the user to pick a file
+/// ([`api::AppServices::request_file_dialog`]).
 pub(crate) struct FileDialogRequest {
     /// File filter extensions (empty = no filter).
     pub extensions: Vec<String>,
@@ -200,46 +207,42 @@ impl AppRuntime {
 
     // ---- Frame driving ----
 
-    /// Request a file dialog (non-blocking). When there is storage browsed in the app (browser
-    /// storage, a cloud drive) this opens the in-app picker (`ws.file_picker`, drawn by the
-    /// frontend, which calls [`Self::finish_pick`] on a choice); otherwise a native dialog
-    /// opens on a background thread and [`Self::frame_tick`] drains and runs its result. Only
-    /// one dialog may be in flight at a time.
+    /// Ask the user for a file (see [`api::AppServices::request_file_dialog`]):
+    /// the in-app picker over the storage it browses (`ws.file_picker`, drawn
+    /// by the frontend), else the OS's dialog for the local file system, run
+    /// as I/O off the UI thread.
     pub(crate) fn request_dialog(&mut self, request: FileDialogRequest) {
+        use api::AppServices as _;
         if self.dialog_in_flight.is_some() {
             self.host.log.warn("A dialog is already open; ignoring the new open/save request");
             return;
         }
-        let sources = self.host.storage.in_app_sources();
         let picker = api::FilePicker::new(
             request.default_name.clone(),
             request.extensions.clone(),
-            sources,
+            self.host.storage.in_app_sources(),
         );
-        self.dialog_in_flight = Some(request);
         if let Some(picker) = picker {
+            self.dialog_in_flight = Some(request);
             self.host.ws.file_picker = Some(picker);
             crate::file_picker::list(&mut api::CommandCtx::new(self));
             return;
         }
-        let request = self.dialog_in_flight.as_ref().expect("set above");
-        #[cfg(target_arch = "wasm32")]
-        self.host.log.warn("No file storage is available");
-        let rx = crate::dialog::spawn(request.extensions.clone(), request.default_name.clone());
-        self.dialog_result_rx = Some(rx);
-    }
-
-    /// Close the in-app file picker with what the user picked (None:
-    /// cancelled) and run the dialog request's action.
-    pub fn finish_pick(&mut self, picked: Option<api::Location>) {
-        self.host.ws.file_picker = None;
-        let Some(request) = self.dialog_in_flight.take() else {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.host.storage.contains(api::storage::LOCAL) {
+            let os_dialog =
+                crate::dialog::pick(request.extensions.clone(), request.default_name.clone());
+            self.dialog_in_flight = Some(request);
+            self.spawn_io(Box::pin(async move {
+                let picked = os_dialog.await.map(api::Location::local);
+                Box::new(move |app: &mut dyn api::AppServices| app.finish_file_dialog(picked))
+                    as api::UiThen
+            }));
             return;
-        };
-        if picked.is_none() {
-            self.host.log.info("Cancelled");
         }
-        (request.action)(self, picked);
+        self.dialog_in_flight = Some(request);
+        self.host.log.warn("No file storage is available");
+        self.finish_file_dialog(None);
     }
 
     /// I/O started with [`api::AppServices::spawn_io`] whose continuation
@@ -258,34 +261,6 @@ impl AppRuntime {
             ran = true;
         }
         ran
-    }
-
-    /// Drain the in-flight dialog's result and run its follow-up on the UI thread.
-    /// Returns whether a result was taken (the UI needs a redraw).
-    fn drain_dialog_result(&mut self) -> bool {
-        let Some(rx) = &self.dialog_result_rx else {
-            return false;
-        };
-        let picked = match rx.try_recv() {
-            Ok(picked) => {
-                self.dialog_result_rx = None;
-                picked
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                // The thread died without sending: treat it as cancelled.
-                self.dialog_result_rx = None;
-                None
-            }
-        };
-        let Some(request) = self.dialog_in_flight.take() else {
-            return false;
-        };
-        if picked.is_none() {
-            self.host.log.info("Cancelled");
-        }
-        (request.action)(self, picked.map(api::Location::local));
-        true
     }
 
     // ---- Account sign-in (Phase 3: device flow) ----
@@ -333,8 +308,7 @@ impl AppRuntime {
     /// UI is idle and task results sit in the channel unclaimed (the diagnostics panel's
     /// background task count then lags).
     pub fn frame_tick(&mut self, dt_secs: f32) -> bool {
-        let mut changed = self.drain_dialog_result();
-        changed |= self.drain_io();
+        let mut changed = self.drain_io();
         changed |= self.drain_account_login();
         changed |= self.pump_task_events();
         // Autosave (phase 5: §18 production extensions)
@@ -423,46 +397,27 @@ impl AppRuntime {
         if !AUTOSAVE {
             return Err("Autosave is not supported on the web yet".to_string());
         }
-        let dirty: Vec<(api::DocumentId, String, String)> = {
-            let host = &self.host;
-            host.docs
-                .docs()
-                .filter(|d| d.dirty)
-                .map(|d| {
-                    let ext = host
-                        .docs
-                        .type_of(&d.type_id)
-                        .and_then(|t| t.extensions.first().cloned())
-                        .unwrap_or_else(|| "dat".to_string());
-                    (d.id, d.title.clone(), ext)
-                })
-                .collect()
-        };
+        let docs = &self.host.docs;
+        let dirty: Vec<_> = docs
+            .docs()
+            .filter(|d| d.dirty)
+            .map(|d| {
+                let ext = docs
+                    .type_of(&d.type_id)
+                    .and_then(|t| t.extensions.first().cloned())
+                    .unwrap_or_else(|| "dat".to_string());
+                (d.id, d.title.clone(), d.type_id.clone(), ext)
+            })
+            .collect();
         let mut saved = 0;
-        for (id, title, ext) in dirty {
-            let (bytes, type_id) = {
-                let host = &self.host;
-                let doc = host.docs.get(id).ok_or("No such document")?;
-                let def = host
-                    .docs
-                    .type_of(&doc.type_id)
-                    .ok_or("Unregistered document type")?;
-                ((def.serialize)(doc.content.as_ref())?, doc.type_id.clone())
-            };
-            // Sanitize the file name: replace characters not allowed in paths
-            let safe_title: String = title
-                .chars()
-                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-                .collect();
-            self.state
-                .write(&format!("{AUTOSAVE_DIR}{safe_title}_.{ext}"), &bytes)?;
+        for (id, title, type_id, ext) in dirty {
+            let bytes = self.host.docs.encode(id)?;
+            let stem = autosave_stem(&title);
+            self.state.write(&format!("{stem}.{ext}"), &bytes)?;
             // Metadata sidecar: the original title for recovery (and the real type, for
             // diagnostics)
             let meta = serde_json::json!({ "doc_id": id.0, "type_id": type_id.0, "title": title });
-            let _ = self.state.write(
-                &format!("{AUTOSAVE_DIR}{safe_title}_.json"),
-                meta.to_string().as_bytes(),
-            );
+            let _ = self.state.write(&format!("{stem}.json"), meta.to_string().as_bytes());
             saved += 1;
         }
         self.host.stats.autosaves += 1;
@@ -964,6 +919,17 @@ impl api::AppServices for AppRuntime {
             default_name,
             action,
         });
+    }
+
+    fn finish_file_dialog(&mut self, picked: Option<api::Location>) {
+        self.host.ws.file_picker = None;
+        let Some(request) = self.dialog_in_flight.take() else {
+            return;
+        };
+        if picked.is_none() {
+            self.host.log.info("Cancelled");
+        }
+        (request.action)(self, picked);
     }
 
     fn spawn_io(&mut self, io: api::IoTask) {
@@ -1516,7 +1482,6 @@ impl WorkbenchAppBuilder {
             invocations: VecDeque::new(),
             invocation_seq: 0,
             dialog_in_flight: None,
-            dialog_result_rx: None,
             io_done_tx,
             io_done_rx,
             io_pending: 0,
@@ -1597,65 +1562,50 @@ mod tests {
         }
     }
 
-    /// A module-requested pick is drained by `frame_tick`, which runs the
-    /// action on the UI thread with the picked path. The blocking OS modal
-    /// loop itself never runs on the UI thread.
+    /// The OS dialog's pick comes back as I/O: `frame_tick` runs the action
+    /// on the UI thread with it. The blocking modal loop itself never runs on
+    /// the UI thread.
     #[test]
-    fn dialog_request_is_drained_by_frame_tick_and_runs_action_on_main_thread() {
+    fn an_os_dialog_pick_runs_the_action_on_a_frame_tick() {
+        use api::AppServices as _;
         let mut app = runtime();
-        let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<api::Location>>();
-        tx.send(Some(PathBuf::from("C:/tmp/part.rcad"))).unwrap();
         app.dialog_in_flight = Some(request(Box::new(move |_, picked| {
             let _ = done_tx.send(picked);
         })));
-        app.dialog_result_rx = Some(rx);
+        let picked = Some(api::Location::local("C:/tmp/part.rcad"));
+        app.spawn_io(Box::pin(async move {
+            Box::new(move |app: &mut dyn api::AppServices| app.finish_file_dialog(picked))
+                as api::UiThen
+        }));
 
-        assert!(app.frame_tick(0.0), "taking a result should report a redraw is needed");
-        assert_eq!(
-            done_rx.try_recv().unwrap(),
-            Some(api::Location::local("C:/tmp/part.rcad"))
-        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.pending_io() > 0 && std::time::Instant::now() < deadline {
+            app.frame_tick(0.0);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(done_rx.try_recv().unwrap(), Some(api::Location::local("C:/tmp/part.rcad")));
         assert!(app.dialog_in_flight.is_none());
-        assert!(app.dialog_result_rx.is_none());
     }
 
-    /// A cancelled dialog (user closed the picker) still runs the action with
-    /// `None`, so the module can log the cancellation.
+    /// A cancelled dialog still runs the action, with `None`, and closes the
+    /// in-app picker.
     #[test]
-    fn dialog_cancel_action_receives_none() {
+    fn a_cancelled_dialog_runs_the_action_with_none() {
+        use api::AppServices as _;
         let mut app = runtime();
-        let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<api::Location>>();
-        tx.send(None).unwrap();
         app.dialog_in_flight = Some(request(Box::new(move |_, picked| {
             let _ = done_tx.send(picked);
         })));
-        app.dialog_result_rx = Some(rx);
-
-        assert!(app.frame_tick(0.0));
+        app.finish_file_dialog(None);
         assert_eq!(done_rx.try_recv().unwrap(), None);
+        assert!(app.host.ws.file_picker.is_none());
     }
 
-    /// A picker thread that dies without sending is treated as a cancellation
-    /// (the action still runs, with `None`).
-    #[test]
-    fn dialog_thread_death_is_treated_as_cancel() {
-        let mut app = runtime();
-        let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<api::Location>>();
-        drop(tx);
-        app.dialog_in_flight = Some(request(Box::new(move |_, picked| {
-            let _ = done_tx.send(picked);
-        })));
-        app.dialog_result_rx = Some(rx);
-
-        assert!(app.frame_tick(0.0));
-        assert_eq!(done_rx.try_recv().unwrap(), None);
-    }
-
-    /// Only one dialog may be in flight: a second request while one is pending
-    /// is ignored (and must not replace the pending request or its channel).
+    /// Only one dialog may be in flight: a second request while one is
+    /// pending is ignored (it neither replaces the pending request nor opens
+    /// another dialog).
     #[test]
     fn new_request_is_ignored_while_dialog_in_flight() {
         let mut app = runtime();
@@ -1669,9 +1619,6 @@ mod tests {
 
         let pending = app.dialog_in_flight.as_ref().expect("the in-flight request is kept");
         assert!(pending.extensions.is_empty(), "the in-flight request was replaced");
-        assert!(
-            app.dialog_result_rx.is_none(),
-            "an ignored request must not install a result channel"
-        );
+        assert_eq!(app.pending_io(), 0, "an ignored request must not open a dialog");
     }
 }

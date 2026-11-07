@@ -541,36 +541,41 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
 /// the UI thread, then the document is decoded, made active and shown in its
 /// preferred view. Failures go to the log.
 pub fn open_document(ctx: &mut CommandCtx, location: api::Location) {
-    let type_id = match ctx.host().docs.type_for(location.file_name()) {
-        Ok(type_id) => type_id,
-        Err(e) => {
-            ctx.host().log.error(e);
-            return;
-        }
-    };
+    read_document(ctx, location, true);
+}
+
+/// Read the document at `location` off the UI thread and add it: tied to
+/// that file, or as an untied copy (`keep_file == false`: an import). A file
+/// of an unknown type is refused before it is read.
+fn read_document(ctx: &mut CommandCtx, location: api::Location, keep_file: bool) {
+    if let Err(e) = ctx.host().docs.type_for(location.file_name()) {
+        return ctx.host().log.error(e);
+    }
     ctx.read_file(location.clone(), Box::new(move |app, bytes| {
-        let mut ctx = CommandCtx::new(app);
-        let opened = bytes.and_then(|bytes| {
-            let title = location.file_stem();
-            ctx.host().docs.open_bytes(&type_id, title, Some(location.clone()), &bytes)
-        });
-        show_opened(&mut ctx, opened, format!("Opened {location}"));
+        let name = location.file_name().to_string();
+        let (location, done) = match keep_file {
+            true => (Some(location.clone()), format!("Opened {location}")),
+            false => (None, format!("Imported {name}")),
+        };
+        add_document(&mut CommandCtx::new(app), &name, location, bytes, done);
     }));
 }
 
-/// Add the document in `bytes` from a file called `name` that it does not
-/// stay tied to (an import): its first save asks where to put it.
-fn import_document(ctx: &mut CommandCtx, name: &str, bytes: &[u8]) {
-    let opened = ctx.host().docs.type_for(name).and_then(|type_id| {
+/// Decode `bytes` from a file called `name` into a new document — tied to
+/// `location`, or untied when None so its first save asks where to put it —
+/// make it active and show it in its preferred view. Failures go to the log.
+fn add_document(
+    ctx: &mut CommandCtx,
+    name: &str,
+    location: Option<api::Location>,
+    bytes: Result<Vec<u8>, String>,
+    done: String,
+) {
+    let opened = bytes.and_then(|bytes| {
+        let type_id = ctx.host().docs.type_for(name)?;
         let title = api::storage::split_file_name(name).0;
-        ctx.host().docs.open_bytes(&type_id, title, None, bytes)
+        ctx.host().docs.open_bytes(&type_id, title, location, &bytes)
     });
-    show_opened(ctx, opened, format!("Imported {name}"));
-}
-
-/// Make a just-opened document active and show it in its preferred view; a
-/// failure goes to the log.
-fn show_opened(ctx: &mut CommandCtx, opened: Result<api::DocumentId, String>, done: String) {
     let doc_id = match opened {
         Ok(id) => id,
         Err(e) => {
@@ -610,11 +615,7 @@ pub fn save_document(
     CommandResult::done()
 }
 
-/// Ask the platform to show the "Open Document" dialog on a background thread, and open the
-/// pick on the UI thread.
-///
-/// A blocking OS modal loop must never run on the UI thread (it re-enters gpui's window
-/// procedure and wedges the render loop), hence [`CommandCtx::request_file_dialog`].
+/// Ask the user for a document to open, then open it.
 fn request_open_dialog(ctx: &mut CommandCtx) {
     let exts = all_extensions(ctx);
     ctx.request_file_dialog(exts, None, Box::new(|ctx, picked| {
@@ -624,8 +625,8 @@ fn request_open_dialog(ctx: &mut CommandCtx) {
     }));
 }
 
-/// A document's file name (its title, with its type's extension unless the
-/// title has one) and its type's extensions.
+/// A document's file name (its title with one of its type's extensions, the
+/// rule the in-app picker applies too) and its type's extensions.
 fn file_name_of(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> Option<(String, Vec<String>)> {
     let host = ctx.host();
     let doc = host.docs.get(doc_id)?;
@@ -634,16 +635,10 @@ fn file_name_of(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> Option<(String
         .type_of(&doc.type_id)
         .map(|t| t.extensions.clone())
         .unwrap_or_default();
-    let name = if doc.title.contains('.') {
-        doc.title.clone()
-    } else {
-        format!("{}.{}", doc.title, exts.first().map(|s| s.as_str()).unwrap_or("dat"))
-    };
-    Some((name, exts))
+    Some((api::storage::with_extension(&doc.title, &exts), exts))
 }
 
-/// Ask the platform to show the "Save As" dialog on a background thread, and write the file
-/// from the UI thread once picked.
+/// Ask the user where to save a document, then write it there.
 fn request_save_as_dialog(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResult {
     let Some((default_name, exts)) = file_name_of(ctx, doc_id) else {
         return CommandResult::failed("No such document");
@@ -671,23 +666,19 @@ fn request_import(ctx: &mut CommandCtx) {
         Box::new(move |app: &mut dyn api::AppServices| {
             let mut ctx = CommandCtx::new(app);
             match picked {
-                Ok((name, bytes)) => import_document(&mut ctx, &name, &bytes),
+                Ok((name, bytes)) => {
+                    let done = format!("Imported {name}");
+                    add_document(&mut ctx, &name, None, Ok(bytes), done);
+                }
                 Err(e) => ctx.host().log.info(e),
             }
         }) as api::UiThen
     }));
     #[cfg(not(target_arch = "wasm32"))]
     ctx.request_file_dialog(exts, None, Box::new(|app, picked| {
-        let Some(location) = picked else {
-            return;
-        };
-        CommandCtx::new(app).read_file(location.clone(), Box::new(move |app, bytes| {
-            let mut ctx = CommandCtx::new(app);
-            match bytes {
-                Ok(bytes) => import_document(&mut ctx, location.file_name(), &bytes),
-                Err(e) => ctx.host().log.error(e),
-            }
-        }));
+        if let Some(location) = picked {
+            read_document(&mut CommandCtx::new(app), location, false);
+        }
     }));
 }
 

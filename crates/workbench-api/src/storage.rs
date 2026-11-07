@@ -9,14 +9,14 @@
 //! Providers are asynchronous (the origin-private file system has only async
 //! APIs on the page's thread, and a cloud store is network I/O). The platform
 //! runs their futures off the UI thread and hands the result back on a later
-//! frame tick; see [`crate::AppServices::read_file`].
+//! frame tick; see [`crate::CommandCtx::read_file`].
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
+
+use crate::asyncrt::BoxFuture;
 
 /// The provider id of the local file system (desktop builds register it).
 pub const LOCAL: &str = "local";
@@ -58,6 +58,21 @@ impl Location {
     pub fn extension(&self) -> Option<&str> {
         split_file_name(self.file_name()).1
     }
+
+    /// The file or folder `name` in this folder (keys are `/`-separated
+    /// paths; the root folder's key is `""`).
+    pub fn child(&self, name: &str) -> Location {
+        Location::new(self.provider.as_str(), join_key(&self.key, name))
+    }
+}
+
+/// The key of `name` in the folder `dir` (the root is `""`).
+pub fn join_key(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
 }
 
 /// A file name's stem and extension (without the dot). Like `Path`, a
@@ -66,6 +81,23 @@ pub fn split_file_name(name: &str) -> (&str, Option<&str>) {
     match name.rfind('.') {
         Some(dot) if dot > 0 => (&name[..dot], Some(&name[dot + 1..])),
         _ => (name, None),
+    }
+}
+
+/// Whether `name` has one of `extensions` (lowercase, no dot); any name
+/// passes an empty list.
+pub fn has_extension(name: &str, extensions: &[String]) -> bool {
+    let ext = split_file_name(name).1.unwrap_or_default().to_lowercase();
+    extensions.is_empty() || extensions.contains(&ext)
+}
+
+/// The file name to save `name` under: the first of `extensions` is added
+/// when it has none of them.
+pub fn with_extension(name: &str, extensions: &[String]) -> String {
+    let name = name.trim();
+    match extensions.first() {
+        Some(ext) if !has_extension(name, extensions) => format!("{name}.{ext}"),
+        _ => name.to_string(),
     }
 }
 
@@ -90,51 +122,29 @@ impl fmt::Display for Location {
     }
 }
 
-/// A storage operation's future. It is `Send` on the desktop, where the
-/// platform runs it on its executor threads; on the web it runs on the
-/// page's only thread, and the JS promises it awaits are not `Send`.
-#[cfg(not(target_arch = "wasm32"))]
-pub type StorageFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send>>;
-#[cfg(target_arch = "wasm32")]
-pub type StorageFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>>>>;
+/// A storage operation's future (`Send` on the desktop, see [`BoxFuture`]).
+pub type StorageFuture<T> = BoxFuture<Result<T, String>>;
 
 /// One place files can live. Errors are user-readable messages; the platform
 /// adds which file they are about.
 pub trait StorageProvider: Send + Sync {
     /// What the file picker calls this place.
     fn label(&self) -> &str;
-    /// Whether files here are picked with the OS's own dialog (the local file
-    /// system) rather than the in-app picker, which browses with
-    /// [`Self::list`].
-    fn native_picker(&self) -> bool {
-        false
-    }
     /// The whole content of the file at `key`.
     fn read(&self, key: &str) -> StorageFuture<Vec<u8>>;
     /// Create the file at `key`, or replace its content, with `bytes`.
     fn write(&self, key: &str, bytes: Vec<u8>) -> StorageFuture<()>;
-    /// The folders and files in the folder `dir` (the root is `""`).
+    /// The folders and files in the folder `dir` (the root is `""`); the
+    /// in-app picker browses with this.
     fn list(&self, dir: &str) -> StorageFuture<Vec<Entry>> {
         let _ = dir;
-        unsupported("Browsing")
+        failed("Browsing is not supported here".to_string())
     }
     /// Create the folder `key`.
     fn create_dir(&self, key: &str) -> StorageFuture<()> {
         let _ = key;
-        unsupported("Creating folders")
+        failed("Creating folders is not supported here".to_string())
     }
-    /// The key of `name` in the folder `dir`: paths by default.
-    fn child_key(&self, dir: &str, name: &str) -> String {
-        if dir.is_empty() {
-            name.to_string()
-        } else {
-            format!("{dir}/{name}")
-        }
-    }
-}
-
-fn unsupported<T: Send + 'static>(what: &str) -> StorageFuture<T> {
-    Box::pin(std::future::ready(Err(format!("{what} is not supported here"))))
 }
 
 /// The product's storage providers, by id.
@@ -149,65 +159,58 @@ impl Storage {
         self.providers.insert(id.into(), provider);
     }
 
-    /// The provider registered under `id`.
-    pub fn get(&self, id: &str) -> Option<&Arc<dyn StorageProvider>> {
-        self.providers.get(id)
+    /// Whether a provider is registered under `id`.
+    pub fn contains(&self, id: &str) -> bool {
+        self.providers.contains_key(id)
     }
 
-    /// The places the in-app picker offers, as (id, label): every provider
-    /// without a native dialog.
+    /// The places the in-app picker browses, as (id, label): every provider
+    /// but the local file system, whose files the OS's own dialogs pick.
     pub fn in_app_sources(&self) -> Vec<(String, String)> {
         self.providers
             .iter()
-            .filter(|(_, provider)| !provider.native_picker())
+            .filter(|(id, _)| *id != LOCAL)
             .map(|(id, provider)| (id.clone(), provider.label().to_string()))
             .collect()
     }
 
     /// List the folder at `location`.
     pub fn list(&self, location: &Location) -> StorageFuture<Vec<Entry>> {
-        let what = format!("read folder {location}");
-        match self.providers.get(&location.provider) {
-            Some(provider) => with_context(provider.list(&location.key), what),
-            None => missing(location, what),
-        }
+        self.route(location, format!("read folder {location}"), |p, key| p.list(key))
     }
 
     /// Create the folder at `location`.
     pub fn create_dir(&self, location: &Location) -> StorageFuture<()> {
-        let what = format!("create folder {location}");
-        match self.providers.get(&location.provider) {
-            Some(provider) => with_context(provider.create_dir(&location.key), what),
-            None => missing(location, what),
-        }
+        self.route(location, format!("create folder {location}"), |p, key| p.create_dir(key))
     }
 
     /// Read the file at `location`.
     pub fn read(&self, location: &Location) -> StorageFuture<Vec<u8>> {
-        let what = format!("read {location}");
-        match self.providers.get(&location.provider) {
-            Some(provider) => with_context(provider.read(&location.key), what),
-            None => missing(location, what),
-        }
+        self.route(location, format!("read {location}"), |p, key| p.read(key))
     }
 
     /// Write `bytes` to the file at `location`.
     pub fn write(&self, location: &Location, bytes: Vec<u8>) -> StorageFuture<()> {
-        let what = format!("write {location}");
-        match self.providers.get(&location.provider) {
-            Some(provider) => with_context(provider.write(&location.key, bytes), what),
-            None => missing(location, what),
-        }
+        self.route(location, format!("write {location}"), |p, key| p.write(key, bytes))
+    }
+
+    /// Run `op` on the provider holding `location`; errors say what failed.
+    fn route<T: Send + 'static>(
+        &self,
+        location: &Location,
+        what: String,
+        op: impl FnOnce(&dyn StorageProvider, &str) -> StorageFuture<T>,
+    ) -> StorageFuture<T> {
+        let Some(provider) = self.providers.get(&location.provider) else {
+            return failed(format!("Failed to {what}: no `{}` storage", location.provider));
+        };
+        let future = op(provider.as_ref(), &location.key);
+        Box::pin(async move { future.await.map_err(|e| format!("Failed to {what}: {e}")) })
     }
 }
 
-fn missing<T: Send + 'static>(location: &Location, what: String) -> StorageFuture<T> {
-    let error = format!("Failed to {what}: no `{}` storage", location.provider);
+fn failed<T: Send + 'static>(error: String) -> StorageFuture<T> {
     Box::pin(std::future::ready(Err(error)))
-}
-
-fn with_context<T: 'static>(future: StorageFuture<T>, what: String) -> StorageFuture<T> {
-    Box::pin(async move { future.await.map_err(|e| format!("Failed to {what}: {e}")) })
 }
 
 #[cfg(test)]
@@ -226,5 +229,18 @@ mod tests {
         assert_eq!(opfs.file_stem(), ".hidden");
         assert_eq!(opfs.extension(), None);
         assert_eq!(opfs.to_string(), "opfs:docs/.hidden");
+    }
+
+    #[test]
+    fn children_and_save_names() {
+        let root = Location::new("opfs", "");
+        assert_eq!(root.child("a"), Location::new("opfs", "a"));
+        assert_eq!(root.child("a").child("b.rcad"), Location::new("opfs", "a/b.rcad"));
+
+        let exts = vec!["rcad".to_string()];
+        assert_eq!(with_extension(" part ", &exts), "part.rcad");
+        assert_eq!(with_extension("part.RCAD", &exts), "part.RCAD");
+        assert_eq!(with_extension("part.v2", &exts), "part.v2.rcad");
+        assert_eq!(with_extension("notes.txt", &[]), "notes.txt");
     }
 }

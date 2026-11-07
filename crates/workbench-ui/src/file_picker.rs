@@ -4,19 +4,19 @@
 //! The runtime owns the state (`ws.file_picker`) and lists folders; this
 //! module draws it and reports the user's moves — navigation through
 //! [`workbench_core::file_picker`], the choice through
-//! `AppRuntime::finish_pick`. A save picker's file name is a gpui-component
-//! `Input` the root view mounts while the picker is open.
+//! `AppServices::finish_file_dialog`. A save picker's file name is a
+//! gpui-component `Input` the root view mounts while the picker is open.
 
 use gpui::{
-    AnyElement, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px,
+    AnyElement, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, div, px,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Escape, Input, InputEvent, InputState};
 use gpui_component::{Icon, Sizable as _};
-use workbench_api as wb;
+use workbench_api::{self as wb, AppServices as _};
 use workbench_core::file_picker;
 
 use crate::{RootView, SharedCore, col, theme};
@@ -38,8 +38,7 @@ pub(crate) fn create_name_input(
     window: &mut Window,
     cx: &mut Context<RootView>,
 ) -> (Entity<InputState>, Subscription) {
-    let input = cx.new(|cx| InputState::new(window, cx).default_value(seed));
-    input.update(cx, |state, cx| state.focus(window, cx));
+    let input = crate::text_edit::create_input(seed, window, cx);
     let core = core.clone();
     let sub = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| match event {
         InputEvent::PressEnter { .. } => {
@@ -64,11 +63,12 @@ pub(crate) fn overlay(
         let guard = lock(core);
         let picker = guard.host.ws.file_picker.as_ref()?;
         let host = &guard.host;
+        // A typed name that is an existing file overwrites it.
+        let overwrite = typed
+            .as_deref()
+            .is_some_and(|name| picker.existing(&picker.file_name(name)).is_some());
         Snap {
             title: host.tr(if picker.save.is_some() { "Save Document" } else { "Open Document" }),
-            overwrite: typed
-                .as_deref()
-                .is_some_and(|name| picker.existing(&picker.file_name(name)).is_some()),
             // Source labels (and the root crumb, which is one) are UI text;
             // folder names are the user's and stay as they are.
             sources: picker
@@ -86,8 +86,7 @@ pub(crate) fn overlay(
             listing: picker.listing.clone(),
             new_folder: host.tr("New Folder"),
             cancel: host.tr("Cancel"),
-            confirm: host.tr(if picker.save.is_some() { "Save" } else { "Open" }),
-            overwrite_label: host.tr("Overwrite"),
+            confirm: host.tr(if overwrite { "Overwrite" } else { "Save" }),
             loading: host.tr("Loading…"),
             empty: host.tr("(empty)"),
             open_hint: host.tr("Click a file to open it"),
@@ -99,16 +98,14 @@ pub(crate) fn overlay(
 /// Everything the overlay draws, snapshotted under the runtime lock.
 struct Snap {
     title: String,
-    /// The typed name is an existing file: saving overwrites it.
-    overwrite: bool,
     sources: Vec<(String, String)>,
     provider: String,
     trail: Vec<String>,
     listing: Option<Result<Vec<wb::Entry>, String>>,
     new_folder: String,
     cancel: String,
+    /// The save button: "Save", or "Overwrite" over an existing file.
     confirm: String,
-    overwrite_label: String,
     loading: String,
     empty: String,
     open_hint: String,
@@ -123,15 +120,16 @@ fn navigate(core: &SharedCore, step: impl FnOnce(&mut wb::FilePicker)) {
 }
 
 fn pick(core: &SharedCore, picked: Option<wb::Location>) {
-    lock(core).finish_pick(picked);
+    lock(core).finish_file_dialog(picked);
 }
 
 /// Save under the typed `name` in the folder shown (a blank name does
 /// nothing).
 fn save(core: &SharedCore, name: &str) {
     let mut guard = lock(core);
-    if let Some(target) = file_picker::target(&mut wb::CommandCtx::new(&mut *guard), name) {
-        guard.finish_pick(Some(target));
+    let target = guard.host.ws.file_picker.as_ref().and_then(|picker| picker.target(name));
+    if let Some(target) = target {
+        guard.finish_file_dialog(Some(target));
     }
 }
 
@@ -267,14 +265,13 @@ fn render(
                     .border_color(col(theme.placeholder))
                     .child(Input::new(input)),
             );
-            let label = if snap.overwrite { &snap.overwrite_label } else { &snap.confirm };
             let core = core.clone();
             let input = input.clone();
             footer = footer.child(
                 Button::new("file-picker-save")
                     .primary()
                     .small()
-                    .child(label.clone())
+                    .child(snap.confirm.clone())
                     .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                         save(&core, &input.read(cx).value());
                         cx.notify();

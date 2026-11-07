@@ -714,18 +714,18 @@ documents it must later save back:
   encodes and decodes: opening is `type_for` → read → `open_bytes`, saving is
   `begin_save` → write → `finish_save` (one save per document in flight; a
   document edited during its write stays dirty).
-- **File pickers** choose a `Location`. A provider says whether it uses the
-  native dialog (`StorageProvider::native_picker`: the local file system) or
-  the in-app picker, which browses with `list` / `create_dir`. When any
-  in-app provider is registered, open/save dialogs use the in-app picker over
-  all of them. Its state is `FilePicker` in `ws.file_picker`; core lists
-  folders into it (`workbench_core::file_picker`), the frontend only draws it
-  and reports moves, and `AppRuntime::finish_pick` closes it. The browser's
-  own chooser and downloads only serve the import / export commands: they
-  yield one-off bytes, not a location that can be saved back.
-- I/O off the UI thread goes through one primitive, `AppServices::spawn_io`;
-  `CommandCtx::read_file` / `write_file` / `list_dir` / `create_dir` build on
-  it.
+- **File pickers** choose a `Location`. The local file system uses the OS's
+  own dialogs; every other provider is browsed by the in-app picker with
+  `list` / `create_dir`. When any such provider is registered, open/save
+  dialogs use the in-app picker over all of them. Its state is `FilePicker`
+  in `ws.file_picker`; core lists folders into it
+  (`workbench_core::file_picker`) and the frontend only draws it and reports
+  moves. Both kinds of dialog end in `AppServices::finish_file_dialog`. The
+  browser's own chooser and downloads only serve the import / export
+  commands: they yield one-off bytes, not a location that can be saved back.
+- I/O off the UI thread goes through one primitive, `AppServices::spawn_io`
+  (the OS dialog's modal loop too); `CommandCtx::read_file` / `write_file` /
+  `list_dir` / `create_dir` build on it.
 - **App state** (settings, layout, autosaves, the clean-exit marker) is not
   user files and needs no picker: a small synchronous key-value store
   (`workbench_api::StateStore`), files in the config directory on the desktop

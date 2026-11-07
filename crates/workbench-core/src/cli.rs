@@ -144,7 +144,8 @@ pub fn default_plugin_dirs(product_id: &str) -> Vec<PathBuf> {
     dirs
 }
 
-fn user_config_home() -> Option<PathBuf> {
+/// The per-user configuration home: `%APPDATA%` on Windows, `~/.config` elsewhere.
+pub(crate) fn user_config_home() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         std::env::var_os("APPDATA").map(PathBuf::from)

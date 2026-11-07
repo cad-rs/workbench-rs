@@ -1,6 +1,7 @@
 //! Integration tests for the workbench-core platform runtime (no window, pure logic paths).
 
 use workbench_api as wb;
+use wb::AppServices as _;
 use workbench_core::{AppRuntime, WorkbenchAppBuilder};
 
 /// A test Workbench: one command, one panel, one view, one document type.
@@ -224,7 +225,6 @@ fn context_panel_toggle_command() {
 
 #[test]
 fn context_work_mode_switch() {
-    use wb::AppServices as _;
     let mut a = app();
     a.frame_tick(0.0);
     a.set_work_mode("B").unwrap();
@@ -635,12 +635,12 @@ fn async_app() -> AppRuntime {
         .expect("assembly failed")
 }
 
-/// Pump frame_tick until no task is running.
+/// Pump frame_tick until no task is running and all I/O has landed.
 fn pump(app: &mut AppRuntime, timeout: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     loop {
         app.frame_tick(0.01);
-        if !app.host.tasks.all().any(|t| !t.status.is_terminal()) {
+        if !app.host.tasks.all().any(|t| !t.status.is_terminal()) && app.pending_io() == 0 {
             return true;
         }
         if std::time::Instant::now() > deadline {
@@ -871,7 +871,7 @@ impl wb::StorageProvider for MemoryStorage {
                 Some((first, _)) => (first, true),
                 None => (rest, dirs.contains(key)),
             };
-            let key = format!("{prefix}{name}");
+            let key = wb::storage::join_key(dir, name);
             listing.insert(name.to_string(), wb::Entry { key, name: name.to_string(), is_dir });
         }
         Box::pin(std::future::ready(Ok(listing.into_values().collect())))
@@ -879,16 +879,6 @@ impl wb::StorageProvider for MemoryStorage {
     fn create_dir(&self, key: &str) -> wb::StorageFuture<()> {
         self.dirs.lock().unwrap().insert(key.to_string());
         Box::pin(std::future::ready(Ok(())))
-    }
-}
-
-/// Pump frame_tick until the results of in-flight file reads/writes are all applied.
-fn pump_files(app: &mut AppRuntime) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while app.pending_io() > 0 {
-        assert!(std::time::Instant::now() < deadline, "file I/O timed out");
-        app.frame_tick(0.01);
-        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
 
@@ -907,7 +897,7 @@ fn storage_save_through_provider_and_reopen() {
     );
     assert!(!matches!(started, wb::CommandResult::Failed { .. }));
     assert!(app.host.docs.get(doc).unwrap().dirty, "still unsaved until the write completes");
-    pump_files(&mut app);
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
     assert!(memory.files.lock().unwrap().contains_key("projects/part.shapes"));
     let saved = app.host.docs.get(doc).unwrap();
     assert_eq!(saved.title, "part");
@@ -916,7 +906,7 @@ fn storage_save_through_provider_and_reopen() {
 
     let mut ctx = wb::CommandCtx::new(&mut app);
     workbench_core::platform_cmds::open_document(&mut ctx, location.clone());
-    pump_files(&mut app);
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
     let opened = app.host.docs.active().expect("the opened document becomes active");
     assert_ne!(opened.id, doc);
     assert_eq!(opened.location.as_ref(), Some(&location));
@@ -929,7 +919,7 @@ fn storage_unregistered_provider_logs_error() {
         &mut wb::CommandCtx::new(&mut app),
         wb::Location::new("nowhere", "a.shapes"),
     );
-    pump_files(&mut app);
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
     assert!(!app.host.docs.docs().any(|d| d.location.is_some()));
     assert!(app
         .host
@@ -994,17 +984,17 @@ fn storage_in_app_picker_open_and_save_as() {
 
     // Open: the picker lists the root, folders first, files filtered by type.
     app.execute_command("app.open_document", &wb::CommandArgs::default());
-    pump_files(&mut app);
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
     assert_eq!(listing(&app), ["projects/", "top.shapes"]);
     let picker = app.host.ws.file_picker.as_ref().unwrap();
     assert_eq!(picker.sources, [("mem".to_string(), "Memory".to_string())]);
     let folder = picker.listing.as_ref().unwrap().as_ref().unwrap()[0].clone();
     file_picker::navigate(&mut wb::CommandCtx::new(&mut app), |p| p.enter(&folder));
-    pump_files(&mut app);
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
     assert_eq!(listing(&app), ["part.shapes"], "notes.txt is filtered out");
     let part = wb::Location::new("mem", "projects/part.shapes");
-    app.finish_pick(Some(part.clone()));
-    pump_files(&mut app);
+    app.finish_file_dialog(Some(part.clone()));
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
     assert!(app.host.ws.file_picker.is_none());
     let opened = app.host.docs.active().expect("opened");
     assert_eq!((opened.title.as_str(), opened.location.as_ref()), ("part", Some(&part)));
@@ -1012,7 +1002,7 @@ fn storage_in_app_picker_open_and_save_as() {
     // Save as: a new folder through the picker's prompt command, then a
     // typed name, completed with the type's extension.
     app.execute_command("app.save_document_as", &wb::CommandArgs::default());
-    pump_files(&mut app);
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
     let picker = app.host.ws.file_picker.as_ref().expect("save picker");
     assert_eq!(picker.save.as_deref(), Some("part.shapes"));
     let created = app.execute_command(
@@ -1020,21 +1010,21 @@ fn storage_in_app_picker_open_and_save_as() {
         &wb::CommandArgs::new().with("value", "copies"),
     );
     assert!(!matches!(created, wb::CommandResult::Failed { .. }), "{created:?}");
-    pump_files(&mut app);
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
     assert_eq!(listing(&app), ["copies/", "projects/", "top.shapes"]);
-    let target = file_picker::target(&mut wb::CommandCtx::new(&mut app), "copy").unwrap();
+    let target = app.host.ws.file_picker.as_ref().unwrap().target("copy").unwrap();
     assert_eq!(target, wb::Location::new("mem", "copy.shapes"));
-    app.finish_pick(Some(target.clone()));
-    pump_files(&mut app);
+    app.finish_file_dialog(Some(target.clone()));
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
     assert!(memory.files.lock().unwrap().contains_key("copy.shapes"));
     assert_eq!(app.host.docs.active().unwrap().location.as_ref(), Some(&target));
 
     // Cancel closes the picker and runs nothing.
     app.execute_command("app.open_document", &wb::CommandArgs::default());
-    pump_files(&mut app);
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
     let docs = app.host.docs.docs().count();
-    app.finish_pick(None);
-    pump_files(&mut app);
+    app.finish_file_dialog(None);
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
     assert!(app.host.ws.file_picker.is_none());
     assert_eq!(app.host.docs.docs().count(), docs);
 }
