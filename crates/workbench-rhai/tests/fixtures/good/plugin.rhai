@@ -1,4 +1,4 @@
 fn register() {
-    register_command("test.good.hello", "问候", "hello");
+    register_command("test.good.hello", "Hello", "hello");
 }
 fn hello(args) { "ok" }

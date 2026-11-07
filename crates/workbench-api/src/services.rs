@@ -1,4 +1,5 @@
-//! 平台服务聚合与工作台可见的能力门面（design.md §4.1 Platform）。
+//! The platform service aggregate and the capability facade visible to workbenches
+//! (design.md §4.1 Platform).
 
 use std::any::{Any, TypeId};
 use std::sync::{Arc, Mutex};
@@ -11,35 +12,35 @@ use crate::storage::{Location, Storage};
 use crate::tasks::{TaskEventRx, TaskManager};
 use crate::workspace::WorkspaceState;
 
-/// 运行时统计（诊断面板/自动化测试用）。
+/// Runtime statistics (for the diagnostics panel/automated tests).
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeStats {
-    /// 渲染帧数（由 GUI 前端每帧上报；无头运行恒为 0）。
+    /// Rendered frames (reported every frame by the GUI frontend; always 0 when headless).
     pub frames: u64,
-    /// 帧耗时指数滑动平均（毫秒）。
+    /// Exponential moving average of frame time (milliseconds).
     pub avg_frame_ms: f32,
-    /// 最近一帧耗时（毫秒）。
+    /// Time of the last frame (milliseconds).
     pub last_frame_ms: f32,
-    /// GUI 后端标签（产品装配时写入，如 "egui"/"gpui"）。
+    /// GUI backend label (written when the product is assembled, e.g. "egui"/"gpui").
     pub backend: String,
-    /// 自动保存次数。
+    /// Number of autosaves.
     pub autosaves: u64,
 }
 
-/// 插件注册条目（诊断/管理面板用）。
+/// A plugin registry entry (for the diagnostics/management panels).
 #[derive(Clone, Debug)]
 pub struct PluginEntry {
     pub id: String,
     /// Loaded / Rejected / Disabled
     pub state: &'static str,
-    /// Rejected/Disabled 的原因。
+    /// Why it was Rejected/Disabled.
     pub detail: Option<String>,
     /// License tier the plugin requires (manifest `tier`); None = no
     /// requirement. The licensing milestone gates loading on this.
     pub tier: Option<crate::licensing::LicenseTier>,
 }
 
-/// 平台服务聚合。UI 线程所有。
+/// The platform service aggregate. Owned by the UI thread.
 pub struct ServiceHost {
     pub docs: DocumentService,
     /// Where user files live; reach it through [`crate::CommandCtx::read_file`]
@@ -63,9 +64,10 @@ pub struct ServiceHost {
     pub account_login_rx: Option<std::sync::mpsc::Receiver<crate::workspace::AccountPhase>>,
     pub account_login_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub stats: RuntimeStats,
-    /// 插件注册表镜像（build 时填充，运行时禁用同步更新）。
+    /// Mirror of the plugin registry (filled at build time, updated when a plugin is disabled at
+    /// runtime).
     pub plugins: Vec<PluginEntry>,
-    /// 平台启动时刻。
+    /// When the platform started.
     pub started: web_time::Instant,
     extras: std::collections::HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     task_rx: TaskEventRx,
@@ -97,7 +99,7 @@ impl ServiceHost {
         }
     }
 
-    /// 渲染帧上报（由 GUI 前端每帧调用）。
+    /// Report a rendered frame (called every frame by the GUI frontend).
     pub fn record_frame(&mut self, dt_ms: f32) {
         let s = &mut self.stats;
         s.frames += 1;
@@ -109,18 +111,19 @@ impl ServiceHost {
         };
     }
 
-    /// 平台运行时长（秒）。
+    /// Platform uptime (seconds).
     pub fn uptime_secs(&self) -> f32 {
         self.started.elapsed().as_secs_f32()
     }
 
-    /// 当前 locale（`ui.locale` 设置，未设置时 `zh-CN`）。
+    /// The current locale (the `ui.locale` setting, `en` when unset).
     pub fn locale(&self) -> String {
-        self.settings.get_str("ui.locale", "zh-CN")
+        self.settings.get_str("ui.locale", "en")
     }
 
-    /// 翻译一个文案键：按当前 locale 查表，找不到回退 `en`，再回退键本身。
-    /// 键本身作回退值保证未翻译文案原样显示、UI 不出现空洞。
+    /// Translate a UI string: look it up for the current locale, fall back
+    /// to `en`, then to the key itself, so an untranslated string shows as
+    /// written instead of leaving a hole in the UI.
     pub fn tr(&self, key: &str) -> String {
         let locale = self.locale();
         self.localizer
@@ -129,7 +132,7 @@ impl ServiceHost {
             .to_string()
     }
 
-    // ---- 账号（Phase 3：device flow，后台线程轮询）----
+    // ---- Account (Phase 3: device flow, polled on a background thread) ----
 
     /// Start the device login: `begin_login` + token polling run on a
     /// background thread (network I/O must never touch the UI thread); phase
@@ -137,15 +140,15 @@ impl ServiceHost {
     /// (drained by the runtime).
     pub fn begin_account_login(&mut self) -> Result<(), String> {
         let Some(service) = self.account.clone() else {
-            return Err("产品未配置账号服务".to_string());
+            return Err("The product has no account service configured".to_string());
         };
         if self.account_login_rx.is_some() {
-            return Err("登录已在进行中".to_string());
+            return Err("A sign-in is already in progress".to_string());
         }
         #[cfg(target_arch = "wasm32")]
         {
             let _ = service;
-            Err("Web 端登录流程尚未实现".to_string())
+            Err("The web sign-in flow is not implemented yet".to_string())
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -162,7 +165,7 @@ impl ServiceHost {
                     Ok(req) => req,
                     Err(e) => {
                         let _ = tx.send(crate::workspace::AccountPhase::Failed(format!(
-                            "无法开始登录: {e}"
+                            "Could not start signing in: {e}"
                         )));
                         return;
                     }
@@ -193,19 +196,19 @@ impl ServiceHost {
                         }
                         Ok(crate::account::PollResult::Denied) => {
                             let _ = tx.send(crate::workspace::AccountPhase::Failed(
-                                "登录被拒绝".to_string(),
+                                "Sign-in was denied".to_string(),
                             ));
                             return;
                         }
                         Ok(crate::account::PollResult::Expired) => {
                             let _ = tx.send(crate::workspace::AccountPhase::Failed(
-                                "登录码已过期".to_string(),
+                                "The sign-in code has expired".to_string(),
                             ));
                             return;
                         }
                         Err(e) => {
                             let _ = tx.send(crate::workspace::AccountPhase::Failed(format!(
-                                "登录失败: {e}"
+                                "Sign-in failed: {e}"
                             )));
                             return;
                         }
@@ -233,15 +236,15 @@ impl ServiceHost {
             service.logout();
         }
         self.ws.account = crate::workspace::AccountPhase::LoggedOut;
-        self.log.info("已登出");
+        self.log.info("Signed out");
     }
 
-    /// 取出任务事件接收端的锁（核心 frame_tick 泵事件用）。
+    /// The locked task event receiver (the core's frame_tick pumps events from it).
     pub fn task_events(&self) -> Arc<Mutex<std::sync::mpsc::Receiver<crate::tasks::TaskEvent>>> {
         self.task_rx.clone()
     }
 
-    // ---- Workbench/插件扩展服务（design.md §8.1 “服务”贡献）----
+    // ---- Workbench/plugin extension services (design.md §8.1 "service" contributions) ----
 
     pub fn set_service<T: Any + Send + Sync>(&mut self, value: T) {
         self.extras.insert(TypeId::of::<T>(), Box::new(value));
@@ -255,42 +258,44 @@ impl ServiceHost {
         self.extras.get_mut(&TypeId::of::<T>()).and_then(|b| b.downcast_mut::<T>())
     }
 
-    /// 装配阶段的原样搬入（来自 Registry.take_services）。
+    /// Moved in as-is during assembly (from Registry.take_services).
     pub fn insert_raw(&mut self, ty: TypeId, value: Box<dyn Any + Send + Sync>) {
         self.extras.insert(ty, value);
     }
 }
 
-/// 工作台（Workbench 模块、脚本插件宿主、视图）可见的平台能力。
+/// The platform capabilities visible to workbenches (Workbench modules, script plugin hosts,
+/// views).
 ///
-/// 由核心的 AppRuntime 实现；CommandCtx / ViewCtx 经由该 trait 访问平台，
-/// 以保证命令与视图代码只面对稳定 API（design.md §15）。
+/// Implemented by the core's AppRuntime; CommandCtx / ViewCtx reach the platform through this
+/// trait, so command and view code only ever faces a stable API (design.md §15).
 pub trait AppServices {
-    /// 平台服务聚合。
+    /// The platform service aggregate.
     fn host(&mut self) -> &mut ServiceHost;
-    /// 当前上下文快照。
+    /// A snapshot of the current context.
     fn snapshot(&self) -> CtxSnapshot;
-    /// 按稳定 ID 执行命令（统一入口）。
+    /// Run a command by stable ID (the single entry point).
     fn dispatch(&mut self, command: &str, args: &CommandArgs) -> CommandResult;
-    /// 打开中央视图；`bind_document` 为 true 时绑定当前活动文档。
+    /// Open a central view; with `bind_document` true it binds the active document.
     fn open_view(&mut self, view_type: &str, bind_document: bool) -> Result<(), String>;
-    /// 关闭当前活动的中央标签。
+    /// Close the active central tab.
     fn close_active_view(&mut self) -> Result<(), String>;
-    /// 切换工作模式。
+    /// Switch the work mode.
     fn set_work_mode(&mut self, mode: &str) -> Result<(), String>;
-    /// 显示/隐藏面板。
+    /// Show/hide a panel.
     fn toggle_panel(&mut self, panel_id: &str) -> Result<(), String>;
-    /// 运行时禁用插件：移除其命令与 Ribbon 贡献（阶段 5，§16.2）。
-    /// 返回被移除的命令 ID 列表。
+    /// Disable a plugin at runtime: removes its commands and Ribbon contributions (phase 5,
+    /// §16.2). Returns the IDs of the removed commands.
     fn disable_plugin(&mut self, plugin_id: &str) -> Result<Vec<String>, String>;
-    /// 立即执行一次自动保存，返回保存的文档数（阶段 5）。
+    /// Run an autosave right now and return the number of documents saved (phase 5).
     fn autosave_now(&mut self) -> Result<usize, String>;
-    /// 请求原生文件对话框（非阻塞）。
+    /// Request a native file dialog (non-blocking).
     ///
-    /// 阻塞式 OS 模态循环绝不能在 UI 线程内执行：它会在 gpui 的窗口过程
-    /// 重入窗口状态借用，楔死渲染循环（进程 Responding=False）。对话框因此
-    /// 在后台线程运行，`action` 于下一帧节拍在 UI 线程被调用，参数为选中的
-    /// 文件（`None` = 取消）。同一时刻只允许一个在途对话框。
+    /// A blocking OS modal loop must never run on the UI thread: it re-enters the window state
+    /// borrow from gpui's window procedure and wedges the render loop (the process goes
+    /// Responding=False). The dialog therefore runs on a background thread, and `action` is
+    /// called on the UI thread on the next frame tick with the chosen file (`None` = cancelled).
+    /// Only one dialog may be in flight at a time.
     fn request_file_dialog(
         &mut self,
         extensions: Vec<String>,

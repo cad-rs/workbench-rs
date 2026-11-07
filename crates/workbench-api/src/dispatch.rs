@@ -36,7 +36,7 @@ pub fn dispatch(command: &str, args: CommandArgs) -> CommandResult {
         let cell = cell.borrow();
         match cell.as_ref() {
             Some(f) => f(command, args),
-            None => CommandResult::failed("视图元素不在渲染上下文中"),
+            None => CommandResult::failed("The view element is not in a render context"),
         }
     })
 }

@@ -1,9 +1,9 @@
-//! workbench-core 平台运行时集成测试（无窗口，纯逻辑路径）。
+//! Integration tests for the workbench-core platform runtime (no window, pure logic paths).
 
 use workbench_api as wb;
 use workbench_core::{AppRuntime, WorkbenchAppBuilder};
 
-/// 测试用 Workbench：一个命令、一个面板、一个视图、一个文档类型。
+/// A test Workbench: one command, one panel, one view, one document type.
 struct TestWb;
 
 impl wb::Workbench for TestWb {
@@ -12,16 +12,16 @@ impl wb::Workbench for TestWb {
     }
     fn init(&self, reg: &mut wb::Registry) {
         reg.register_command(
-            wb::CommandDef::sync("test.cmd", "测试命令", |_ctx, _args| wb::CommandResult::done())
+            wb::CommandDef::sync("test.cmd", "Test Command", |_ctx, _args| wb::CommandResult::done())
                 .hotkey(wb::Hotkey::parse("Ctrl+T").unwrap()),
         );
         reg.register_command(CommandCounter::default_cmd());
-        reg.register_view(wb::ViewDef::new("test.view", "测试视图", true, || {
+        reg.register_view(wb::ViewDef::new("test.view", "Test View", true, || {
             Box::new(TestView)
         }));
         reg.register_panel(wb::PanelDef::new(
             "test.panel",
-            "测试面板",
+            "Test Panel",
             wb::DockArea::Left,
             200.0,
             0,
@@ -29,7 +29,7 @@ impl wb::Workbench for TestWb {
         ));
         reg.register_document_type(wb::DocumentTypeDef {
             id: wb::DocumentTypeId::new("test.shapes"),
-            title: "图形文档".to_string(),
+            title: "Shapes Document".to_string(),
             extensions: vec!["shapes".to_string()],
             create_default: || Box::new(TestDoc),
             serialize: |_| Ok(Vec::new()),
@@ -49,7 +49,7 @@ static CMD_RUNS: AtomicU32 = AtomicU32::new(0);
 struct CommandCounter;
 impl CommandCounter {
     fn default_cmd() -> wb::CommandDef {
-        wb::CommandDef::sync("test.counter", "计数命令", |_ctx, _args| {
+        wb::CommandDef::sync("test.counter", "Counter Command", |_ctx, _args| {
             CMD_RUNS.fetch_add(1, Ordering::SeqCst);
             wb::CommandResult::done()
         })
@@ -63,7 +63,7 @@ impl wb::ViewInstance for TestView {
         wb::ViewTypeId::new("test.view")
     }
     fn title(&self) -> String {
-        "测试视图".to_string()
+        "Test View".to_string()
     }
     fn element(
         &mut self,
@@ -74,7 +74,7 @@ impl wb::ViewInstance for TestView {
 }
 
 fn builder() -> WorkbenchAppBuilder {
-    WorkbenchAppBuilder::new("test.product", "测试产品")
+    WorkbenchAppBuilder::new("test.product", "Test Product")
         .with_workbench(TestWb)
         .with_layout_path(std::env::temp_dir().join("workbench-rs-test").join("layout.json"))
 }
@@ -90,7 +90,7 @@ impl wb::Workbench for SecondDocWb {
     fn init(&self, reg: &mut wb::Registry) {
         reg.register_document_type(wb::DocumentTypeDef {
             id: wb::DocumentTypeId::new("test.second"),
-            title: "第二文档".to_string(),
+            title: "Second Document".to_string(),
             extensions: vec!["second".to_string()],
             create_default: || Box::new(TestDoc),
             serialize: |_| Ok(Vec::new()),
@@ -117,21 +117,21 @@ impl wb::DocumentContent for TestDoc {
 }
 
 fn app() -> AppRuntime {
-    builder().build().expect("装配失败")
+    builder().build().expect("assembly failed")
 }
 
 #[test]
-fn 装配_注册与面板命令() {
+fn assembly_registers_commands_and_panel_toggles() {
     let a = app();
     assert!(a.command_title("test.cmd").is_some());
-    // 平台为每个面板注册了 toggle 命令
+    // The platform registers a toggle command per panel
     assert!(a.command_title("app.toggle_panel.test.panel").is_some());
     assert!(a.command_title("app.undo").is_some());
     assert_eq!(a.host.ws.work_mode, "A");
 }
 
 fn default_doc_builder(with_second: bool) -> WorkbenchAppBuilder {
-    let builder = WorkbenchAppBuilder::new("test.default-doc", "默认文档")
+    let builder = WorkbenchAppBuilder::new("test.default-doc", "Default Document")
         .with_workbench(TestWb)
         .with_layout_path(std::env::temp_dir().join("workbench-rs-test").join("layout.json"))
         .create_default_document(true);
@@ -143,11 +143,11 @@ fn default_doc_builder(with_second: bool) -> WorkbenchAppBuilder {
 }
 
 #[test]
-fn 多文档类型时默认类型由产品指定() {
+fn product_names_default_type_among_several_document_types() {
     let active_type = |builder: WorkbenchAppBuilder| {
         builder
             .build()
-            .expect("装配失败")
+            .expect("assembly failed")
             .host
             .docs
             .active()
@@ -174,7 +174,7 @@ fn 多文档类型时默认类型由产品指定() {
 }
 
 #[test]
-fn 装配_重复命令被拒绝并记录诊断() {
+fn assembly_rejects_duplicate_command_with_diagnostic() {
     let mut reg = wb::Registry::new();
     reg.register_command(wb::CommandDef::sync("dup.cmd", "A", |_c, _a| wb::CommandResult::done()));
     reg.register_command(wb::CommandDef::sync("dup.cmd", "B", |_c, _a| wb::CommandResult::done()));
@@ -183,28 +183,28 @@ fn 装配_重复命令被拒绝并记录诊断() {
 }
 
 #[test]
-fn 命令_快捷键解析() {
+fn command_hotkey_parsing() {
     let hk = wb::Hotkey::parse("Ctrl+Shift+N").unwrap();
     assert!(hk.ctrl && hk.shift && !hk.alt);
     assert_eq!(hk.key, wb::KeyCode::N);
     assert_eq!(hk.to_string(), "Ctrl+Shift+N");
-    assert!(wb::Hotkey::parse("Ctrl+不存在的键").is_none());
+    assert!(wb::Hotkey::parse("Ctrl+NoSuchKey").is_none());
 }
 
 #[test]
-fn 命令_统一入口执行() {
+fn command_runs_through_unified_entry_point() {
     let mut a = app();
     a.frame_tick(0.0);
     let r = a.execute_command("test.counter", &wb::CommandArgs::default());
     assert!(r.is_ok());
     assert_eq!(CMD_RUNS.load(Ordering::SeqCst), 1);
-    // 未注册命令
+    // Unregistered command
     let r = a.execute_command("no.such.command", &wb::CommandArgs::default());
     assert!(matches!(r, wb::CommandResult::Failed { .. }));
 }
 
 #[test]
-fn 上下文_面板显隐命令() {
+fn context_panel_toggle_command() {
     let mut a = app();
     a.frame_tick(0.0);
     let vis = |a: &AppRuntime| {
@@ -223,7 +223,7 @@ fn 上下文_面板显隐命令() {
 }
 
 #[test]
-fn 上下文_工作模式切换() {
+fn context_work_mode_switch() {
     use wb::AppServices as _;
     let mut a = app();
     a.frame_tick(0.0);
@@ -233,15 +233,15 @@ fn 上下文_工作模式切换() {
 }
 
 #[test]
-fn 文档_编辑撤销重做与修订号() {
+fn document_edit_undo_redo_and_revision() {
     let mut a = app();
     a.frame_tick(0.0);
-    // 注册一个带内容的文档类型
+    // Register a document type with content
     a.host
         .docs
         .register_type(wb::DocumentTypeDef {
             id: wb::DocumentTypeId::new("test.doc"),
-            title: "测试".into(),
+            title: "Test".into(),
             extensions: vec!["tdoc".into()],
             create_default: || Box::new(Vec::<u32>::new()),
             serialize: |c| {
@@ -260,25 +260,25 @@ fn 文档_编辑撤销重做与修订号() {
         })
         .unwrap();
     let id = a.host.docs.create(&wb::DocumentTypeId::new("test.doc"), "d").unwrap();
-    a.host.docs.edit::<Vec<u32>>(id, "加一", true, |v| v.push(1)).unwrap();
-    a.host.docs.edit::<Vec<u32>>(id, "加二", true, |v| v.push(2)).unwrap();
+    a.host.docs.edit::<Vec<u32>>(id, "Add one", true, |v| v.push(1)).unwrap();
+    a.host.docs.edit::<Vec<u32>>(id, "Add two", true, |v| v.push(2)).unwrap();
     assert_eq!(a.host.docs.get(id).unwrap().revision, 2);
     assert!(a.host.docs.can_undo(id));
     a.host.docs.undo(id).unwrap();
     assert_eq!(a.host.docs.read::<Vec<u32>, usize>(id, |v| v.len()), Some(1));
     a.host.docs.redo(id).unwrap();
     assert_eq!(a.host.docs.read::<Vec<u32>, usize>(id, |v| v.len()), Some(2));
-    // 不可撤销操作清空历史
+    // A non-undoable operation clears the history
     a.host
         .docs
-        .commit(id, "重置", false, Box::new(Vec::<u32>::new()))
+        .commit(id, "Reset", false, Box::new(Vec::<u32>::new()))
         .unwrap();
     assert!(!a.host.docs.can_undo(id));
 }
 
-// ---- 委托式撤销（领域侧自管历史，平台不记快照） ----
+// ---- Delegated undo (the domain keeps its own history; the platform takes no snapshots) ----
 
-/// 测试用委托文档：命令式撤销栈。
+/// A delegated test document: an imperative undo stack.
 #[derive(Clone, Default)]
 struct DelegatedDoc {
     value: i32,
@@ -304,29 +304,29 @@ fn delegated_doc_mut(c: &mut dyn wb::DocumentContent) -> &mut DelegatedDoc {
 
 fn delegated_undo(c: &mut dyn wb::DocumentContent) -> Result<String, String> {
     let d = delegated_doc_mut(c);
-    let prev = d.undo_stack.pop().ok_or("没有可撤销的操作")?;
+    let prev = d.undo_stack.pop().ok_or("Nothing to undo")?;
     d.redo_stack.push(d.value);
     d.value = prev;
-    Ok("委托撤销".to_string())
+    Ok("Delegated undo".to_string())
 }
 
 fn delegated_redo(c: &mut dyn wb::DocumentContent) -> Result<String, String> {
     let d = delegated_doc_mut(c);
-    let next = d.redo_stack.pop().ok_or("没有可重做的操作")?;
+    let next = d.redo_stack.pop().ok_or("Nothing to redo")?;
     d.undo_stack.push(d.value);
     d.value = next;
-    Ok("委托重做".to_string())
+    Ok("Delegated redo".to_string())
 }
 
 #[test]
-fn 文档_委托式撤销() {
+fn document_delegated_undo() {
     let mut a = app();
     a.frame_tick(0.0);
     a.host
         .docs
         .register_type(wb::DocumentTypeDef {
             id: wb::DocumentTypeId::new("test.delegated"),
-            title: "委托文档".into(),
+            title: "Delegated Document".into(),
             extensions: vec!["tdel".into()],
             create_default: || Box::new(DelegatedDoc::default()),
             serialize: |c| {
@@ -356,14 +356,15 @@ fn 文档_委托式撤销() {
         .unwrap();
     a.host
         .docs
-        .edit::<DelegatedDoc>(id, "加值", true, |d| d.apply(5))
+        .edit::<DelegatedDoc>(id, "Add value", true, |d| d.apply(5))
         .unwrap();
     a.host
         .docs
-        .edit::<DelegatedDoc>(id, "加值", true, |d| d.apply(7))
+        .edit::<DelegatedDoc>(id, "Add value", true, |d| d.apply(7))
         .unwrap();
     assert_eq!(a.host.docs.read::<DelegatedDoc, i32>(id, |d| d.value), Some(12));
-    // 平台未记快照历史（可见历史标签为空），撤销/重做走领域钩子
+    // The platform kept no snapshot history (no visible history label); undo/redo go through
+    // the domain hooks
     assert!(a.host.docs.get(id).unwrap().last_action_label().is_none());
     assert!(a.host.docs.can_undo(id));
     a.host.docs.undo(id).unwrap();
@@ -374,14 +375,14 @@ fn 文档_委托式撤销() {
 }
 
 #[test]
-fn 文档_后台提交版本校验() {
+fn document_background_commit_revision_check() {
     let mut a = app();
     a.frame_tick(0.0);
     a.host
         .docs
         .register_type(wb::DocumentTypeDef {
             id: wb::DocumentTypeId::new("test.doc2"),
-            title: "测试".into(),
+            title: "Test".into(),
             extensions: vec!["td2".into()],
             create_default: || Box::new(0u32),
             serialize: |_c| Ok(vec![]),
@@ -393,29 +394,29 @@ fn 文档_后台提交版本校验() {
         .unwrap();
     let id = a.host.docs.create(&wb::DocumentTypeId::new("test.doc2"), "d").unwrap();
     let rev = a.host.docs.get(id).unwrap().revision;
-    // 正确版本：接受
+    // Correct revision: accepted
     let commit = wb::DocCommit {
         doc_id: id,
         expect_revision: rev,
-        label: "提交".into(),
+        label: "Commit".into(),
         undoable: false,
         content: Box::new(7u32),
     };
     assert!(a.host.docs.apply_commit(commit).is_ok());
-    // 过期版本：拒绝
+    // Stale revision: rejected
     let stale = wb::DocCommit {
         doc_id: id,
-        expect_revision: rev, // 当前已 +1
-        label: "过期提交".into(),
+        expect_revision: rev, // now +1
+        label: "Stale commit".into(),
         undoable: false,
         content: Box::new(9u32),
     };
     assert!(a.host.docs.apply_commit(stale).is_err());
-    // 已关闭文档：拒绝
+    // Closed document: rejected
     let gone = wb::DocCommit {
         doc_id: wb::DocumentId(9999),
         expect_revision: 0,
-        label: "孤儿提交".into(),
+        label: "Orphan commit".into(),
         undoable: false,
         content: Box::new(1u32),
     };
@@ -423,19 +424,19 @@ fn 文档_后台提交版本校验() {
 }
 
 #[test]
-fn 任务_进度取消与终态() {
+fn task_progress_cancel_and_final_state() {
     use std::sync::mpsc;
     let (tx2, rx2) = wb::task_channel();
     let mut tasks = wb::TaskManager::new(tx2);
 
     let spec = wb::TaskSpec {
-        title: "测试任务".into(),
+        title: "Test task".into(),
         cancellable: true,
         input: Box::new(()),
         job: Box::new(move |ctx: &mut wb::TaskCtx| {
             for i in 0..10u32 {
                 ctx.check_cancelled()?;
-                ctx.report(Some(i as f32 / 10.0), "进行中");
+                ctx.report(Some(i as f32 / 10.0), "In progress");
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Ok(None)
@@ -443,7 +444,7 @@ fn 任务_进度取消与终态() {
     };
     let id = tasks.spawn(spec);
     tasks.request_cancel(id);
-    // 泵事件直至终态
+    // Pump events until the final state
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         if let Some(info) = tasks.get(id) {
@@ -458,24 +459,26 @@ fn 任务_进度取消与终态() {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(_) => break,
         }
-        assert!(std::time::Instant::now() < deadline, "任务未在时限内结束");
+        assert!(std::time::Instant::now() < deadline, "the task did not finish in time");
     }
     assert_eq!(tasks.get(id).unwrap().status, wb::TaskStatus::Cancelled);
 }
 
-/// 节拍与渲染解耦后，`frame_tick` 的返回值是前端排帧的依据。
+/// With the tick decoupled from rendering, `frame_tick`'s return value is what the frontend
+/// schedules frames on.
 ///
-/// 旧前端只看 `tasks.summary().0 > 0`：任务完成的那一刻谓词转假，终态事件
-/// 永远不被泵，诊断面板的「后台任务 运行/累计」就此滞后到下一次输入。本测试
-/// 钉住「取走终态事件的那次节拍必须报告 changed」，并且泵完后回到 false。
+/// The old frontend only looked at `tasks.summary().0 > 0`: the moment a task finished the
+/// predicate turned false, the terminal event was never pumped, and the diagnostics panel's
+/// "Background tasks running/total" lagged until the next input. This test pins "the tick that
+/// takes the terminal event must report changed", and that it returns to false once pumped.
 #[test]
-fn 任务_节拍在任务完成后仍报告需要重绘() {
+fn task_tick_still_reports_redraw_after_task_finishes() {
     let mut a = app();
-    assert!(!a.frame_tick(0.0), "空闲节拍不应请求重绘");
+    assert!(!a.frame_tick(0.0), "an idle tick should not request a redraw");
 
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let id = a.host.tasks.spawn(wb::TaskSpec {
-        title: "节拍回归任务".into(),
+        title: "Tick regression task".into(),
         cancellable: false,
         input: Box::new(()),
         job: Box::new(move |_ctx: &mut wb::TaskCtx| {
@@ -485,7 +488,7 @@ fn 任务_节拍在任务完成后仍报告需要重绘() {
         }),
     });
 
-    assert!(a.frame_tick(0.0), "任务在跑时节拍应请求重绘");
+    assert!(a.frame_tick(0.0), "a tick should request a redraw while a task runs");
     assert_eq!(a.host.tasks.summary().0, 1);
     // Wait until the job itself has finished (UI idle: the terminal event has
     // not been pumped yet).
@@ -498,10 +501,10 @@ fn 任务_节拍在任务完成后仍报告需要重绘() {
     // until the terminal event is actually taken.
     done_rx
         .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("任务应完成");
+        .expect("the task should finish");
     assert_eq!(
         a.host.tasks.summary().0, 1,
-        "事件未泵时任务仍显示运行中（滞后的前提）"
+        "until the event is pumped the task still shows as running (the lag's precondition)"
     );
     // While the running count is non-zero `frame_tick` always returns true, so
     // the loop can only observe `summary == 0` on a tick that took the event
@@ -510,30 +513,30 @@ fn 任务_节拍在任务完成后仍报告需要重绘() {
     loop {
         let changed = a.frame_tick(0.0);
         if a.host.tasks.summary().0 == 0 {
-            assert!(changed, "取走终态事件的那次节拍必须报告需要重绘");
+            assert!(changed, "the tick that takes the terminal event must report a redraw");
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "终态事件未在时限内被泵"
+            "the terminal event was not pumped in time"
         );
     }
-    assert_eq!(a.host.tasks.summary().0, 0, "终态已泵，运行计数应为 0");
+    assert_eq!(a.host.tasks.summary().0, 0, "terminal event pumped, running count should be 0");
     assert_eq!(
         a.host.tasks.get(id).unwrap().status,
         wb::TaskStatus::Succeeded
     );
-    assert!(!a.frame_tick(0.0), "泵完后的空闲节拍不应请求重绘");
+    assert!(!a.frame_tick(0.0), "an idle tick after pumping should not request a redraw");
 }
 
 #[test]
-fn 工作区_单例视图与布局恢复() {
+fn workspace_singleton_view_and_layout_restore() {
     let mut a = app();
-    // 单例视图：重复打开复用同一实例
+    // Singleton view: opening it again reuses the same instance
     let first = a.host.ws.open_view(&wb::ViewTypeId::new("test.view"), None, None).unwrap();
     let second = a.host.ws.open_view(&wb::ViewTypeId::new("test.view"), None, None).unwrap();
     assert_eq!(first, second);
-    // 布局：注入未知面板 → 跳过
+    // Layout: an injected unknown panel → skipped
     let mut layout = a.host.ws.save_layout();
     layout.panels.push(wb::SavedPanel {
         id: "ghost".into(),
@@ -548,7 +551,7 @@ fn 工作区_单例视图与布局恢复() {
 }
 
 #[test]
-fn 布局_核心保存加载往返() {
+fn layout_core_save_load_round_trip() {
     let dir = std::env::temp_dir().join("workbench-rs-test");
     let _ = std::fs::create_dir_all(&dir);
     let mut a = builder()
@@ -571,7 +574,7 @@ fn 布局_核心保存加载往返() {
     assert_eq!(dock["center"]["panel_name"], "StackPanel");
 }
 
-// ===================== 阶段 2：异步命令与统一调用结果 =====================
+// ===================== Phase 2: async commands and unified invocation results ==========
 
 struct AsyncTestWb;
 
@@ -580,19 +583,19 @@ impl wb::Workbench for AsyncTestWb {
         wb::WorkbenchId::new("wb-async-test")
     }
     fn init(&self, reg: &mut wb::Registry) {
-        reg.register_command(wb::CommandDef::sync("t.ping", "同步", |_c, _a| {
+        reg.register_command(wb::CommandDef::sync("t.ping", "Sync", |_c, _a| {
             wb::CommandResult::done()
         }));
-        reg.register_command(wb::CommandDef::async_command("t.async", "测试异步", |_ctx| {
+        reg.register_command(wb::CommandDef::async_command("t.async", "Test Async", |_ctx| {
             Ok(wb::AsyncSpec {
-                title: "测试异步".into(),
+                title: "Test async".into(),
                 cancellable: true,
                 input: Box::new(()),
                 job: Box::new(|task: wb::TaskCtx| {
                     Box::pin(async move {
                         for i in 0..5u32 {
                             task.check_cancelled()?;
-                            task.report(Some(i as f32 / 5.0), "步进");
+                            task.report(Some(i as f32 / 5.0), "Step");
                             async_io::Timer::after(std::time::Duration::from_millis(20)).await;
                         }
                         Ok(None)
@@ -602,17 +605,17 @@ impl wb::Workbench for AsyncTestWb {
         }));
         reg.register_command(wb::CommandDef::async_command(
             "t.async_long",
-            "可取消异步",
+            "Cancellable Async",
             |_ctx| {
                 Ok(wb::AsyncSpec {
-                    title: "可取消异步".into(),
+                    title: "Cancellable async".into(),
                     cancellable: true,
                     input: Box::new(()),
                     job: Box::new(|task: wb::TaskCtx| {
                         Box::pin(async move {
                             for i in 0..100u32 {
                                 task.check_cancelled()?;
-                                task.report(Some(i as f32 / 100.0), "长任务");
+                                task.report(Some(i as f32 / 100.0), "Long task");
                                 async_io::Timer::after(std::time::Duration::from_millis(50)).await;
                             }
                             Ok(None)
@@ -625,14 +628,14 @@ impl wb::Workbench for AsyncTestWb {
 }
 
 fn async_app() -> AppRuntime {
-    WorkbenchAppBuilder::new("test.async", "异步测试产品")
+    WorkbenchAppBuilder::new("test.async", "Async Test Product")
         .with_workbench(AsyncTestWb)
         .with_layout_path(std::env::temp_dir().join("workbench-rs-test").join("layout-async.json"))
         .build()
-        .expect("装配失败")
+        .expect("assembly failed")
 }
 
-/// 泵 frame_tick 直到没有运行中的任务。
+/// Pump frame_tick until no task is running.
 fn pump(app: &mut AppRuntime, timeout: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     loop {
@@ -648,31 +651,31 @@ fn pump(app: &mut AppRuntime, timeout: std::time::Duration) -> bool {
 }
 
 #[test]
-fn 阶段2_异步命令执行完成且记录终态() {
+fn phase2_async_command_completes_and_records_final_state() {
     let mut a = async_app();
     a.frame_tick(0.0);
     let inv = a.execute_command_tracked("t.async", &wb::CommandArgs::default());
     assert!(inv.is_ok());
-    let task_id = inv.task_id.expect("异步调用应返回任务句柄");
+    let task_id = inv.task_id.expect("an async invocation should return a task handle");
     assert!(inv.record.status == wb::InvocationStatus::Running);
     assert!(pump(&mut a, std::time::Duration::from_secs(10)));
     assert_eq!(a.host.tasks.get(task_id).unwrap().status, wb::TaskStatus::Succeeded);
     assert_eq!(a.host.tasks.get(task_id).unwrap().kind, wb::TaskKind::Async);
-    // 调用记录被任务终态事件推进
+    // The task's terminal event advanced the invocation record
     let rec = a
         .recent_invocations()
         .find(|r| r.task_id == Some(task_id))
-        .expect("应有调用记录");
+        .expect("there should be an invocation record");
     assert_eq!(rec.status, wb::InvocationStatus::Succeeded);
     assert_eq!(rec.execution, Some(wb::CommandExecution::Async));
 }
 
 #[test]
-fn 阶段2_异步命令协作取消() {
+fn phase2_async_command_cooperative_cancel() {
     let mut a = async_app();
     a.frame_tick(0.0);
     let inv = a.execute_command_tracked("t.async_long", &wb::CommandArgs::default());
-    let task_id = inv.task_id.expect("任务句柄");
+    let task_id = inv.task_id.expect("task handle");
     std::thread::sleep(std::time::Duration::from_millis(120));
     a.host.tasks.request_cancel(task_id);
     assert!(pump(&mut a, std::time::Duration::from_secs(10)));
@@ -680,12 +683,12 @@ fn 阶段2_异步命令协作取消() {
     let rec = a
         .recent_invocations()
         .find(|r| r.task_id == Some(task_id))
-        .expect("应有调用记录");
+        .expect("there should be an invocation record");
     assert_eq!(rec.status, wb::InvocationStatus::Cancelled);
 }
 
 #[test]
-fn 阶段2_执行器并发处理多个异步命令() {
+fn phase2_executor_runs_several_async_commands_concurrently() {
     let mut a = async_app();
     a.frame_tick(0.0);
     for _ in 0..4 {
@@ -699,17 +702,17 @@ fn 阶段2_执行器并发处理多个异步命令() {
         .all()
         .filter(|t| t.kind == wb::TaskKind::Async)
         .all(|t| t.status == wb::TaskStatus::Succeeded);
-    assert!(done, "并发异步任务应全部成功");
+    assert!(done, "all concurrent async tasks should succeed");
 }
 
 #[test]
-fn 阶段2_调用历史环形容量与未注册命令记录() {
+fn phase2_invocation_history_ring_capacity_and_unregistered_record() {
     let mut a = async_app();
     a.frame_tick(0.0);
     for _ in 0..105 {
         let _ = a.execute_command("t.ping", &wb::CommandArgs::default());
     }
-    assert_eq!(a.recent_invocations().count(), 100, "历史应为环形缓冲");
+    assert_eq!(a.recent_invocations().count(), 100, "the history should be a ring buffer");
     let inv = a.execute_command_tracked("no.such", &wb::CommandArgs::default());
     assert!(!inv.is_ok());
     assert_eq!(inv.record.status, wb::InvocationStatus::Failed);
@@ -717,7 +720,7 @@ fn 阶段2_调用历史环形容量与未注册命令记录() {
 }
 
 #[test]
-fn 阶段2_文档修订号查询() {
+fn phase2_document_revision_query() {
     let mut a = async_app();
     a.frame_tick(0.0);
     a.host
@@ -736,9 +739,9 @@ fn 阶段2_文档修订号查询() {
         .unwrap();
     let id = a.host.docs.create(&wb::DocumentTypeId::new("t.doc"), "d").unwrap();
     assert_eq!(a.host.docs.revision(id), Some(0));
-    a.host.docs.edit::<u32>(id, "改", true, |v| *v += 1).unwrap();
+    a.host.docs.edit::<u32>(id, "Change", true, |v| *v += 1).unwrap();
     assert_eq!(a.host.docs.revision(id), Some(1));
-    assert_eq!(a.host.docs.revision(wb::DocumentId(4242)), None, "不存在的文档");
+    assert_eq!(a.host.docs.revision(wb::DocumentId(4242)), None, "no such document");
 }
 
 // ===================== RibbonBar（design.md §7） =====================
@@ -750,30 +753,30 @@ impl wb::Workbench for RibbonWb {
         wb::WorkbenchId::new("wb-ribbon")
     }
     fn init(&self, reg: &mut wb::Registry) {
-        // 显式 Tab：主页（合并平台默认）+ 工具
+        // Explicit tabs: Home (merged with the platform default) + Tools
         reg.add_ribbon_tab(
-            wb::RibbonTab::new("app.home", "主页")
+            wb::RibbonTab::new("app.home", "Home")
                 .from_source("wb-ribbon")
                 .groups(vec![
-                    wb::ToolbarGroup::new("r.file", "文件").items(vec![
+                    wb::ToolbarGroup::new("r.file", "File").items(vec![
                         wb::ToolbarItem::command("app.new_document"),
                     ]),
-                    wb::ToolbarGroup::new("r.edit", "编辑").items(vec![
+                    wb::ToolbarGroup::new("r.edit", "Edit").items(vec![
                         wb::ToolbarItem::command("app.undo"),
                     ]),
                 ]),
         );
         reg.add_ribbon_tab(
-            wb::RibbonTab::new("wb.tools", "工具")
+            wb::RibbonTab::new("wb.tools", "Tools")
                 .groups(vec![
-                    wb::ToolbarGroup::new("r.demo", "演示").items(vec![
+                    wb::ToolbarGroup::new("r.demo", "Demo").items(vec![
                         wb::ToolbarItem::command("test.cmd"),
                     ]),
                 ]),
         );
-        // legacy 组 → 默认 Tab
+        // Legacy group → default tab
         reg.add_toolbar_group(
-            wb::ToolbarGroup::new("r.legacy", "遗留")
+            wb::ToolbarGroup::new("r.legacy", "Legacy")
                 .from_source("wb-ribbon")
                 .items(vec![wb::ToolbarItem::command("test.cmd")]),
         );
@@ -781,31 +784,32 @@ impl wb::Workbench for RibbonWb {
 }
 
 fn ribbon_app() -> AppRuntime {
-    WorkbenchAppBuilder::new("test.ribbon", "Ribbon 测试产品")
+    WorkbenchAppBuilder::new("test.ribbon", "Ribbon Test Product")
         .with_workbench(RibbonWb)
         .with_workbench(TestWb)
         .with_layout_path(std::env::temp_dir().join("workbench-rs-test").join("layout-rb.json"))
         .build()
-        .expect("装配失败")
+        .expect("assembly failed")
 }
 
 #[test]
-fn ribbon_tab合并与legacy兼容() {
+fn ribbon_tab_merging_and_legacy_compatibility() {
     let a = ribbon_app();
     let ws = &a.host.ws;
     assert!(ws.ribbon.iter().any(|t| t.id.0 == "app.home"));
     assert!(ws.ribbon.iter().any(|t| t.id.0 == "wb.tools"));
     let home = ws.ribbon.iter().find(|t| t.id.0 == "app.home").unwrap();
     let ids: Vec<&str> = home.groups.iter().map(|g| g.id.0.as_str()).collect();
-    // legacy 组并入默认 Tab；平台「窗口」组也走 legacy 路径
+    // Legacy groups merge into the default tab; the platform's "View" group takes the legacy
+    // path too
     assert!(ids.contains(&"r.legacy"), "groups: {ids:?}");
     assert!(ids.contains(&"app.window"), "groups: {ids:?}");
-    // 主页 Tab 活动为默认
+    // The Home tab is active by default
     assert_eq!(ws.active_ribbon_tab, "app.home");
 }
 
 #[test]
-fn ribbon_活动tab切换与布局持久化() {
+fn ribbon_active_tab_switch_and_layout_persistence() {
     let mut a = ribbon_app();
     {
         let ws = &mut a.host.ws;
@@ -813,13 +817,13 @@ fn ribbon_活动tab切换与布局持久化() {
         assert_eq!(ws.active_ribbon_tab, "wb.tools");
         let saved = ws.save_layout();
         assert_eq!(saved.ribbon_active_tab.as_deref(), Some("wb.tools"));
-        // 注入未注册 Tab → 回落首个 Tab 并给出诊断（§6.5）
+        // An injected unregistered tab → falls back to the first tab with a diagnostic (§6.5)
         let mut saved2 = ws.save_layout();
         saved2.ribbon_active_tab = Some("ghost.tab".to_string());
         let skipped = ws.apply_layout(&saved2);
         assert!(skipped.iter().any(|m| m.contains("ghost.tab")));
-        assert_eq!(ws.active_ribbon_tab, "app.home", "回落首个 Tab");
-        // 正常恢复
+        assert_eq!(ws.active_ribbon_tab, "app.home", "falls back to the first tab");
+        // Normal restore
         let skipped = ws.apply_layout(&saved);
         assert!(skipped.is_empty());
         assert_eq!(ws.active_ribbon_tab, "wb.tools");
@@ -845,11 +849,11 @@ impl MemoryStorage {
 
 impl wb::StorageProvider for MemoryStorage {
     fn label(&self) -> &str {
-        "内存"
+        "Memory"
     }
     fn read(&self, key: &str) -> wb::StorageFuture<Vec<u8>> {
         let file = self.files.lock().unwrap().get(key).cloned();
-        Box::pin(std::future::ready(file.ok_or_else(|| "没有这个文件".to_string())))
+        Box::pin(std::future::ready(file.ok_or_else(|| "No such file".to_string())))
     }
     fn write(&self, key: &str, bytes: Vec<u8>) -> wb::StorageFuture<()> {
         self.files.lock().unwrap().insert(key.to_string(), bytes);
@@ -878,21 +882,21 @@ impl wb::StorageProvider for MemoryStorage {
     }
 }
 
-/// 泵 frame_tick 直到在途文件读写的结果都已应用。
+/// Pump frame_tick until the results of in-flight file reads/writes are all applied.
 fn pump_files(app: &mut AppRuntime) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while app.pending_io() > 0 {
-        assert!(std::time::Instant::now() < deadline, "文件读写超时");
+        assert!(std::time::Instant::now() < deadline, "file I/O timed out");
         app.frame_tick(0.01);
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
 
 #[test]
-fn 存储_经提供者保存并重新打开() {
+fn storage_save_through_provider_and_reopen() {
     let memory = std::sync::Arc::new(MemoryStorage::default());
-    let mut app = builder().with_storage("mem", memory.clone()).build().expect("装配失败");
-    let doc = app.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), "未命名").unwrap();
+    let mut app = builder().with_storage("mem", memory.clone()).build().expect("assembly failed");
+    let doc = app.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), "Untitled").unwrap();
     app.host.docs.commit(doc, "edit", true, Box::new(TestDoc)).unwrap();
 
     let location = wb::Location::new("mem", "projects/part.shapes");
@@ -902,7 +906,7 @@ fn 存储_经提供者保存并重新打开() {
         Some(location.clone()),
     );
     assert!(!matches!(started, wb::CommandResult::Failed { .. }));
-    assert!(app.host.docs.get(doc).unwrap().dirty, "写入完成前仍是未保存");
+    assert!(app.host.docs.get(doc).unwrap().dirty, "still unsaved until the write completes");
     pump_files(&mut app);
     assert!(memory.files.lock().unwrap().contains_key("projects/part.shapes"));
     let saved = app.host.docs.get(doc).unwrap();
@@ -913,13 +917,13 @@ fn 存储_经提供者保存并重新打开() {
     let mut ctx = wb::CommandCtx::new(&mut app);
     workbench_core::platform_cmds::open_document(&mut ctx, location.clone());
     pump_files(&mut app);
-    let opened = app.host.docs.active().expect("打开的文档成为活动文档");
+    let opened = app.host.docs.active().expect("the opened document becomes active");
     assert_ne!(opened.id, doc);
     assert_eq!(opened.location.as_ref(), Some(&location));
 }
 
 #[test]
-fn 存储_未注册的提供者记录错误() {
+fn storage_unregistered_provider_logs_error() {
     let mut app = app();
     workbench_core::platform_cmds::open_document(
         &mut wb::CommandCtx::new(&mut app),
@@ -931,18 +935,18 @@ fn 存储_未注册的提供者记录错误() {
         .host
         .log
         .entries()
-        .any(|e| e.message.contains("没有 `nowhere` 存储")));
+        .any(|e| e.message.contains("no `nowhere` storage")));
 }
 
 #[test]
-fn 自动保存_崩溃后恢复且干净退出后清空() {
+fn autosave_recovers_after_crash_and_clears_after_clean_exit() {
     let dir = std::env::temp_dir().join(format!("workbench-rs-autosave-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let session = || builder().with_layout_path(dir.join("layout.json")).build().unwrap();
 
     // Session 1 autosaves a dirty document, then crashes: no clean-exit marker.
     let mut a = session();
-    let doc = a.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), "草稿").unwrap();
+    let doc = a.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), "Draft").unwrap();
     a.host.docs.commit(doc, "edit", true, Box::new(TestDoc)).unwrap();
     assert_eq!(a.autosave_now(), Ok(1));
     let state = a.state().clone();
@@ -951,7 +955,7 @@ fn 自动保存_崩溃后恢复且干净退出后清空() {
 
     // Session 2 recovers it (dirty, no file), autosaves again, exits cleanly.
     let mut b = session();
-    let recovered: Vec<_> = b.host.docs.docs().filter(|d| d.title == "[恢复] 草稿").collect();
+    let recovered: Vec<_> = b.host.docs.docs().filter(|d| d.title == "[Recovered] Draft").collect();
     assert_eq!(recovered.len(), 1);
     assert!(recovered[0].dirty && recovered[0].location.is_none());
     assert_eq!(b.autosave_now(), Ok(1));
@@ -960,7 +964,7 @@ fn 自动保存_崩溃后恢复且干净退出后清空() {
     // Session 3 follows a clean exit: nothing is recovered, and session 2's
     // autosave is cleared rather than kept for some later crash.
     let c = session();
-    assert!(!c.host.docs.docs().any(|d| d.title.starts_with("[恢复]")));
+    assert!(!c.host.docs.docs().any(|d| d.title.starts_with("[Recovered]")));
     assert!(c.state().keys("autosave/").is_empty());
     drop(c);
     let _ = std::fs::remove_dir_all(&dir);
@@ -977,7 +981,7 @@ fn listing(app: &AppRuntime) -> Vec<String> {
 }
 
 #[test]
-fn 存储_应用内选择器打开与另存() {
+fn storage_in_app_picker_open_and_save_as() {
     use workbench_core::file_picker;
 
     let memory = std::sync::Arc::new(MemoryStorage::with_files(&[
@@ -986,14 +990,14 @@ fn 存储_应用内选择器打开与另存() {
         "top.shapes",
     ]));
     // A provider without a native dialog: open/save use the in-app picker.
-    let mut app = builder().with_storage("mem", memory.clone()).build().expect("装配失败");
+    let mut app = builder().with_storage("mem", memory.clone()).build().expect("assembly failed");
 
     // Open: the picker lists the root, folders first, files filtered by type.
     app.execute_command("app.open_document", &wb::CommandArgs::default());
     pump_files(&mut app);
     assert_eq!(listing(&app), ["projects/", "top.shapes"]);
     let picker = app.host.ws.file_picker.as_ref().unwrap();
-    assert_eq!(picker.sources, [("mem".to_string(), "内存".to_string())]);
+    assert_eq!(picker.sources, [("mem".to_string(), "Memory".to_string())]);
     let folder = picker.listing.as_ref().unwrap().as_ref().unwrap()[0].clone();
     file_picker::navigate(&mut wb::CommandCtx::new(&mut app), |p| p.enter(&folder));
     pump_files(&mut app);
@@ -1013,11 +1017,11 @@ fn 存储_应用内选择器打开与另存() {
     assert_eq!(picker.save.as_deref(), Some("part.shapes"));
     let created = app.execute_command(
         file_picker::NEW_FOLDER,
-        &wb::CommandArgs::new().with("value", "副本"),
+        &wb::CommandArgs::new().with("value", "copies"),
     );
     assert!(!matches!(created, wb::CommandResult::Failed { .. }), "{created:?}");
     pump_files(&mut app);
-    assert_eq!(listing(&app), ["projects/", "副本/", "top.shapes"]);
+    assert_eq!(listing(&app), ["copies/", "projects/", "top.shapes"]);
     let target = file_picker::target(&mut wb::CommandCtx::new(&mut app), "copy").unwrap();
     assert_eq!(target, wb::Location::new("mem", "copy.shapes"));
     app.finish_pick(Some(target.clone()));

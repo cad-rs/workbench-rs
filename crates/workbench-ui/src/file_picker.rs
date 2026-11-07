@@ -46,7 +46,7 @@ pub(crate) fn create_name_input(
             save(&core, &input.read(cx).value());
             cx.notify();
         }
-        // The save button turns into "覆盖" as the name meets an existing file.
+        // The save button turns into "Overwrite" as the name meets an existing file.
         InputEvent::Change => cx.notify(),
         _ => {}
     });
@@ -65,18 +65,32 @@ pub(crate) fn overlay(
         let picker = guard.host.ws.file_picker.as_ref()?;
         let host = &guard.host;
         Snap {
-            title: host.tr(if picker.save.is_some() { "保存文档" } else { "打开文档" }),
+            title: host.tr(if picker.save.is_some() { "Save Document" } else { "Open Document" }),
             overwrite: typed
                 .as_deref()
                 .is_some_and(|name| picker.existing(&picker.file_name(name)).is_some()),
-            sources: picker.sources.clone(),
+            // Source labels (and the root crumb, which is one) are UI text;
+            // folder names are the user's and stay as they are.
+            sources: picker
+                .sources
+                .iter()
+                .map(|(id, label)| (id.clone(), host.tr(label)))
+                .collect(),
             provider: picker.provider.clone(),
-            trail: picker.trail.iter().map(|(_, name)| name.clone()).collect(),
+            trail: picker
+                .trail
+                .iter()
+                .enumerate()
+                .map(|(depth, (_, name))| if depth == 0 { host.tr(name) } else { name.clone() })
+                .collect(),
             listing: picker.listing.clone(),
-            new_folder: host.tr("新建文件夹"),
-            cancel: host.tr("取消"),
-            confirm: host.tr(if picker.save.is_some() { "保存" } else { "打开" }),
-            overwrite_label: host.tr("覆盖"),
+            new_folder: host.tr("New Folder"),
+            cancel: host.tr("Cancel"),
+            confirm: host.tr(if picker.save.is_some() { "Save" } else { "Open" }),
+            overwrite_label: host.tr("Overwrite"),
+            loading: host.tr("Loading…"),
+            empty: host.tr("(empty)"),
+            open_hint: host.tr("Click a file to open it"),
         }
     };
     Some(render(snap, core, name_input, cx).into_any_element())
@@ -95,6 +109,9 @@ struct Snap {
     cancel: String,
     confirm: String,
     overwrite_label: String,
+    loading: String,
+    empty: String,
+    open_hint: String,
 }
 
 fn lock(core: &SharedCore) -> std::sync::MutexGuard<'_, workbench_core::AppRuntime> {
@@ -228,9 +245,9 @@ fn render(
         .border_color(col(theme.placeholder))
         .bg(col(theme.placeholder));
     match &snap.listing {
-        None => rows = rows.child(note("正在读取…", muted)),
+        None => rows = rows.child(note(&snap.loading, muted)),
         Some(Err(error)) => rows = rows.child(note(error, col(wb::Color::RED))),
-        Some(Ok(entries)) if entries.is_empty() => rows = rows.child(note("（空）", muted)),
+        Some(Ok(entries)) if entries.is_empty() => rows = rows.child(note(&snap.empty, muted)),
         Some(Ok(entries)) => {
             for (i, entry) in entries.iter().enumerate() {
                 rows = rows.child(entry_row(i, entry, &snap, core, name_input, cx));
@@ -265,10 +282,13 @@ fn render(
             );
         }
         None => {
-            footer = footer
-                .child(
-                    div().flex_1().text_size(px(11.0)).text_color(muted).child("单击文件打开"),
-                );
+            footer = footer.child(
+                div()
+                    .flex_1()
+                    .text_size(px(11.0))
+                    .text_color(muted)
+                    .child(snap.open_hint.clone()),
+            );
         }
     }
     footer = footer.child(

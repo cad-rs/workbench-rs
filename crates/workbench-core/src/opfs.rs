@@ -21,7 +21,7 @@ pub(crate) struct Opfs;
 
 impl api::StorageProvider for Opfs {
     fn label(&self) -> &str {
-        "浏览器存储"
+        "Browser storage"
     }
 
     fn read(&self, key: &str) -> api::StorageFuture<Vec<u8>> {
@@ -39,7 +39,7 @@ impl api::StorageProvider for Opfs {
             let handle = file_handle(&key, true).await?;
             // Safari only gained writable streams on the page's thread in 2025.
             if !has_method(&handle, "createWritable") {
-                return Err("这个浏览器不支持写入浏览器存储".to_string());
+                return Err("This browser can't write to browser storage".to_string());
             }
             let stream: FileSystemWritableFileStream = resolve(handle.create_writable()).await?;
             JsFuture::from(stream.write_with_u8_array(&bytes).map_err(js_error)?)
@@ -84,7 +84,7 @@ async fn dir_handle(path: &str, create: bool) -> Result<FileSystemDirectoryHandl
     let storage = web_sys::window()
         .map(|window| window.navigator().storage())
         .filter(|storage| has_method(storage, "getDirectory"))
-        .ok_or_else(|| "这个浏览器没有浏览器存储（OPFS）".to_string())?;
+        .ok_or_else(|| "This browser has no browser storage (OPFS)".to_string())?;
     let mut dir: FileSystemDirectoryHandle = resolve(storage.get_directory()).await?;
     let options = FileSystemGetDirectoryOptions::new();
     options.set_create(create);
@@ -116,10 +116,10 @@ fn js_error(error: JsValue) -> String {
         return format!("{error:?}");
     };
     match error.name().as_str() {
-        "NotFoundError" => "找不到".to_string(),
-        "TypeMismatchError" => "同名的文件与文件夹冲突".to_string(),
-        "QuotaExceededError" => "浏览器存储空间不足".to_string(),
-        "NoModificationAllowedError" => "文件正被其他标签页使用".to_string(),
+        "NotFoundError" => "not found".to_string(),
+        "TypeMismatchError" => "a file and a folder have the same name".to_string(),
+        "QuotaExceededError" => "browser storage is full".to_string(),
+        "NoModificationAllowedError" => "the file is in use by another tab".to_string(),
         _ => error.message(),
     }
 }

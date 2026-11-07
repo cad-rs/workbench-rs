@@ -1,6 +1,7 @@
-//! 平台内置命令（design.md §12.1 文档生命周期 + §12.2 撤销重做）。
+//! Platform built-in commands (design.md §12.1 document lifecycle + §12.2 undo/redo).
 //!
-//! 命令通过 AppServices 门面操作平台，不触碰 GUI；快捷键绑定在这里集中登记。
+//! Commands operate the platform through the AppServices facade and never touch the GUI;
+//! hotkey bindings are registered here in one place.
 
 use workbench_api as api;
 use api::{
@@ -25,99 +26,108 @@ pub const ACCOUNT_LOGIN: &str = "app.account.login";
 pub const ACCOUNT_CANCEL_LOGIN: &str = "app.account.cancel_login";
 pub const ACCOUNT_LOGOUT: &str = "app.account.logout";
 
-/// Built-in locale tables. Convention: the source-language string (the one
-/// hardcoded at the call site) is the key — `zh-CN` shows the original, `en`
-/// maps it to English (Qt tr() style). Display sites call `host.tr(key)`;
-/// a missing key renders the key itself, so untranslated strings degrade to
-/// the source text instead of blanking the UI.
+/// The built-in Chinese UI (`ui.locale = "zh-CN"`). The English strings at
+/// the call sites are the keys (Qt tr() style): display sites call
+/// `host.tr(key)`, and a key without an entry renders as written.
 fn register_builtin_locales(registry: &mut Registry) {
     registry.register_locales(
-        "en",
+        "zh-CN",
         [
             // Document lifecycle commands.
-            ("新建文档", "New Document"),
-            ("打开文档…", "Open Document…"),
-            ("保存文档", "Save Document"),
-            ("另存为…", "Save As…"),
-            ("导入…", "Import…"),
-            ("导出…", "Export…"),
-            ("新建文件夹", "New Folder"),
-            ("撤销", "Undo"),
-            ("重做", "Redo"),
-            ("关闭当前标签", "Close Tab"),
-            ("折叠/展开 Ribbon", "Collapse/Expand Ribbon"),
+            ("New Document", "新建文档"),
+            ("Open Document…", "打开文档…"),
+            ("Open Document", "打开文档"),
+            ("Save Document", "保存文档"),
+            ("Save", "保存"),
+            ("Save As…", "另存为…"),
+            ("Import…", "导入…"),
+            ("Export…", "导出…"),
+            ("Undo", "撤销"),
+            ("Redo", "重做"),
+            ("Close Tab", "关闭当前标签"),
+            ("Collapse/Expand Ribbon", "折叠/展开 Ribbon"),
             // Plugin & settings commands.
-            ("禁用插件", "Disable Plugin"),
-            ("立即自动保存", "Save All Now"),
-            ("修改设置", "Change Setting"),
-            ("关于", "About"),
-            ("显示/隐藏 ", "Show/Hide "),
+            ("Disable Plugin", "禁用插件"),
+            ("Autosave Now", "立即自动保存"),
+            ("Change Setting", "修改设置"),
+            ("About", "关于"),
+            ("Show/Hide ", "显示/隐藏 "),
             // Ribbon groups & tabs.
-            ("窗口", "View"),
-            ("帮助", "Help"),
-            ("主页", "Home"),
-            ("常规", "General"),
-            ("外观", "Appearance"),
+            ("View", "窗口"),
+            ("Help", "帮助"),
+            ("Home", "主页"),
+            ("General", "常规"),
+            ("Appearance", "外观"),
             // Panel titles.
-            ("诊断", "Diagnostics"),
-            ("插件", "Plugins"),
-            ("设置", "Settings"),
-            ("欢迎", "Welcome"),
+            ("Diagnostics", "诊断"),
+            ("Plugins", "插件"),
+            ("Settings", "设置"),
+            ("Welcome", "欢迎"),
             // Settings panel rows.
-            ("语言", "Language"),
-            ("主题", "Theme"),
-            ("深色", "Dark"),
-            ("浅色", "Light"),
-            ("强调色", "Accent color"),
-            ("自动保存间隔（秒）", "Autosave interval (s)"),
+            ("Language", "语言"),
+            ("Theme", "主题"),
+            ("Dark", "深色"),
+            ("Light", "浅色"),
+            ("Accent color", "强调色"),
+            ("Autosave interval (s)", "自动保存间隔（秒）"),
             // Settings values / controls.
-            ("开", "On"),
-            ("关", "Off"),
+            ("On", "开"),
+            ("Off", "关"),
             // Diagnostics panel.
-            ("运行时", "Runtime"),
-            ("产品", "Product"),
-            ("（见窗口标题）", "(see window title)"),
-            ("GUI 后端", "GUI backend"),
-            ("（未标注）", "(unlabeled)"),
-            ("运行时长", "Uptime"),
-            ("秒", "s"),
-            ("帧统计", "Frame stats"),
-            ("ms/帧（最近 ", "ms/frame (recent "),
-            ("文档与任务", "Documents & tasks"),
-            ("文档数", "Documents"),
-            ("未保存", "Unsaved"),
-            ("个", ""),
-            ("后台任务", "Background tasks"),
-            ("运行 ", "running "),
-            (" / 累计 ", " / total "),
-            ("自动保存", "Autosave"),
-            ("间隔", "Interval"),
-            ("秒（settings.json 可调）", "s (tunable in settings.json)"),
-            ("已自动保存", "Autosaved"),
-            ("次", ""),
+            ("Runtime", "运行时"),
+            ("Product", "产品"),
+            ("(see window title)", "（见窗口标题）"),
+            ("GUI backend", "GUI 后端"),
+            ("(unlabeled)", "（未标注）"),
+            ("Uptime", "运行时长"),
+            ("s", "秒"),
+            ("Frame stats", "帧统计"),
+            ("ms/frame (recent ", "ms/帧（最近 "),
+            ("Documents & tasks", "文档与任务"),
+            ("Documents", "文档数"),
+            ("Unsaved", "未保存"),
+            ("Background tasks", "后台任务"),
+            ("running ", "运行 "),
+            (" / total ", " / 累计 "),
+            ("Autosave", "自动保存"),
+            ("Interval", "间隔"),
+            ("s (tunable in settings.json)", "秒（settings.json 可调）"),
+            ("Autosaved", "已自动保存"),
             // Plugins panel.
-            ("没有已注册的插件", "No plugins registered"),
-            ("已装载", "Loaded"),
-            ("已禁用", "Disabled"),
-            ("已拒绝", "Rejected"),
-            ("禁用", "Disable"),
+            ("No plugins registered", "没有已注册的插件"),
+            ("Loaded", "已装载"),
+            ("Disabled", "已禁用"),
+            ("Rejected", "已拒绝"),
+            ("Disable", "禁用"),
             // About dialog.
-            ("版本", "Version"),
-            ("主页", "Home"),
-            ("支持", "Support"),
-            ("关闭", "Close"),
+            ("Version", "版本"),
+            ("Support", "支持"),
+            ("Close", "关闭"),
             // Window-state log lines.
-            ("已折叠", "Collapsed"),
-            ("已展开", "Expanded"),
+            ("Collapsed", "已折叠"),
+            ("Expanded", "已展开"),
             // Status bar.
-            ("文档：", "Doc: "),
-            ("（无）", "(none)"),
-            (" · 修订 r", " · rev r"),
-            ("模式：", "Mode: "),
-            ("取消", "Cancel"),
-            // Account chip (Phase 3).
-            ("登录", "Sign in"),
-            ("登出", "Sign out"),
+            ("Doc: ", "文档："),
+            ("(none)", "（无）"),
+            (" · rev r", " · 修订 r"),
+            ("Mode: ", "模式："),
+            ("Cancel", "取消"),
+            // Account chip.
+            ("Sign in", "登录"),
+            ("Sign out", "登出"),
+            // File picker.
+            ("Open", "打开"),
+            ("Overwrite", "覆盖"),
+            ("New Folder", "新建文件夹"),
+            ("Browser storage", "浏览器存储"),
+            ("Local files", "本地文件"),
+            ("Click a file to open it", "单击文件打开"),
+            ("Loading…", "正在读取…"),
+            ("(empty)", "（空）"),
+            // Other frontend text.
+            ("Edit Setting", "编辑设置"),
+            ("No open views", "没有打开的视图"),
+            ("Enter to save · Esc to cancel", "Enter 保存 · Esc 取消"),
         ],
     );
 }
@@ -125,18 +135,20 @@ fn register_builtin_locales(registry: &mut Registry) {
 /// Built-in setting specs: the settings panel renders rows from these and
 /// `app.settings.set` validates writes against them.
 fn register_builtin_settings(registry: &mut Registry) {
+    // English is the source language; products can default to another one
+    // through product.toml's `[i18n] default_locale`.
     registry.register_setting(SettingSpec {
         key: "ui.locale".into(),
-        label: "语言".into(),
-        group: "外观".into(),
-        kind: SettingKind::Enum(vec!["zh-CN".into(), "en".into()]),
-        default: serde_json::json!("zh-CN"),
+        label: "Language".into(),
+        group: "Appearance".into(),
+        kind: SettingKind::Enum(vec!["en".into(), "zh-CN".into()]),
+        default: serde_json::json!("en"),
         scope: SettingScope::User,
     });
     registry.register_setting(SettingSpec {
         key: "ui.theme".into(),
-        label: "主题".into(),
-        group: "外观".into(),
+        label: "Theme".into(),
+        group: "Appearance".into(),
         kind: SettingKind::Enum(vec!["dark".into(), "light".into()]),
         default: serde_json::json!("dark"),
         scope: SettingScope::User,
@@ -145,16 +157,16 @@ fn register_builtin_settings(registry: &mut Registry) {
     // build time when the product ships one.
     registry.register_setting(SettingSpec {
         key: "ui.accent".into(),
-        label: "强调色".into(),
-        group: "外观".into(),
+        label: "Accent color".into(),
+        group: "Appearance".into(),
         kind: SettingKind::Str,
         default: serde_json::json!("#338CF2"),
         scope: SettingScope::User,
     });
     registry.register_setting(SettingSpec {
         key: "autosave.interval_secs".into(),
-        label: "自动保存间隔（秒）".into(),
-        group: "常规".into(),
+        label: "Autosave interval (s)".into(),
+        group: "General".into(),
         kind: SettingKind::Int { min: 5, max: 3600, step: 5 },
         default: serde_json::json!(30),
         scope: SettingScope::User,
@@ -183,25 +195,26 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
     // implementations, so the frontend registers them before this runs; their
     // ids therefore already appear in `panel_ids` below.
 
-    // ---- 平台内置设置项 ----
+    // ---- Platform built-in settings ----
     register_builtin_settings(registry);
 
-    // ---- 平台内置文案资源表（en） ----
+    // ---- Platform built-in translations (zh-CN) ----
     register_builtin_locales(registry);
 
-    // ---- 插件管理命令 ----
+    // ---- Plugin management commands ----
     registry.register_command(
         CommandDef::sync(
             "app.plugins.disable",
-            "禁用插件",
+            "Disable Plugin",
             |ctx: &mut CommandCtx, args: &CommandArgs| {
                 let Some(id) = args.get("id") else {
-                    return CommandResult::failed("缺少参数 id");
+                    return CommandResult::failed("Missing argument: id");
                 };
                 match ctx.disable_plugin(id) {
-                    Ok(removed) => {
-                        CommandResult::done_with(format!("已禁用 {id}（移除 {} 条命令）", removed.len()))
-                    }
+                    Ok(removed) => CommandResult::done_with(format!(
+                        "Disabled {id} ({} commands removed)",
+                        removed.len()
+                    )),
                     Err(e) => CommandResult::failed(e),
                 }
             },
@@ -209,21 +222,21 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
         .enabled_when(|_| true),
     );
 
-    // ---- 自动保存命令 ----
+    // ---- Autosave command ----
     registry.register_command(
         CommandDef::sync(
             "app.autosave.now",
-            "立即自动保存",
+            "Autosave Now",
             |ctx: &mut CommandCtx, _args: &CommandArgs| match ctx.autosave_now() {
-                Ok(n) => CommandResult::done_with(format!("已自动保存 {n} 个文档")),
+                Ok(n) => CommandResult::done_with(format!("Autosaved {n} documents")),
                 Err(e) => CommandResult::failed(e),
             },
         ),
     );
 
-    // ---- 文档生命周期命令 ----    // 新建文档
+    // ---- Document lifecycle commands ----    // New document
     registry.register_command(
-        CommandDef::sync(NEW_DOCUMENT, "新建文档", |ctx: &mut CommandCtx, args: &CommandArgs| {
+        CommandDef::sync(NEW_DOCUMENT, "New Document", |ctx: &mut CommandCtx, args: &CommandArgs| {
             // `type` names a specific document type (the welcome page offers one
             // entry per type); without it the product's default type is used.
             let wanted = args
@@ -237,13 +250,13 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
                     .or_else(|| types.first().map(|t| t.id.clone()))
             };
             let Some(type_id) = type_id else {
-                return CommandResult::failed("产品没有注册任何文档类型");
+                return CommandResult::failed("The product registers no document types");
             };
             let count = ctx.host().docs.docs().count();
             let title = if count == 0 {
-                "未命名".to_string()
+                "Untitled".to_string()
             } else {
-                format!("未命名{}", count + 1)
+                format!("Untitled {}", count + 1)
             };
             let doc_id = match ctx.host().docs.create(&type_id, &title) {
                 Ok(id) => id,
@@ -252,31 +265,31 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
             ctx.host().docs.set_active(Some(doc_id));
             if let Some(vt) = preferred_view_of(ctx, doc_id) {
                 if let Err(e) = ctx.open_view(vt.as_str(), true) {
-                    ctx.host().log.warn(format!("打开视图失败: {e}"));
+                    ctx.host().log.warn(format!("Failed to open the view: {e}"));
                 }
             }
-            ctx.host().log.info(format!("已新建文档「{title}」"));
+            ctx.host().log.info(format!("Created document \"{title}\""));
             CommandResult::done()
         })
         .icon(crate::assets::icons::NEW)
         .hotkey(Hotkey::new(KeyCode::N).ctrl(true)),
     );
 
-    // 打开文档
+    // Open document
     registry.register_command(
-        CommandDef::sync(OPEN_DOCUMENT, "打开文档…", |ctx: &mut CommandCtx, _args: &CommandArgs| {
+        CommandDef::sync(OPEN_DOCUMENT, "Open Document…", |ctx: &mut CommandCtx, _args: &CommandArgs| {
             request_open_dialog(ctx);
-            CommandResult::done_with("已弹出文件对话框")
+            CommandResult::done_with("Opened the file dialog")
         })
         .icon(crate::assets::icons::OPEN)
         .hotkey(Hotkey::new(KeyCode::O).ctrl(true)),
     );
 
-    // 保存
+    // Save
     registry.register_command(
-        CommandDef::sync(SAVE_DOCUMENT, "保存", |ctx: &mut CommandCtx, _args: &CommandArgs| {
+        CommandDef::sync(SAVE_DOCUMENT, "Save", |ctx: &mut CommandCtx, _args: &CommandArgs| {
             let Some(doc_id) = ctx.active_document() else {
-                return CommandResult::failed("没有活动文档");
+                return CommandResult::failed("No active document");
             };
             let has_file = ctx
                 .host()
@@ -294,11 +307,11 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
         .enabled_when(|snap| snap.active_document.is_some()),
     );
 
-    // 另存为
+    // Save as
     registry.register_command(
-        CommandDef::sync(SAVE_DOCUMENT_AS, "另存为…", |ctx: &mut CommandCtx, _args: &CommandArgs| {
+        CommandDef::sync(SAVE_DOCUMENT_AS, "Save As…", |ctx: &mut CommandCtx, _args: &CommandArgs| {
             let Some(doc_id) = ctx.active_document() else {
-                return CommandResult::failed("没有活动文档");
+                return CommandResult::failed("No active document");
             };
             request_save_as_dialog(ctx, doc_id)
         })
@@ -306,19 +319,20 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
         .enabled_when(|snap| snap.active_document.is_some()),
     );
 
-    // 导入 / 导出：与用户设备之间传一份副本（Web 端是浏览器的文件选择与下载）
+    // Import / export: move a copy to or from the user's device (the browser's file chooser
+    // and downloads on the web)
     registry.register_command(CommandDef::sync(
         IMPORT_DOCUMENT,
-        "导入…",
+        "Import…",
         |ctx: &mut CommandCtx, _args: &CommandArgs| {
             request_import(ctx);
             CommandResult::done()
         },
     ));
     registry.register_command(
-        CommandDef::sync(EXPORT_DOCUMENT, "导出…", |ctx: &mut CommandCtx, _args: &CommandArgs| {
+        CommandDef::sync(EXPORT_DOCUMENT, "Export…", |ctx: &mut CommandCtx, _args: &CommandArgs| {
             let Some(doc_id) = ctx.active_document() else {
-                return CommandResult::failed("没有活动文档");
+                return CommandResult::failed("No active document");
             };
             request_export(ctx, doc_id)
         })
@@ -326,15 +340,15 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
     );
     crate::file_picker::register(registry);
 
-    // 撤销 / 重做
+    // Undo / redo
     registry.register_command(
-        CommandDef::sync(UNDO, "撤销", |ctx: &mut CommandCtx, _args: &CommandArgs| {
+        CommandDef::sync(UNDO, "Undo", |ctx: &mut CommandCtx, _args: &CommandArgs| {
             let Some(doc_id) = ctx.active_document() else {
-                return CommandResult::failed("没有活动文档");
+                return CommandResult::failed("No active document");
             };
             match ctx.host().docs.undo(doc_id) {
                 Ok(label) => {
-                    ctx.host().log.info(format!("已撤销「{label}」"));
+                    ctx.host().log.info(format!("Undid \"{label}\""));
                     CommandResult::done_with(label)
                 }
                 Err(e) => CommandResult::failed(e),
@@ -348,13 +362,13 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
     );
 
     registry.register_command(
-        CommandDef::sync(REDO, "重做", |ctx: &mut CommandCtx, _args: &CommandArgs| {
+        CommandDef::sync(REDO, "Redo", |ctx: &mut CommandCtx, _args: &CommandArgs| {
             let Some(doc_id) = ctx.active_document() else {
-                return CommandResult::failed("没有活动文档");
+                return CommandResult::failed("No active document");
             };
             match ctx.host().docs.redo(doc_id) {
                 Ok(label) => {
-                    ctx.host().log.info(format!("已重做「{label}」"));
+                    ctx.host().log.info(format!("Redid \"{label}\""));
                     CommandResult::done_with(label)
                 }
                 Err(e) => CommandResult::failed(e),
@@ -367,9 +381,9 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
         }),
     );
 
-    // 关闭活动中央标签
+    // Close the active center tab
     registry.register_command(
-        CommandDef::sync(CLOSE_ACTIVE_VIEW, "关闭当前标签", |ctx: &mut CommandCtx, _args: &CommandArgs| {
+        CommandDef::sync(CLOSE_ACTIVE_VIEW, "Close Tab", |ctx: &mut CommandCtx, _args: &CommandArgs| {
             match ctx.close_active_view() {
                 Ok(_) => CommandResult::done(),
                 Err(e) => CommandResult::failed(e),
@@ -378,53 +392,54 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
         .hotkey(Hotkey::new(KeyCode::W).ctrl(true)),
     );
 
-    // Ribbon 折叠切换（Ctrl+F1，仅开启时生效，ribbon-bar.md §4.5）
+    // Ribbon collapse toggle (Ctrl+F1, only when enabled, ribbon-bar.md §4.5)
     registry.register_command(
         CommandDef::sync(
             "app.toggle_ribbon_collapse",
-            "折叠/展开 Ribbon",
+            "Collapse/Expand Ribbon",
             |ctx: &mut CommandCtx, _args: &CommandArgs| {
                 let host = ctx.host();
                 if !host.ws.ribbon_collapse_enabled {
-                    return CommandResult::failed("Ribbon 折叠能力未开启");
+                    return CommandResult::failed("Ribbon collapsing is not enabled");
                 }
                 host.ws.ribbon_collapsed = !host.ws.ribbon_collapsed;
                 CommandResult::done_with(if host.ws.ribbon_collapsed {
-                    "已折叠"
+                    "Collapsed"
                 } else {
-                    "已展开"
+                    "Expanded"
                 })
             },
         )
         .hotkey(Hotkey::new(KeyCode::F1).ctrl(true)),
     );
 
-    // 设置写入：按注册的 spec 做类型校验与范围钳制，写入并立即落盘。
-    // CommandArgs 是字符串表；按 spec 的类型把字符串解析成 Value 再校验。
+    // Settings writes: type-checked and range-clamped against the registered spec, written and
+    // persisted at once. CommandArgs is a string table; the string is parsed into a Value by
+    // the spec's type, then validated.
     registry.register_command(
         CommandDef::sync(
             SETTINGS_SET,
-            "修改设置",
+            "Change Setting",
             |ctx: &mut CommandCtx, args: &CommandArgs| {
                 let Some(key) = args.get("key") else {
-                    return CommandResult::failed("缺少参数 key");
+                    return CommandResult::failed("Missing argument: key");
                 };
                 let Some(raw) = args.get("value") else {
-                    return CommandResult::failed("缺少参数 value");
+                    return CommandResult::failed("Missing argument: value");
                 };
                 let host = ctx.host();
                 let Some(spec) = host.setting_specs.iter().find(|s| s.key == key).cloned() else {
-                    return CommandResult::failed(format!("未注册的设置项: {key}"));
+                    return CommandResult::failed(format!("Unregistered setting: {key}"));
                 };
                 let parsed = match &spec.kind {
                     SettingKind::Bool => match raw {
                         "true" => serde_json::Value::Bool(true),
                         "false" => serde_json::Value::Bool(false),
-                        _ => return CommandResult::failed(format!("{raw} 不是布尔值")),
+                        _ => return CommandResult::failed(format!("{raw} is not a boolean")),
                     },
                     SettingKind::Int { .. } => match raw.parse::<i64>() {
                         Ok(n) => serde_json::Value::Number(n.into()),
-                        Err(_) => return CommandResult::failed(format!("{raw} 不是整数")),
+                        Err(_) => return CommandResult::failed(format!("{raw} is not an integer")),
                     },
                     SettingKind::Enum(_) | SettingKind::Str => {
                         serde_json::Value::String(raw.to_string())
@@ -437,7 +452,7 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
                 let host = ctx.host();
                 match host.settings.set(&spec.key, normalized.clone()) {
                     Ok(()) => {
-                        host.log.info(format!("[设置] {} = {normalized}", spec.key));
+                        host.log.info(format!("[Settings] {} = {normalized}", spec.key));
                         CommandResult::done_with(format!("{} = {normalized}", spec.label))
                     }
                     Err(e) => CommandResult::failed(e),
@@ -452,19 +467,19 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
     registry.register_command(
         CommandDef::sync(
             SETTINGS_EDIT_BEGIN,
-            "编辑设置",
+            "Edit Setting",
             |ctx: &mut CommandCtx, args: &CommandArgs| {
                 let Some(key) = args.get("key") else {
-                    return CommandResult::failed("缺少参数 key");
+                    return CommandResult::failed("Missing argument: key");
                 };
                 let host = ctx.host();
                 let Some(spec) = host.setting_specs.iter().find(|s| s.key == key).cloned() else {
-                    return CommandResult::failed(format!("未注册的设置项: {key}"));
+                    return CommandResult::failed(format!("Unregistered setting: {key}"));
                 };
                 // Free-form strings are the only editable-by-hand kind for
                 // now (bool/enum/int have dedicated controls).
                 if !matches!(spec.kind, SettingKind::Str) {
-                    return CommandResult::failed(format!("{} 不是文本设置项", spec.key));
+                    return CommandResult::failed(format!("{} is not a text setting", spec.key));
                 }
                 let buffer = host
                     .settings
@@ -481,18 +496,19 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
         .enabled_when(|_| true),
     );
 
-    // About 对话框：置位 workspace 标志，前端（workbench-ui）渲染对话框。
+    // The About dialog: sets a workspace flag; the frontend (workbench-ui) renders the dialog.
     registry.register_command(
-        CommandDef::sync(ABOUT, "关于", |ctx: &mut CommandCtx, _args: &CommandArgs| {
+        CommandDef::sync(ABOUT, "About", |ctx: &mut CommandCtx, _args: &CommandArgs| {
             ctx.host().ws.about_open = true;
             CommandResult::done()
         })
         .enabled_when(|_| true),
     );
 
-    // 每个面板的显示/隐藏命令 + “窗口”工具栏组（含平台自己的面板）
+    // A show/hide command per panel + the "View" toolbar group (including the platform's own
+    // panels)
     let all_panels: Vec<(String, String)> = panel_ids.to_vec();
-    let mut window_group = api::ToolbarGroup::new("app.window", "窗口");
+    let mut window_group = api::ToolbarGroup::new("app.window", "View");
     for (id, title) in &all_panels {
         let panel_id = id.clone();
         let pid = panel_id.clone();
@@ -500,7 +516,7 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
         registry.register_command(
             CommandDef::sync(
                 format!("{TOGGLE_PANEL_PREFIX}{id}"),
-                format!("显示/隐藏 {title}"),
+                format!("Show/Hide {title}"),
                 move |ctx: &mut CommandCtx, _args: &CommandArgs| match ctx.toggle_panel(&pid) {
                     Ok(_) => CommandResult::done(),
                     Err(e) => CommandResult::failed(e),
@@ -513,11 +529,11 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
     }
     registry.add_toolbar_group(window_group);
 
-    // “帮助”工具栏组：About 对话框入口（产品品牌信息）。
-    let mut help_group = api::ToolbarGroup::new("app.help", "帮助");
+    // The "Help" toolbar group: the About dialog entry (product branding info).
+    let mut help_group = api::ToolbarGroup::new("app.help", "Help");
     help_group
         .items
-        .push(api::ToolbarItem::labeled(ABOUT, "关于"));
+        .push(api::ToolbarItem::labeled(ABOUT, "About"));
     registry.add_toolbar_group(help_group);
 }
 
@@ -538,7 +554,7 @@ pub fn open_document(ctx: &mut CommandCtx, location: api::Location) {
             let title = location.file_stem();
             ctx.host().docs.open_bytes(&type_id, title, Some(location.clone()), &bytes)
         });
-        show_opened(&mut ctx, opened, format!("已打开 {location}"));
+        show_opened(&mut ctx, opened, format!("Opened {location}"));
     }));
 }
 
@@ -549,7 +565,7 @@ fn import_document(ctx: &mut CommandCtx, name: &str, bytes: &[u8]) {
         let title = api::storage::split_file_name(name).0;
         ctx.host().docs.open_bytes(&type_id, title, None, bytes)
     });
-    show_opened(ctx, opened, format!("已导入 {name}"));
+    show_opened(ctx, opened, format!("Imported {name}"));
 }
 
 /// Make a just-opened document active and show it in its preferred view; a
@@ -566,7 +582,7 @@ fn show_opened(ctx: &mut CommandCtx, opened: Result<api::DocumentId, String>, do
     ctx.host().log.info(done);
     if let Some(vt) = preferred_view_of(ctx, doc_id) {
         if let Err(e) = ctx.open_view(vt.as_str(), true) {
-            ctx.host().log.warn(format!("打开视图失败: {e}"));
+            ctx.host().log.warn(format!("Failed to open the view: {e}"));
         }
     }
 }
@@ -586,18 +602,19 @@ pub fn save_document(
     ctx.write_file(save.location.clone(), bytes, Box::new(move |app, written| {
         let host = app.host();
         match host.docs.finish_save(save, written) {
-            Ok(location) if save_as => host.log.info(format!("已另存为 {location}")),
-            Ok(location) => host.log.info(format!("已保存到 {location}")),
+            Ok(location) if save_as => host.log.info(format!("Saved as {location}")),
+            Ok(location) => host.log.info(format!("Saved to {location}")),
             Err(e) => host.log.error(e),
         }
     }));
     CommandResult::done()
 }
 
-/// 请平台在后台线程弹出“打开文档”对话框，选中后于 UI 线程打开。
+/// Ask the platform to show the "Open Document" dialog on a background thread, and open the
+/// pick on the UI thread.
 ///
-/// 阻塞式 OS 模态循环绝不能在 UI 线程执行（会重入 gpui 窗口过程、楔死
-/// 渲染循环），所以走 [`CommandCtx::request_file_dialog`]。
+/// A blocking OS modal loop must never run on the UI thread (it re-enters gpui's window
+/// procedure and wedges the render loop), hence [`CommandCtx::request_file_dialog`].
 fn request_open_dialog(ctx: &mut CommandCtx) {
     let exts = all_extensions(ctx);
     ctx.request_file_dialog(exts, None, Box::new(|ctx, picked| {
@@ -625,10 +642,11 @@ fn file_name_of(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> Option<(String
     Some((name, exts))
 }
 
-/// 请平台在后台线程弹出“另存为”对话框，选中后于 UI 线程落盘。
+/// Ask the platform to show the "Save As" dialog on a background thread, and write the file
+/// from the UI thread once picked.
 fn request_save_as_dialog(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResult {
     let Some((default_name, exts)) = file_name_of(ctx, doc_id) else {
-        return CommandResult::failed("文档不存在");
+        return CommandResult::failed("No such document");
     };
     ctx.request_file_dialog(exts, Some(default_name), Box::new(move |ctx, picked| {
         let Some(location) = picked else {
@@ -639,7 +657,7 @@ fn request_save_as_dialog(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> Comm
             cmd.host().log.error(error);
         }
     }));
-    CommandResult::done_with("已弹出文件对话框")
+    CommandResult::done_with("Opened the file dialog")
 }
 
 /// Import: bring in a copy of a file from the user's device (the browser's
@@ -677,7 +695,7 @@ fn request_import(ctx: &mut CommandCtx) {
 /// web, the file dialog on the desktop). The document stays where it is.
 fn request_export(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResult {
     let Some((name, exts)) = file_name_of(ctx, doc_id) else {
-        return CommandResult::failed("文档不存在");
+        return CommandResult::failed("No such document");
     };
     #[cfg(target_arch = "wasm32")]
     {
@@ -688,7 +706,7 @@ fn request_export(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResul
             .encode(doc_id)
             .and_then(|bytes| crate::web_files::download(&name, &bytes));
         match exported {
-            Ok(()) => CommandResult::done_with(format!("已导出 {name}")),
+            Ok(()) => CommandResult::done_with(format!("Exported {name}")),
             Err(e) => CommandResult::failed(e),
         }
     }
@@ -705,12 +723,12 @@ fn request_export(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResul
             };
             ctx.write_file(location.clone(), bytes, Box::new(move |app, written| {
                 match written {
-                    Ok(()) => app.host().log.info(format!("已导出到 {location}")),
+                    Ok(()) => app.host().log.info(format!("Exported to {location}")),
                     Err(e) => app.host().log.error(e),
                 }
             }));
         }));
-        CommandResult::done_with("已弹出文件对话框")
+        CommandResult::done_with("Opened the file dialog")
     }
 }
 

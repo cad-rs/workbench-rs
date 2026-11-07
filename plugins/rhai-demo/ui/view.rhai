@@ -15,10 +15,10 @@ fn state_schema() {
 fn view(ctx) {
     column([
         label::Label(#{
-            text: "Rhai 脚本视图（中央标签）",
-            description: "由 register_view 注册，内容与脚本面板同为声明式 UiNode",
+            text: "Rhai Script View (central tab)",
+            description: "Registered with register_view; like the script panel, its content is a declarative UiNode",
         }),
-        label::Label(#{ text: `浏览次数：${ctx.get_state("count")}` }),
+        label::Label(#{ text: `Views: ${ctx.get_state("count")}` }),
     ]).with_style(
         style()
             .gap(px(12))

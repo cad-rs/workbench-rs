@@ -1,11 +1,11 @@
-//! 插件清单（`plugin.toml`）解析与校验。
+//! Plugin manifest (`plugin.toml`) parsing and validation.
 //!
-//! 结构与语言无关：`entry_point` 指向 Rhai 脚本文件（如 `plugin.rhai`），
-//! 可选地用 `:` 指定入口函数名（缺省为 `register`）。
+//! The structure is language-neutral: `entry_point` points at a Rhai script file (e.g.
+//! `plugin.rhai`), optionally naming the entry function after a `:` (default `register`).
 
 use serde::Deserialize;
 
-/// Host API 版本（与本 crate 发布周期一致）。
+/// Host API version (follows this crate's release cycle).
 pub const HOST_API_VERSION: &str = "1";
 
 #[derive(Debug, Deserialize)]
@@ -48,7 +48,7 @@ pub struct Permissions {
     pub network: Option<bool>,
 }
 
-/// 拆分入口点：`plugin.rhai` 或 `plugin.rhai:register`。
+/// Split an entry point: `plugin.rhai` or `plugin.rhai:register`.
 pub fn split_entry_point(entry: &str) -> (String, String) {
     match entry.split_once(':') {
         Some((file, func)) => (file.to_string(), func.to_string()),
@@ -56,10 +56,11 @@ pub fn split_entry_point(entry: &str) -> (String, String) {
     }
 }
 
-/// 解析并校验清单；失败返回可读错误（装载方记录为拒绝原因）。
+/// Parse and validate a manifest; on failure returns a readable error (the loader records it
+/// as the rejection reason).
 pub fn parse(text: &str) -> Result<PluginManifest, String> {
     let manifest: PluginManifest =
-        toml::from_str(text).map_err(|e| format!("清单解析失败: {e}"))?;
+        toml::from_str(text).map_err(|e| format!("failed to parse manifest: {e}"))?;
     validate(&manifest)?;
     Ok(manifest)
 }
@@ -67,41 +68,41 @@ pub fn parse(text: &str) -> Result<PluginManifest, String> {
 fn validate(manifest: &PluginManifest) -> Result<(), String> {
     let id = &manifest.plugin.id;
     if id.is_empty() {
-        return Err("插件 ID 为空".to_string());
+        return Err("plugin ID is empty".to_string());
     }
     if !id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
     {
-        return Err(format!("插件 ID 含非法字符: {id}"));
+        return Err(format!("plugin ID contains invalid characters: {id}"));
     }
     if manifest.plugin.api_version != HOST_API_VERSION {
         return Err(format!(
-            "API 版本不匹配: 插件 {}，宿主 {}",
+            "API version mismatch: plugin {}, host {}",
             manifest.plugin.api_version, HOST_API_VERSION
         ));
     }
     if !manifest.plugin.entry_point.ends_with(".rhai") {
         return Err(format!(
-            "entry_point 必须是 .rhai 脚本: {}",
+            "entry_point must be a .rhai script: {}",
             manifest.plugin.entry_point
         ));
     }
     for module in &manifest.plugin.modules {
         if module.is_empty() {
-            return Err("modules 含空模块 ID".to_string());
+            return Err("modules contains an empty module ID".to_string());
         }
         if !module
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
         {
-            return Err(format!("模块 ID 含非法字符: {module}"));
+            return Err(format!("module ID contains invalid characters: {module}"));
         }
     }
     if let Some(tier) = &manifest.plugin.tier {
         if workbench_api::LicenseTier::parse(tier).is_none() {
             return Err(format!(
-                "tier 取值未知: {tier}（可选 trial/pro/oem）"
+                "unknown tier: {tier} (one of trial/pro/oem)"
             ));
         }
     }

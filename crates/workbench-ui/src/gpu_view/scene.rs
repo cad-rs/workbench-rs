@@ -1,6 +1,6 @@
-//! wgpu 渲染核心：自定义 WGSL shader、实体/线段两条管线、
-//! 场景缓冲与 uniform；渲染目标由 `present` 按平台提供。
-//! 移植自 gpui-wgpu 参考实现（javagg/gpui-demo）。
+//! wgpu render core: a custom WGSL shader, two pipelines (solids and lines),
+//! scene buffers and uniforms; `present` provides the render target per platform.
+//! Ported from the gpui-wgpu reference implementation (javagg/gpui-demo).
 
 use super::mesh::{self, LineVertex, Mesh, SolidVertex};
 use glam::{Mat4, Vec3};
@@ -9,12 +9,12 @@ use wgpu::util::DeviceExt;
 const SHADER_SRC: &str = r#"
 struct Uniforms {
     view_proj: mat4x4<f32>,
-    eye: vec4<f32>,     // xyz = 相机位置, w = 线段深度偏移
-    light: vec4<f32>,   // xyz = 光照方向
+    eye: vec4<f32>,     // xyz = camera position, w = line depth bias
+    light: vec4<f32>,   // xyz = light direction
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
-// ---- 实体管线 ----
+// ---- Solid pipeline ----
 struct SolidIn {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -45,7 +45,7 @@ fn fs_solid(inp: SolidOut) -> @location(0) vec4<f32> {
     let h = normalize(l + v);
     var lambert = max(dot(n, l), 0.0);
     if (lambert <= 0.0) {
-        // 双面补光，避免背光面死黑
+        // Two-sided fill light, so faces turned away from the light are not pitch black
         lambert = max(dot(-n, l), 0.0) * 0.30;
     }
     let spec = pow(max(dot(n, h), 0.0), 40.0) * 0.22;
@@ -53,7 +53,7 @@ fn fs_solid(inp: SolidOut) -> @location(0) vec4<f32> {
     return vec4<f32>(col, 1.0);
 }
 
-// ---- 线段管线 ----
+// ---- Line pipeline ----
 struct LineIn {
     @location(0) pos: vec3<f32>,
     @location(1) color: vec4<f32>,
@@ -66,7 +66,7 @@ struct LineOut {
 @vertex
 fn vs_line(inp: LineIn) -> LineOut {
     var clip = u.view_proj * vec4<f32>(inp.pos, 1.0);
-    clip.z -= u.eye.w * clip.w; // 轻微向视点方向偏移，避免与实体面深度冲突
+    clip.z -= u.eye.w * clip.w; // nudge toward the eye to avoid z-fighting with solid faces
     var out: LineOut;
     out.clip = clip;
     out.color = inp.color;
@@ -79,7 +79,7 @@ fn fs_line(inp: LineOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// 每帧的全局 uniform（WGSL 对齐：mat4 + 2×vec4 = 192 字节）
+/// Per-frame global uniforms (WGSL alignment: mat4 + 2×vec4 = 192 bytes)
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Uniforms {
@@ -98,7 +98,7 @@ impl Uniforms {
     }
 }
 
-/// 每个视口私有的 uniform 缓冲与 bind group
+/// Each viewport's private uniform buffer and bind group
 pub struct ViewState {
     pub uniform_buf: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
@@ -135,7 +135,8 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// 构建演示零件：底板 + 中心凸台 + 四个定位销，并生成网格、特征边、参考网格线。
+    /// Builds the demo part: a base plate + a central boss + four locating pins, and generates the
+    /// mesh, feature edges and reference grid lines.
     pub fn new(device: &wgpu::Device) -> Self {
         let plate_color = Vec3::new(0.58, 0.61, 0.66);
         let boss_color = Vec3::new(0.66, 0.60, 0.52);
@@ -143,15 +144,15 @@ impl Scene {
 
         let mut model = Mesh::default();
 
-        // 底板 140 × 16 × 90
+        // Base plate 140 × 16 × 90
         let plate = Mesh::box_mesh(Vec3::new(0.0, 8.0, 0.0), Vec3::new(140.0, 16.0, 90.0), plate_color);
         model.merge(&plate);
 
-        // 中心凸台 Ø56 × 46
+        // Central boss Ø56 × 46
         let boss = Mesh::cylinder_y(Vec3::new(0.0, 16.0, 0.0), 28.0, 46.0, 48, boss_color);
         model.merge(&boss);
 
-        // 四个定位销 Ø10 × 10
+        // Four locating pins Ø10 × 10
         for (sx, sz) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
             let pin = Mesh::cylinder_y(
                 Vec3::new(sx * 55.0, 16.0, sz * 30.0),
@@ -163,18 +164,19 @@ impl Scene {
             model.merge(&pin);
         }
 
-        // 特征边（法线夹角 > 30° 或边界边）
+        // Feature edges (normal angle > 30°, or boundary edges)
         let mut lines: Vec<LineVertex> =
             mesh::feature_edges(&model, (30f32).to_radians().cos());
-        // 参考网格与坐标轴
+        // Reference grid and coordinate axes
         lines.extend(mesh::grid_lines(200.0, 20.0, [0.35, 0.38, 0.45, 0.55]));
         lines.extend(mesh::axes_lines(140.0));
 
         Self::from_mesh(device, &model, &lines)
     }
 
-    /// 产品注入入口（注入 API）：自任意 `Mesh`（顶点即三角形扇）+ 特征
-    /// 线构建场景。`Scene::new`（演示零件）经由此委托——上传路径单一来源。
+    /// Product injection entry point (injection API): builds a scene from any `Mesh` (vertices as
+    /// a triangle fan) + feature lines. `Scene::new` (the demo part) delegates here, so the upload
+    /// path has a single source.
     pub fn from_mesh(device: &wgpu::Device, model: &Mesh, lines: &[LineVertex]) -> Self {
         let solid_bytes = bytemuck::cast_slice::<SolidVertex, u8>(&model.verts);
         let line_bytes = bytemuck::cast_slice::<LineVertex, u8>(lines);
@@ -348,8 +350,8 @@ impl Pipelines {
     }
 }
 
-/// 在给定的 render pass 里画出场景（实体 + 线段）。
-/// 桌面端与 web 端共用。
+/// Draws the scene (solids + lines) into the given render pass.
+/// Shared by desktop and web.
 pub fn draw_scene(
     pass: &mut wgpu::RenderPass<'_>,
     scene: &Scene,
@@ -358,12 +360,12 @@ pub fn draw_scene(
 ) {
     pass.set_bind_group(0, bind_group, &[]);
 
-    // 实体
+    // Solids
     pass.set_pipeline(&pipes.solid);
     pass.set_vertex_buffer(0, scene.solid_vb.slice(..));
     pass.draw(0..scene.solid_verts, 0..1);
 
-    // 线段（网格 / 坐标轴 / 特征边）
+    // Lines (grid / axes / feature edges)
     pass.set_pipeline(&pipes.line);
     pass.set_vertex_buffer(0, scene.line_vb.slice(..));
     pass.draw(0..scene.line_verts, 0..1);

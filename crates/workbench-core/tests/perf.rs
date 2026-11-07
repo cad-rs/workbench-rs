@@ -1,5 +1,6 @@
-//! 性能回归测试（阶段 5，§18：更完善的自动化和性能测试）。
-//! 断言阈值宽松（覆盖 debug 构建的抖动），目的是捕捉量级退化而非精确基准。
+//! Performance regression tests (phase 5, §18: more thorough automated and performance tests).
+//! The thresholds are loose (covering debug-build jitter): the aim is to catch
+//! order-of-magnitude regressions, not precise benchmarks.
 
 use std::time::Instant;
 
@@ -13,17 +14,17 @@ impl wb::Workbench for PerfWb {
         wb::WorkbenchId::new("wb-perf")
     }
     fn init(&self, reg: &mut wb::Registry) {
-        reg.register_command(wb::CommandDef::sync("p.noop", "空命令", |_c, _a| {
+        reg.register_command(wb::CommandDef::sync("p.noop", "No-op Command", |_c, _a| {
             wb::CommandResult::done()
         }));
         reg.register_command(
-            wb::CommandDef::sync("p.add", "加一", |ctx: &mut wb::CommandCtx, _a| {
+            wb::CommandDef::sync("p.add", "Add One", |ctx: &mut wb::CommandCtx, _a| {
                 let Some(doc) = ctx.active_document() else {
-                    return wb::CommandResult::failed("无文档");
+                    return wb::CommandResult::failed("No document");
                 };
                 ctx.host()
                     .docs
-                    .edit::<Vec<u32>>(doc, "加一", true, |v| v.push(v.len() as u32))
+                    .edit::<Vec<u32>>(doc, "Add one", true, |v| v.push(v.len() as u32))
                     .map(|_| wb::CommandResult::done())
                     .unwrap_or_else(wb::CommandResult::failed)
             })
@@ -31,7 +32,7 @@ impl wb::Workbench for PerfWb {
         );
         reg.register_document_type(wb::DocumentTypeDef {
             id: wb::DocumentTypeId::new("p.doc"),
-            title: "性能".into(),
+            title: "Perf".into(),
             extensions: vec!["pdoc".into()],
             create_default: || Box::new(Vec::<u32>::new()),
             serialize: |c| {
@@ -51,7 +52,7 @@ impl wb::Workbench for PerfWb {
 }
 
 fn perf_app() -> AppRuntime {
-    WorkbenchAppBuilder::new("test.perf", "性能测试产品")
+    WorkbenchAppBuilder::new("test.perf", "Perf Test Product")
         .with_workbench(PerfWb)
         .with_layout_path(
             std::env::temp_dir()
@@ -59,11 +60,11 @@ fn perf_app() -> AppRuntime {
                 .join("layout.json"),
         )
         .build()
-        .expect("装配失败")
+        .expect("assembly failed")
 }
 
 #[test]
-fn perf_同步命令分发吞吐() {
+fn perf_sync_command_dispatch_throughput() {
     let mut a = perf_app();
     a.frame_tick(0.0);
     const N: u32 = 10_000;
@@ -74,46 +75,47 @@ fn perf_同步命令分发吞吐() {
     }
     let elapsed = start.elapsed();
     println!(
-        "perf: {N} 次同步命令分发耗时 {:?}（{:.2} µs/次）",
+        "perf: {N} sync command dispatches took {:?} ({:.2} µs each)",
         elapsed,
         elapsed.as_micros() as f64 / N as f64
     );
-    // 快照构造 + 快照缓存命中下，单次分发不应超过 2ms（debug 构建）
+    // With snapshot construction + snapshot cache hits, one dispatch should not exceed 2ms
+    // (debug build)
     assert!(
         elapsed.as_secs_f64() < N as f64 * 0.002,
-        "同步命令分发退化: {elapsed:?}"
+        "sync command dispatch regressed: {elapsed:?}"
     );
 }
 
 #[test]
-fn perf_大文档编辑与撤销() {
+fn perf_large_document_edit_and_undo() {
     let mut a = perf_app();
     a.frame_tick(0.0);
-    // 一次提交造出 20k 元素的大文档
+    // One commit builds a large document of 20k elements
     let doc = a
         .host
         .docs
-        .create(&wb::DocumentTypeId::new("p.doc"), "大文档")
+        .create(&wb::DocumentTypeId::new("p.doc"), "Large document")
         .unwrap();
     a.host.docs.set_active(Some(doc));
     a.host
         .docs
-        .edit::<Vec<u32>>(doc, "造数据", true, |v| {
+        .edit::<Vec<u32>>(doc, "Generate data", true, |v| {
             v.extend(0..20_000u32);
         })
         .unwrap();
 
-    // 200 次可撤销编辑（每次两份快照 dup）
+    // 200 undoable edits (two snapshot dups each)
     let start = Instant::now();
     for _ in 0..200 {
         a.host
             .docs
-            .edit::<Vec<u32>>(doc, "编辑", true, |v| v.push(1))
+            .edit::<Vec<u32>>(doc, "Edit", true, |v| v.push(1))
             .unwrap();
     }
     let edits = start.elapsed();
 
-    // 撤销 + 重做（历史容量上限 100，各按容量走满）
+    // Undo + redo (history capacity is 100; each runs the full capacity)
     let start = Instant::now();
     let mut undos = 0;
     while a.host.docs.can_undo(doc) {
@@ -128,20 +130,20 @@ fn perf_大文档编辑与撤销() {
     let undo_redo = start.elapsed();
 
     println!(
-        "perf: 200 次编辑（20k 文档）{edits:?}，{undos} 撤销+{redos} 重做 {undo_redo:?}"
+        "perf: 200 edits (20k document) {edits:?}, {undos} undos + {redos} redos {undo_redo:?}"
     );
-    assert!(edits.as_secs() < 30, "编辑性能退化: {edits:?}");
-    assert!(undo_redo.as_secs() < 30, "撤销/重做性能退化: {undo_redo:?}");
+    assert!(edits.as_secs() < 30, "edit performance regressed: {edits:?}");
+    assert!(undo_redo.as_secs() < 30, "undo/redo performance regressed: {undo_redo:?}");
 }
 
 #[test]
-fn perf_后台任务泵吞吐() {
+fn perf_background_task_pump_throughput() {
     let mut a = perf_app();
     a.frame_tick(0.0);
-    // 100 个轻量后台任务
+    // 100 lightweight background tasks
     for i in 0..100u32 {
         a.host.tasks.spawn(wb::TaskSpec {
-            title: format!("任务{i}"),
+            title: format!("Task {i}"),
             cancellable: false,
             input: Box::new(()),
             job: Box::new(|_ctx: &mut wb::TaskCtx| {
@@ -157,10 +159,10 @@ fn perf_后台任务泵吞吐() {
         if !a.host.tasks.all().any(|t| !t.status.is_terminal()) {
             break;
         }
-        assert!(Instant::now() < deadline, "任务泵超时");
+        assert!(Instant::now() < deadline, "the task pump timed out");
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let elapsed = start.elapsed();
-    println!("perf: 100 个后台任务全部完成耗时 {elapsed:?}");
-    assert!(elapsed.as_secs() < 30, "任务泵性能退化: {elapsed:?}");
+    println!("perf: all 100 background tasks finished in {elapsed:?}");
+    assert!(elapsed.as_secs() < 30, "task pump performance regressed: {elapsed:?}");
 }

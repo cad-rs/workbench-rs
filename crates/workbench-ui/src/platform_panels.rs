@@ -37,7 +37,7 @@ fn kv(key: &str, value: String) -> Div {
         .child(div().text_color(col(Color::LIGHT_GRAY)).child(value))
 }
 
-// ---------------------------------------------------------------- 诊断 ----
+// ---------------------------------------------------------------- Diagnostics ----
 
 pub struct DiagnosticsPanel;
 
@@ -46,14 +46,14 @@ impl wb::ViewInstance for DiagnosticsPanel {
         wb::ViewTypeId::new("app.panel.diagnostics")
     }
     fn title(&self) -> String {
-        "诊断".to_string()
+        "Diagnostics".to_string()
     }
     fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
         let host = host.host();
         let tr = |k: &str| host.tr(k);
 
         let backend = if host.stats.backend.is_empty() {
-            tr("（未标注）")
+            tr("(unlabeled)")
         } else {
             host.stats.backend.clone()
         };
@@ -67,38 +67,38 @@ impl wb::ViewInstance for DiagnosticsPanel {
         let interval = host.settings.get_f64("autosave.interval_secs", 30.0);
 
         let rows: Vec<Div> = vec![
-            section(&tr("运行时")),
-            kv(&tr("产品"), tr("（见窗口标题）")),
-            kv(&tr("GUI 后端"), backend),
-            kv(&tr("运行时长"), format!("{:.1} {}", host.uptime_secs(), tr("秒"))),
+            section(&tr("Runtime")),
+            kv(&tr("Product"), tr("(see window title)")),
+            kv(&tr("GUI backend"), backend),
+            kv(&tr("Uptime"), format!("{:.1} {}", host.uptime_secs(), tr("s"))),
             kv(
-                &tr("帧统计"),
+                &tr("Frame stats"),
                 format!(
-                    "{:.1} {}{:.1}）× {}",
+                    "{:.1} {}{:.1}) × {}",
                     host.stats.avg_frame_ms,
-                    tr("ms/帧（最近 "),
+                    tr("ms/frame (recent "),
                     host.stats.last_frame_ms,
                     host.stats.frames
                 ),
             ),
-            section(&tr("文档与任务")),
-            kv(&tr("文档数"), format!("{}", docs.len())),
-            kv(&tr("未保存"), format!("{dirty} {}", tr("个"))),
+            section(&tr("Documents & tasks")),
+            kv(&tr("Documents"), format!("{}", docs.len())),
+            kv(&tr("Unsaved"), format!("{dirty}")),
             kv(
-                &tr("后台任务"),
-                format!("{}{running} {}{total}", tr("运行 "), tr(" / 累计 ")),
+                &tr("Background tasks"),
+                format!("{}{running}{}{total}", tr("running "), tr(" / total ")),
             ),
-            section(&tr("自动保存")),
+            section(&tr("Autosave")),
             kv(
-                &tr("间隔"),
+                &tr("Interval"),
                 format!(
                     "{interval:.0} {}",
-                    tr("秒（settings.json 可调）")
+                    tr("s (tunable in settings.json)")
                 ),
             ),
             kv(
-                &tr("已自动保存"),
-                format!("{} {}", host.stats.autosaves, tr("次")),
+                &tr("Autosaved"),
+                format!("{}", host.stats.autosaves),
             ),
         ];
 
@@ -113,7 +113,7 @@ impl wb::ViewInstance for DiagnosticsPanel {
     }
 }
 
-// ---------------------------------------------------------------- 插件 ----
+// ---------------------------------------------------------------- Plugins ----
 
 pub struct PluginsPanel;
 
@@ -122,7 +122,7 @@ impl wb::ViewInstance for PluginsPanel {
         wb::ViewTypeId::new("app.panel.plugins")
     }
     fn title(&self) -> String {
-        "插件".to_string()
+        "Plugins".to_string()
     }
     fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
         let host = host.host();
@@ -133,15 +133,15 @@ impl wb::ViewInstance for PluginsPanel {
             vec![div()
                 .text_size(px(13.))
                 .text_color(col(Color::GRAY))
-                .child(tr("没有已注册的插件"))]
+                .child(tr("No plugins registered"))]
         } else {
             plugins
                 .iter()
                 .map(|entry| {
                     let (color, state_key) = match entry.state {
-                        "Loaded" => (Color::GREEN, "已装载"),
-                        "Disabled" => (Color::YELLOW, "已禁用"),
-                        _ => (Color::RED, "已拒绝"),
+                        "Loaded" => (Color::GREEN, "Loaded"),
+                        "Disabled" => (Color::YELLOW, "Disabled"),
+                        _ => (Color::RED, "Rejected"),
                     };
                     let mut row = div()
                         .flex()
@@ -177,7 +177,7 @@ impl wb::ViewInstance for PluginsPanel {
                     }
                     if entry.state == "Loaded" {
                         let id = entry.id.clone();
-                        let disable_label = tr("禁用");
+                        let disable_label = tr("Disable");
                         row.child(
                             div()
                                 .px_2()
@@ -212,7 +212,7 @@ impl wb::ViewInstance for PluginsPanel {
     }
 }
 
-// ---------------------------------------------------------------- 设置 ----
+// ---------------------------------------------------------------- Settings ----
 
 /// The settings panel: one row per registered [`wb::SettingSpec`], grouped by
 /// `spec.group`. Controls are self-drawn (the panel view has no gpui entity
@@ -225,7 +225,7 @@ impl wb::ViewInstance for SettingsPanel {
         wb::ViewTypeId::new("app.panel.settings")
     }
     fn title(&self) -> String {
-        "设置".to_string()
+        "Settings".to_string()
     }
     fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
         let host = host.host();
@@ -270,7 +270,7 @@ fn setting_row(
         wb::SettingKind::Bool => {
             let on = value.as_bool().unwrap_or(false);
             cycle_button(
-                tr(if on { "开" } else { "关" }),
+                tr(if on { "On" } else { "Off" }),
                 spec.key.clone(),
                 if on { "false".to_string() } else { "true".to_string() },
             )
@@ -285,8 +285,8 @@ fn setting_row(
             // Known enum values get friendly display names; anything else
             // (plugin-defined options) shows the raw value.
             let display = match current.as_str() {
-                "dark" => tr("深色"),
-                "light" => tr("浅色"),
+                "dark" => tr("Dark"),
+                "light" => tr("Light"),
                 other => other.to_string(),
             };
             cycle_button(display, spec.key.clone(), next)
@@ -421,11 +421,11 @@ fn parse_hex_color(s: &str) -> Option<Color> {
 /// Register the two platform panels into a product's registry.
 ///
 /// Called from the frontend's assembly stage, before `platform_cmds::register`
-/// builds the "窗口" toolbar group — so the group picks these up with the rest.
+/// builds the "View" toolbar group — so the group picks these up with the rest.
 pub fn register(reg: &mut Registry) {
     reg.register_panel(PanelDef::new(
         "app.panel.diagnostics",
-        "诊断",
+        "Diagnostics",
         wb::DockArea::Right,
         320.0,
         2,
@@ -433,7 +433,7 @@ pub fn register(reg: &mut Registry) {
     ));
     reg.register_panel(PanelDef::new(
         "app.panel.plugins",
-        "插件",
+        "Plugins",
         wb::DockArea::Right,
         320.0,
         3,
@@ -441,7 +441,7 @@ pub fn register(reg: &mut Registry) {
     ));
     reg.register_panel(PanelDef::new(
         "app.panel.settings",
-        "设置",
+        "Settings",
         wb::DockArea::Right,
         320.0,
         4,

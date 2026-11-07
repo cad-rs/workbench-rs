@@ -12,49 +12,53 @@ readme = "../../README.md"
 [dependencies]
 workbench-api = { workspace = true }
 workbench-core = { workspace = true }
-# RibbonBar 组件（纯 gpui 组件，无 workbench 依赖；bridge 在 src/ribbon_bridge.rs）
+# RibbonBar component (a pure gpui component with no workbench dependency; the bridge is in
+# src/ribbon_bridge.rs)
 ribbon = { workspace = true }
 gpui = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
 gpui-rhai = { workspace = true }
 serde_json = { workspace = true }
-# std::time 在 wasm 上不可用；web-time 桌面转发 std、Web 走 performance.now
+# std::time is unavailable on wasm; web-time forwards to std on desktop and uses
+# performance.now on the web
 web-time = { workspace = true }
 anyhow = { workspace = true }
 # Window icon decode (product.toml `window_icon`). gpui depends on it on every
 # target anyway; the web build only names the type.
 image = { workspace = true }
 
-# GPU 视口（原生视图扩展；gpu_view 模块；host 宿主 Element 用渲染核心）
+# GPU viewport (native view extension; the gpu_view module; the host Element uses the render core)
 workbench-render = { workspace = true }
 wgpu = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
 
-# Web (wasm32)：异步驱动（字体预取经 wb::asyncrt::fetch_bytes）
+# Web (wasm32): async driver (font prefetch goes through wb::asyncrt::fetch_bytes)
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
-# Web 上 GPUI 的渲染器就是 wgpu：GPU 视口在 GPUI 自己的设备上渲进
-# WgpuDynamicTexture，按普通 sprite 参与绘制顺序。拿那份上下文要具体的
-# WebPlatform（gpui_platform 的 web 构造不交还它），故直接依赖 gpui_web。
+# On the web GPUI's renderer is wgpu itself: the GPU viewport renders on GPUI's own device into a
+# WgpuDynamicTexture, which joins the draw order as an ordinary sprite. Getting that context takes
+# the concrete WebPlatform (gpui_platform's web constructor doesn't hand it back), hence the direct
+# dependency on gpui_web.
 gpui-wgpu = { workspace = true }
 gpui-web = { workspace = true }
 
-# 桌面：平台层（Web 端自建 WebPlatform，不经 gpui_platform）；GPU 视口自建
-# wgpu 设备（GPUI 在 Windows 上是 D3D11、macOS 上是 Metal，没有可共享的 wgpu
-# 设备）。
+# Desktop: the platform layer (the web builds its own WebPlatform, bypassing gpui_platform); the
+# GPU viewport creates its own wgpu device (GPUI is D3D11 on Windows and Metal on macOS, so there
+# is no wgpu device to share).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 gpui-platform = { workspace = true }
 pollster = { workspace = true }
 
-# Windows：视口的 wgpu 交换链挂在 GPUI 窗口合成的 DirectComposition visual
-# 上。版本必须与 gpui_windows 的一致：原生表面句柄以这个 crate 的 IUnknown
-# 交出、经 Any::downcast 取回。
+# Windows: the viewport's wgpu swap chain hangs on a DirectComposition visual in the GPUI window's
+# composition. The version must match gpui_windows': the native surface handle is handed out as
+# this crate's IUnknown and recovered via Any::downcast.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Win32_Graphics_DirectComposition"] }
 
 [dev-dependencies]
-# 分隔条拖动的单测需要真实 Runtime（面板注册 + area_active 查找路径）
+# The splitter-drag unit tests need a real Runtime (panel registration + the area_active lookup
+# path)
 workbench-example = { workspace = true }

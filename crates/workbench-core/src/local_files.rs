@@ -10,7 +10,7 @@ pub(crate) struct LocalFiles;
 
 impl api::StorageProvider for LocalFiles {
     fn label(&self) -> &str {
-        "本地文件"
+        "Local files"
     }
 
     /// The OS's own open/save dialogs browse the local file system.

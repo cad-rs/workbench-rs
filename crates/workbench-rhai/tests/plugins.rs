@@ -1,4 +1,5 @@
-//! workbench-rhai 装载链测试:清单校验、发现、注册、命令执行与后台任务。
+//! workbench-rhai loading-chain tests: manifest validation, discovery, registration, command
+//! execution and background tasks.
 
 use std::path::PathBuf;
 
@@ -17,10 +18,10 @@ fn demo_plugin() -> PathBuf {
 }
 
 fn build_with(dirs: Vec<PathBuf>) -> AppRuntime {
-    WorkbenchAppBuilder::new("test.product", "测试产品")
+    WorkbenchAppBuilder::new("test.product", "Test Product")
         .with_plugin_stage(workbench_rhai::plugin_stage(dirs))
         .build()
-        .expect("装配失败")
+        .expect("assembly failed")
 }
 
 fn manifest_text(id: &str, api_version: &str) -> String {
@@ -30,7 +31,7 @@ fn manifest_text(id: &str, api_version: &str) -> String {
 }
 
 #[test]
-fn 清单_解析与版本检查() {
+fn manifest_parse_and_version_check() {
     let text = std::fs::read_to_string(fixture("good/plugin.toml")).unwrap();
     let manifest = workbench_rhai::parse_manifest(&text).unwrap();
     assert_eq!(manifest.plugin.id, "com.test.good");
@@ -45,7 +46,7 @@ fn 清单_解析与版本检查() {
 }
 
 #[test]
-fn 装载_demo插件_注册命令工具栏与脚本面板() {
+fn loading_demo_plugin_registers_commands_toolbar_and_script_panel() {
     let app = build_with(vec![demo_plugin().parent().unwrap().to_path_buf()]);
     assert!(
         app.plugins_loaded().contains(&"com.example.demo".to_string()),
@@ -53,8 +54,8 @@ fn 装载_demo插件_注册命令工具栏与脚本面板() {
         app.plugins_loaded(),
         app.host.plugins.iter().map(|p| (p.id.clone(), p.detail.clone())).collect::<Vec<_>>()
     );
-    assert_eq!(app.command_title("rhai.hello"), Some("Rhai 问候".to_string()));
-    assert_eq!(app.command_title("rhai.progress"), Some("Rhai 后台任务".to_string()));
+    assert_eq!(app.command_title("rhai.hello"), Some("Rhai Hello".to_string()));
+    assert_eq!(app.command_title("rhai.progress"), Some("Rhai Background Task".to_string()));
     let toolbar = app
         .host
         .ws
@@ -62,7 +63,7 @@ fn 装载_demo插件_注册命令工具栏与脚本面板() {
         .iter()
         .flat_map(|t| t.groups.iter())
         .find(|g| g.id.0 == "plugin.rhai")
-        .expect("工具栏组");
+        .expect("toolbar group");
     assert!(toolbar.items.len() >= 2);
     let panel = app
         .host
@@ -70,7 +71,7 @@ fn 装载_demo插件_注册命令工具栏与脚本面板() {
         .panels
         .iter()
         .find(|p| p.id.0 == "rhai.panel")
-        .expect("脚本面板");
+        .expect("script panel");
     assert!(panel.script.as_deref().unwrap().ends_with("ui/main.rhai"));
 
     // A script central view registers the same way, but lands in the view table.
@@ -78,23 +79,23 @@ fn 装载_demo插件_注册命令工具栏与脚本面板() {
         .host
         .ws
         .view_def(&wb::ViewTypeId::new("rhai.view"))
-        .expect("脚本视图");
-    assert!(view.singleton, "脚本视图是单例");
+        .expect("script view");
+    assert!(view.singleton, "the script view is a singleton");
     assert!(view.script.as_deref().unwrap().ends_with("ui/view.rhai"));
     assert!(
         app.host
             .ws
             .view_type_ids()
             .any(|t| t.as_str() == "rhai.view"),
-        "脚本视图类型已注册"
+        "the script view type is registered"
     );
 }
 
 #[test]
-fn 产品模块解析器收到插件声明的模块() {
+fn product_module_loader_receives_plugin_declared_modules() {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured = seen.clone();
-    let _app = WorkbenchAppBuilder::new("test.modules", "模块装配")
+    let _app = WorkbenchAppBuilder::new("test.modules", "Module Assembly")
         // `plugin_stage` scans the *parent* directory for plugin subdirectories.
         .with_plugin_stage(workbench_rhai::plugin_stage(vec![fixture("with-modules")
             .parent()
@@ -105,11 +106,11 @@ fn 产品模块解析器收到插件声明的模块() {
             Vec::new()
         }))
         .build()
-        .expect("装配失败");
+        .expect("assembly failed");
     assert_eq!(
         seen.lock().unwrap().as_slice(),
         &["wb.alpha".to_string(), "wb.beta".to_string()],
-        "插件声明的模块 ID 应交给产品的模块解析器"
+        "the module IDs a plugin declares should reach the product's module loader"
     );
 }
 
@@ -121,7 +122,7 @@ impl wb::ViewInstance for NoopView {
         wb::ViewTypeId::new("plugin.view")
     }
     fn title(&self) -> String {
-        "插件视图".to_string()
+        "Plugin View".to_string()
     }
     fn element(
         &mut self,
@@ -141,15 +142,15 @@ impl wb::Workbench for PluginWb {
     fn init(&self, reg: &mut wb::Registry) {
         reg.register_command(wb::CommandDef::sync(
             "plugin.cmd",
-            "插件命令",
+            "Plugin Command",
             |_ctx, _args| wb::CommandResult::done(),
         ));
-        reg.register_view(wb::ViewDef::new("plugin.view", "插件视图", true, || {
+        reg.register_view(wb::ViewDef::new("plugin.view", "Plugin View", true, || {
             Box::new(NoopView)
         }));
         reg.register_panel(wb::PanelDef::new(
             "plugin.panel",
-            "插件面板",
+            "Plugin Panel",
             wb::DockArea::Right,
             300.0,
             9,
@@ -159,10 +160,10 @@ impl wb::Workbench for PluginWb {
 }
 
 #[test]
-fn 禁用插件移除其模块注册的贡献() {
+fn disabling_a_plugin_removes_its_module_contributions() {
     let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = served.clone();
-    let mut app = WorkbenchAppBuilder::new("test.disable", "禁用")
+    let mut app = WorkbenchAppBuilder::new("test.disable", "Disable")
         .with_plugin_stage(workbench_rhai::plugin_stage(vec![fixture("with-modules")
             .parent()
             .unwrap()
@@ -179,9 +180,9 @@ fn 禁用插件移除其模块注册的贡献() {
             }
         }))
         .build()
-        .expect("装配失败");
+        .expect("assembly failed");
 
-    assert_eq!(app.command_title("plugin.cmd"), Some("插件命令".to_string()));
+    assert_eq!(app.command_title("plugin.cmd"), Some("Plugin Command".to_string()));
     assert!(app
         .host
         .ws
@@ -189,8 +190,8 @@ fn 禁用插件移除其模块注册的贡献() {
         .is_some());
     assert!(app.host.ws.panels.iter().any(|p| p.id.0 == "plugin.panel"));
 
-    let removed = app.disable_plugin("com.test.modules").expect("禁用成功");
-    assert!(!removed.is_empty(), "应移除模块注册的运动命令");
+    let removed = app.disable_plugin("com.test.modules").expect("disable succeeds");
+    assert!(!removed.is_empty(), "the commands the module registered should be removed");
 
     assert_eq!(app.command_title("plugin.cmd"), None);
     assert!(app
@@ -202,7 +203,7 @@ fn 禁用插件移除其模块注册的贡献() {
 }
 
 #[test]
-fn 清单_解析模块声明并校验() {
+fn manifest_parses_and_validates_module_declarations() {
     let text = std::fs::read_to_string(fixture("with-modules/plugin.toml")).unwrap();
     let manifest = workbench_rhai::parse_manifest(&text).unwrap();
     assert_eq!(manifest.plugin.modules, vec!["wb.alpha", "wb.beta"]);
@@ -216,12 +217,12 @@ fn 清单_解析模块声明并校验() {
 }
 
 #[test]
-fn 同步命令_脚本返回备注() {
+fn sync_command_script_returns_note() {
     let mut app = build_with(vec![demo_plugin().parent().unwrap().to_path_buf()]);
-    let result = app.execute_command("rhai.hello", &CommandArgs::new().with("name", "自检"));
+    let result = app.execute_command("rhai.hello", &CommandArgs::new().with("name", "selfcheck"));
     match result {
         CommandResult::Done { note } => assert!(
-            note.as_ref().map(|n| n.contains("问候")).unwrap_or(false),
+            note.as_ref().map(|n| n.contains("Hello")).unwrap_or(false),
             "note={note:?}"
         ),
         other => panic!("unexpected: {other:?}"),
@@ -229,7 +230,7 @@ fn 同步命令_脚本返回备注() {
 }
 
 #[test]
-fn 后台命令_进度完成() {
+fn background_command_progress_completes() {
     let mut app = build_with(vec![demo_plugin().parent().unwrap().to_path_buf()]);
     let _ = app.execute_command("rhai.progress", &CommandArgs::default());
     for _ in 0..300 {
@@ -247,7 +248,7 @@ fn 后台命令_进度完成() {
 }
 
 #[test]
-fn 插件_被拒绝的脚本不致崩溃() {
+fn rejected_plugin_script_does_not_crash() {
     let bad_dir = fixture("bad-syntax");
     let app = build_with(vec![bad_dir]);
     assert!(app.plugins_loaded().is_empty());

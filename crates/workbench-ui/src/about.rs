@@ -31,10 +31,10 @@ pub(crate) fn maybe_about_overlay(
         AboutSnap {
             profile: guard.profile().clone(),
             product_name: guard.product_name().to_string(),
-            version_label: guard.host.tr("版本"),
-            home_label: guard.host.tr("主页"),
-            support_label: guard.host.tr("支持"),
-            close_label: guard.host.tr("关闭"),
+            version_label: guard.host.tr("Version"),
+            home_label: guard.host.tr("Home"),
+            support_label: guard.host.tr("Support"),
+            close_label: guard.host.tr("Close"),
         }
     };
     Some(render_about(&snap, core, cx).into_any_element())

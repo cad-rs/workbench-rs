@@ -1,6 +1,8 @@
-//! 注册表：Workbench 模块贡献的命令、工具栏、面板、视图、文档类型与服务（design.md §8）。
+//! The registry: commands, toolbars, panels, views, document types and services contributed by
+//! Workbench modules (design.md §8).
 //!
-//! 重复 ID 等注册错误不会 panic，而是记录到 `errors`（可诊断的注册结果，design.md §7.3）。
+//! Registration errors such as duplicate IDs do not panic; they are recorded in `errors`
+//! (diagnosable registration results, design.md §7.3).
 
 use std::any::{Any, TypeId};
 
@@ -10,49 +12,51 @@ use crate::ids::WorkbenchId;
 use crate::settings::SettingSpec;
 use crate::workspace::{PanelDef, ToolbarGroup, ToolbarItem, ViewDef};
 
-/// 注册表：产品装配阶段由 Workbench.init 填充，运行期只读。
+/// The registry: filled by Workbench.init while the product is assembled, read-only at runtime.
 #[derive(Default)]
 pub struct Registry {
     pub commands: Vec<CommandDef>,
     pub toolbar: Vec<ToolbarGroup>,
     pub ribbon: Vec<crate::workspace::RibbonTab>,
-    /// QAT 快速访问（产品静态集，ribbon-bar.md §4.1）：装配期暂存，
-    /// build 时转入 [`WorkspaceState::qat`](crate::workspace::WorkspaceState)。
+    /// Quick access (QAT, a static product set, ribbon-bar.md §4.1): held during assembly and
+    /// moved into [`WorkspaceState::qat`](crate::workspace::WorkspaceState) at build time.
     pub qat: Vec<ToolbarItem>,
     pub panels: Vec<PanelDef>,
     pub views: Vec<ViewDef>,
     pub doc_types: Vec<DocumentTypeDef>,
-    /// Registered setting specs (platform built-ins + plugin settings);
-    /// build 时转入 ServiceHost，设置面板按此渲染、`app.settings.set` 按此校验。
+    /// Registered setting specs (platform built-ins + plugin settings); moved into ServiceHost at
+    /// build time, where the settings panel renders from them and `app.settings.set` validates
+    /// against them.
     pub setting_specs: Vec<SettingSpec>,
-    /// Locale table entries `(locale, key, text)` from the platform and
-    /// plugins; build 时合并进 ServiceHost 的 Localizer。
+    /// Locale table entries `(locale, key, text)` from the platform and plugins; merged into
+    /// ServiceHost's Localizer at build time.
     pub locale_entries: Vec<(String, String, String)>,
     services: Vec<(TypeId, Box<dyn Any + Send + Sync>)>,
-    /// 装配期间的诊断信息（重复注册、非法参数等）。
+    /// Diagnostics from assembly (duplicate registrations, invalid arguments, …).
     pub errors: Vec<String>,
-    /// 装配期间的提示信息（如插件加载日志）。
+    /// Notes from assembly (such as plugin loading logs).
     pub notes: Vec<String>,
-    /// 已装配的 Workbench。
+    /// The assembled Workbenches.
     pub workbenches: Vec<WorkbenchId>,
-    /// 已成功装载的插件 ID（诊断与测试查询）。
+    /// IDs of the plugins loaded successfully (for diagnostics and test queries).
     pub plugins_loaded: Vec<String>,
-    /// 每个已装载插件声明的模块 ID：(插件 ID, 模块 ID 列表)。
+    /// The module IDs each loaded plugin declares: (plugin ID, module IDs).
     ///
-    /// 插件是运行期单位，不"包含"代码——它启用产品已编译的模块。产品用
-    /// [`Registry::plugin_module_ids`] 拿到去重后的集合去装配。
+    /// A plugin is a runtime unit and does not "contain" code — it enables modules the product
+    /// has already compiled. The product gets the deduplicated set from
+    /// [`Registry::plugin_module_ids`] and assembles it.
     pub plugin_modules: Vec<(String, Vec<String>)>,
-    /// Each loaded plugin's required license tier (manifest `tier`);
-    /// build 时转入 ServiceHost::plugins 条目，Licensing 里程碑按此门控装载。
+    /// Each loaded plugin's required license tier (manifest `tier`); moved into the
+    /// ServiceHost::plugins entries at build time, and the Licensing milestone gates loading on it.
     pub plugin_tiers: Vec<(String, crate::licensing::LicenseTier)>,
-    /// 被拒绝/失败的插件：(插件 ID 或目录, 原因)。
+    /// Rejected/failed plugins: (plugin ID or directory, reason).
     pub plugins_rejected: Vec<(String, String)>,
-    /// 运行时被禁用的插件 ID（阶段 5）。
+    /// IDs of the plugins disabled at runtime (phase 5).
     pub plugins_disabled: Vec<String>,
-    /// Workbench 建议的工作模式与默认模式（空则用平台默认）。
+    /// The work modes and default mode the Workbenches suggest (empty uses the platform default).
     pub work_modes: Vec<String>,
     pub default_mode: String,
-    /// 当前正在注册贡献的来源插件（见 [`Registry::with_source`]）。
+    /// The source plugin currently registering contributions (see [`Registry::with_source`]).
     current_source: Option<String>,
 }
 
@@ -82,20 +86,23 @@ impl Registry {
         self.current_source.as_deref()
     }
 
-    // ---- 命令 ----
+    // ---- Commands ----
 
     pub fn register_command(&mut self, mut def: CommandDef) {
         if def.source.is_none() {
             def.source = self.current_source.clone();
         }
         if self.commands.iter().any(|c| c.id == def.id) {
-            self.error(format!("命令重复注册: {}（来自 {}）", def.id, def.title));
+            self.error(format!(
+                "Duplicate command registration: {} (from {})",
+                def.id, def.title
+            ));
             return;
         }
         if let Some(hk) = def.hotkey {
             if let Some(other) = self.commands.iter().find(|c| c.hotkey == Some(hk)) {
                 self.error(format!(
-                    "快捷键 {} 冲突：{} 与 {} 都绑定",
+                    "Hotkey {} conflict: both {} and {} bind it",
                     hk, other.id, def.id
                 ));
             }
@@ -103,13 +110,14 @@ impl Registry {
         self.commands.push(def);
     }
 
-    /// 取出命令（核心执行器在执行期间临时移出，避免处理器重入借用冲突）。
+    /// Take a command out (the core executor removes it temporarily while it runs, to avoid
+    /// borrow conflicts when the handler re-enters).
     pub fn take_command(&mut self, id: &str) -> Option<CommandDef> {
         let pos = self.commands.iter().position(|c| c.id.0 == id)?;
         Some(self.commands.remove(pos))
     }
 
-    /// 放回取出的命令（执行完成后调用）。
+    /// Put back a command that was taken out (called once it has run).
     pub fn put_command(&mut self, def: CommandDef) {
         self.commands.push(def);
     }
@@ -118,8 +126,9 @@ impl Registry {
         self.commands.iter().find(|c| c.id.0 == id)
     }
 
-    /// 按来源移除命令（插件禁用/卸载时清理，design.md §16.2）。
-    /// 同时从工具栏组摘除其条目并清理由该来源引入的空组。返回移除的命令 ID。
+    /// Remove commands by source (cleanup when a plugin is disabled/unloaded, design.md §16.2).
+    /// Also removes their items from toolbar groups and drops the groups that source introduced
+    /// once they are empty. Returns the removed command IDs.
     pub fn remove_commands_from_source(&mut self, source: &str) -> Vec<String> {
         let removed: Vec<String> = self
             .commands
@@ -134,7 +143,7 @@ impl Registry {
                 .items
                 .retain(|it| !removed.contains(&it.command.0));
         }
-        // 条目被摘空的、由该来源贡献的组一并移除
+        // Also remove the groups this source contributed that are now empty
         self.toolbar
             .retain(|g| !(g.items.is_empty() && g.source.as_deref() == Some(source)));
         removed
@@ -144,10 +153,10 @@ impl Registry {
         self.commands.iter()
     }
 
-    /// 所有已装载插件声明的模块 ID，按首次出现顺序去重。
+    /// The module IDs all loaded plugins declare, deduplicated in order of first appearance.
     ///
-    /// 产品用这份清单装配插件启用的 Workbench 模块；顺序不保证依赖关系，
-    /// 产品需自行拓扑排序。
+    /// The product assembles the Workbench modules the plugins enable from this list; the order
+    /// does not respect dependencies, so the product has to sort them topologically itself.
     pub fn plugin_module_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = Vec::new();
         for (_, modules) in &self.plugin_modules {
@@ -160,7 +169,7 @@ impl Registry {
         ids
     }
 
-    // ---- 工具栏 ----
+    // ---- Toolbar ----
 
     pub fn add_toolbar_group(&mut self, mut group: ToolbarGroup) {
         if group.source.is_none() {
@@ -173,7 +182,8 @@ impl Registry {
         }
     }
 
-    /// 注册/合并一个 Ribbon Tab（同 ID Tab 合并组，组内同 ID 合并条目）。
+    /// Register/merge a Ribbon tab (tabs with the same ID merge their groups, groups with the same
+    /// ID merge their items).
     pub fn add_ribbon_tab(&mut self, mut tab: crate::workspace::RibbonTab) {
         if tab.source.is_none() {
             tab.source = self.current_source.clone();
@@ -194,20 +204,21 @@ impl Registry {
         }
     }
 
-    /// 把命令加入 QAT 快速访问集（产品静态集，ribbon-bar.md §4.1）：
-    /// 渲染为 Tab 条内 Icon 档小按钮，折叠态仍可见。重复加入不去重（静态装配期声明）。
+    /// Add a command to the quick access (QAT) set (a static product set, ribbon-bar.md §4.1):
+    /// rendered as a small icon-size button in the tab strip, still visible when collapsed.
+    /// Adding it twice is not deduplicated (it is declared statically during assembly).
     pub fn add_qat_command(&mut self, cmd: impl Into<crate::ids::CommandId>) {
         self.qat.push(ToolbarItem::command(cmd));
     }
 
-    // ---- 面板 / 视图 / 文档类型 ----
+    // ---- Panels / views / document types ----
 
     pub fn register_panel(&mut self, mut def: PanelDef) {
         if def.source.is_none() {
             def.source = self.current_source.clone();
         }
         if self.panels.iter().any(|p| p.id == def.id) {
-            self.error(format!("面板重复注册: {}", def.id));
+            self.error(format!("Duplicate panel registration: {}", def.id));
             return;
         }
         self.panels.push(def);
@@ -217,7 +228,7 @@ impl Registry {
     /// keys are rejected with a registry error, keeping the first registration.
     pub fn register_setting(&mut self, spec: SettingSpec) {
         if self.setting_specs.iter().any(|s| s.key == spec.key) {
-            self.error(format!("设置项重复注册: {}", spec.key));
+            self.error(format!("Duplicate setting registration: {}", spec.key));
             return;
         }
         self.setting_specs.push(spec);
@@ -242,7 +253,7 @@ impl Registry {
             def.source = self.current_source.clone();
         }
         if self.views.iter().any(|v| v.type_id == def.type_id) {
-            self.error(format!("视图类型重复注册: {}", def.type_id));
+            self.error(format!("Duplicate view type registration: {}", def.type_id));
             return;
         }
         self.views.push(def);
@@ -253,16 +264,18 @@ impl Registry {
             def.source = self.current_source.clone();
         }
         if self.doc_types.iter().any(|t| t.id == def.id) {
-            self.error(format!("文档类型重复注册: {}", def.id));
+            self.error(format!("Duplicate document type registration: {}", def.id));
             return;
         }
         self.doc_types.push(def);
     }
 
-    /// 按来源移除贡献（插件禁用/卸载时清理，design.md §16.2）。
+    /// Remove contributions by source (cleanup when a plugin is disabled/unloaded,
+    /// design.md §16.2).
     ///
-    /// 移除该来源注册的命令、视图类型、面板、文档类型、Ribbon Tab 与工具栏组。
-    /// 返回被移除的命令 ID（调用方据此清理工作区模型）。
+    /// Removes the commands, view types, panels, document types, Ribbon tabs and toolbar groups
+    /// that source registered. Returns the removed command IDs (the caller cleans the workspace
+    /// model up with them).
     pub fn remove_from_source(&mut self, source: &str) -> Vec<String> {
         let removed = self
             .commands
@@ -285,12 +298,12 @@ impl Registry {
         removed
     }
 
-    // ---- 扩展服务 ----
+    // ---- Extension services ----
 
     pub fn add_service<T: Any + Send + Sync>(&mut self, value: T) {
         if self.services.iter().any(|(t, _)| *t == TypeId::of::<T>()) {
             self.error(format!(
-                "扩展服务重复注册: {}",
+                "Duplicate extension service registration: {}",
                 std::any::type_name::<T>()
             ));
             return;

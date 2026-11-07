@@ -1,6 +1,6 @@
-//! wb-example：验证 workbench-rs 平台的示例 Workbench 模块。
+//! wb-example: the example Workbench module that exercises the workbench-rs platform.
 //!
-//! 只依赖 workbench-api，不依赖任何 GUI 框架（design.md 验收 #21）。
+//! Depends only on workbench-api, not on any GUI framework (design.md acceptance #21).
 
 mod shapes;
 mod views;
@@ -22,10 +22,10 @@ impl wb::Workbench for ExampleWorkbench {
     }
 
     fn init(&self, reg: &mut Registry) {
-        // ---- 文档类型 ----
+        // ---- Document types ----
         reg.register_document_type(DocumentTypeDef {
             id: wb::DocumentTypeId::new("example.shapes"),
-            title: "图形文档".to_string(),
+            title: "Shape Document".to_string(),
             extensions: vec!["shapes".to_string()],
             create_default: || Box::new(ShapeDoc::default()),
             serialize: shapes::serialize,
@@ -37,25 +37,25 @@ impl wb::Workbench for ExampleWorkbench {
             source: None,
         });
 
-        // ---- 中央视图 ----
+        // ---- Central views ----
         reg.register_view(
-            ViewDef::new("example.welcome", "欢迎", true, || {
+            ViewDef::new("example.welcome", "Welcome", true, || {
                 Box::new(views::WelcomeView)
             })
             .icon(icons::WELCOME),
         );
         reg.register_view(
-            ViewDef::new("example.canvas", "图形画布", true, || {
+            ViewDef::new("example.canvas", "Shape Canvas", true, || {
                 Box::new(views::CanvasView)
             })
             .icon(icons::CANVAS),
         );
 
-        // ---- Dock 面板 ----
+        // ---- Dock panels ----
         reg.register_panel(
             PanelDef::new(
                 "example.panel.explorer",
-                "资源管理器",
+                "Explorer",
                 DockArea::Left,
                 240.0,
                 0,
@@ -66,7 +66,7 @@ impl wb::Workbench for ExampleWorkbench {
         reg.register_panel(
             PanelDef::new(
                 "example.panel.tasks",
-                "任务",
+                "Tasks",
                 DockArea::Right,
                 300.0,
                 0,
@@ -77,7 +77,7 @@ impl wb::Workbench for ExampleWorkbench {
         reg.register_panel(
             PanelDef::new(
                 "example.panel.properties",
-                "属性",
+                "Properties",
                 DockArea::Right,
                 300.0,
                 1,
@@ -88,7 +88,7 @@ impl wb::Workbench for ExampleWorkbench {
         reg.register_panel(
             PanelDef::new(
                 "example.panel.output",
-                "输出",
+                "Output",
                 DockArea::Bottom,
                 170.0,
                 0,
@@ -97,23 +97,73 @@ impl wb::Workbench for ExampleWorkbench {
             .icon(icons::OUTPUT),
         );
 
-        // ---- 扩展服务 ----
+        // ---- Extension services ----
         reg.add_service(ExampleState::default());
 
-        // ---- 工作模式 ----
-        reg.work_modes = vec!["建模".to_string(), "草图".to_string()];
-        reg.default_mode = "建模".to_string();
+        // ---- Work modes ----
+        reg.work_modes = vec!["Modeling".to_string(), "Sketch".to_string()];
+        reg.default_mode = "Modeling".to_string();
 
         register_commands(reg);
         register_toolbar(reg);
+
+        // ---- zh-CN translations (English UI strings are the keys) ----
+        reg.register_locales(
+            "zh-CN",
+            [
+                // Document type.
+                ("Shape Document", "图形文档"),
+                // Views and panels.
+                ("Welcome", "欢迎"),
+                ("Shape Canvas", "图形画布"),
+                ("Explorer", "资源管理器"),
+                ("Tasks", "任务"),
+                ("Properties", "属性"),
+                ("Output", "输出"),
+                // Work modes.
+                ("Modeling", "建模"),
+                ("Sketch", "草图"),
+                // Commands.
+                ("Open Canvas", "打开画布"),
+                ("Welcome Page", "欢迎页"),
+                ("Add Shape", "添加图形"),
+                ("Delete Selected Shape", "删除选中图形"),
+                ("Select Shape", "选择图形"),
+                ("Batch Generate Shapes", "批量生成图形"),
+                ("Async Scan (Executor)", "异步扫描（执行器）"),
+                ("Slow Task (Progress and Cancel Demo)", "慢任务（演示进度与取消）"),
+                ("Failure Demo", "失败演示"),
+                ("Toggle Work Mode", "切换工作模式"),
+                ("Lineweight", "线宽"),
+                // Ribbon tabs and groups.
+                ("Home", "主页"),
+                ("File", "文件"),
+                // Large file buttons: short labels fit the 48px ribbon column.
+                ("New", "新建"),
+                ("Edit", "编辑"),
+                ("Shapes", "图形"),
+                ("Attributes", "特性"),
+                ("Tools", "工具"),
+                ("Views", "视图"),
+                ("Demo", "演示"),
+                // Ribbon item labels.
+                ("Batch Generate (Background)", "批量生成(后台)"),
+                ("Sketch Mode", "草图模式"),
+                ("Canvas", "画布"),
+                ("View", "窗口"),
+                ("Async Scan", "异步扫描"),
+                ("Slow Task (Cancellable)", "慢任务(可取消)"),
+            ],
+        );
     }
 }
 
 const CANVAS: &str = "example.canvas";
 
-// ---- 图标资源 ----
+// ---- Icon assets ----
 
-/// 平台/视图/面板共享的图标路径（`assets/icons/` 下的静态内嵌表）。
+/// Icon paths shared by the platform, views and panels (a static embedded table under
+/// `assets/icons/`).
 pub mod icons {
     pub const ADD: &str = "icons/add.svg";
     pub const DELETE: &str = "icons/delete.svg";
@@ -130,8 +180,8 @@ pub mod icons {
     pub const OUTPUT: &str = "icons/output.svg";
 }
 
-/// 示例资源源（`include_bytes!` 内嵌）。产品在装配时挂载：
-/// `builder.with_assets(wb_example::example_assets())`。
+/// The example asset source (embedded with `include_bytes!`). Products mount it at assembly
+/// time: `builder.with_assets(wb_example::example_assets())`.
 pub fn example_assets() -> impl wb::AssetSource {
     static ASSETS: wb::StaticAssets = wb::StaticAssets::new(&[
         (icons::ADD, include_bytes!("../assets/icons/add.svg")),
@@ -152,11 +202,11 @@ pub fn example_assets() -> impl wb::AssetSource {
 }
 
 fn register_commands(reg: &mut Registry) {
-    // 打开画布（绑定活动文档）
+    // Open the canvas (bound to the active document)
     reg.register_command(
         CommandDef::sync(
             "example.open_canvas",
-            "打开画布",
+            "Open Canvas",
             |ctx: &mut CommandCtx, _a: &CommandArgs| match ctx.open_view(CANVAS, true) {
                 Ok(_) => CommandResult::done(),
                 Err(e) => CommandResult::failed(e),
@@ -165,11 +215,11 @@ fn register_commands(reg: &mut Registry) {
         .icon(icons::CANVAS),
     );
 
-    // 打开欢迎页
+    // Open the welcome page
     reg.register_command(
         CommandDef::sync(
             "example.open_welcome",
-            "欢迎页",
+            "Welcome Page",
             |ctx: &mut CommandCtx, _a: &CommandArgs| match ctx.open_view("example.welcome", false) {
                 Ok(_) => CommandResult::done(),
                 Err(e) => CommandResult::failed(e),
@@ -178,16 +228,16 @@ fn register_commands(reg: &mut Registry) {
         .icon(icons::WELCOME),
     );
 
-    // 添加图形（同步、可撤销；上下文：画布视图 + 活动文档）
+    // Add a shape (sync, undoable; context: canvas view + active document)
     reg.register_command(
         CommandDef::sync(
             "example.add_shape",
-            "添加图形",
+            "Add Shape",
             |ctx: &mut CommandCtx, _a: &CommandArgs| {
                 let Some(doc) = ctx.active_document() else {
-                    return CommandResult::failed("没有活动文档");
+                    return CommandResult::failed("No active document");
                 };
-                match ctx.host().docs.edit::<ShapeDoc>(doc, "添加图形", true, |s| {
+                match ctx.host().docs.edit::<ShapeDoc>(doc, "Add Shape", true, |s| {
                     s.add_shape();
                 }) {
                     Ok(_) => {
@@ -210,14 +260,14 @@ fn register_commands(reg: &mut Registry) {
         .enabled_when(|snap| snap.active_document.is_some() && snap.active_view_is(CANVAS)),
     );
 
-    // 删除选中图形
+    // Delete the selected shape
     reg.register_command(
         CommandDef::sync(
             "example.remove_selected",
-            "删除选中图形",
+            "Delete Selected Shape",
             |ctx: &mut CommandCtx, _a: &CommandArgs| {
                 let Some(doc) = ctx.active_document() else {
-                    return CommandResult::failed("没有活动文档");
+                    return CommandResult::failed("No active document");
                 };
                 let sel = ctx
                     .host()
@@ -226,9 +276,9 @@ fn register_commands(reg: &mut Registry) {
                     .filter(|(d, _)| *d == doc)
                     .map(|(_, i)| i);
                 let Some(index) = sel else {
-                    return CommandResult::failed("没有选中的图形");
+                    return CommandResult::failed("No shape selected");
                 };
-                let ok = ctx.host().docs.edit::<ShapeDoc>(doc, "删除图形", true, |s| {
+                let ok = ctx.host().docs.edit::<ShapeDoc>(doc, "Delete Shape", true, |s| {
                     if index < s.shapes.len() {
                         s.shapes.remove(index);
                     }
@@ -252,14 +302,15 @@ fn register_commands(reg: &mut Registry) {
         }),
     );
 
-    // 画布点击选中（内部命令：由视图触发，演示统一命令入口）
+    // Click-to-select on the canvas (internal command: fired by the view, demonstrating the
+    // single command entry point)
     reg.register_command(
         CommandDef::sync(
             "example.select_shape",
-            "选择图形",
+            "Select Shape",
             |ctx: &mut CommandCtx, args: &CommandArgs| {
                 let Some(doc) = ctx.active_document() else {
-                    return CommandResult::failed("没有活动文档");
+                    return CommandResult::failed("No active document");
                 };
                 let index: Option<usize> = args.parse("index");
                 if let Some(state) = ctx.host().service_mut::<ExampleState>() {
@@ -271,28 +322,29 @@ fn register_commands(reg: &mut Registry) {
         .enabled_when(|snap| snap.active_document.is_some() && snap.active_view_is(CANVAS)),
     );
 
-    // 批量生成（后台任务：进度 + 协作式取消 + 版本校验提交）
+    // Batch generate (background task: progress + cooperative cancellation + revision-checked
+    // commit)
     reg.register_command(
         CommandDef::background(
             "example.generate_shapes",
-            "批量生成图形",
+            "Batch Generate Shapes",
             |ctx: &mut CommandCtx| {
                 let Some(doc) = ctx.active_document() else {
-                    return Err("没有活动文档".to_string());
+                    return Err("No active document".to_string());
                 };
                 let revision = ctx
                     .host()
                     .docs
                     .get(doc)
                     .map(|d| d.revision)
-                    .ok_or("文档不存在")?;
+                    .ok_or("Document does not exist")?;
                 let base = ctx
                     .host()
                     .docs
                     .read::<ShapeDoc, ShapeDoc>(doc, |s| s.clone())
-                    .ok_or("文档内容不是 ShapeDoc")?;
+                    .ok_or("Document content is not a ShapeDoc")?;
                 Ok(wb::TaskSpec {
-                    title: "批量生成图形".to_string(),
+                    title: "Batch Generate Shapes".to_string(),
                     cancellable: true,
                     input: Box::new(GenerateInput {
                         doc_id: doc,
@@ -301,7 +353,7 @@ fn register_commands(reg: &mut Registry) {
                     }),
                     job: Box::new(|task: &mut wb::TaskCtx| {
                         let Some(input) = task.input::<GenerateInput>() else {
-                            return Err(wb::TaskFailure::Error("缺少任务输入".to_string()));
+                            return Err(wb::TaskFailure::Error("Missing task input".to_string()));
                         };
                         let input = input.clone();
                         let steps = 8u32;
@@ -310,7 +362,7 @@ fn register_commands(reg: &mut Registry) {
                             task.check_cancelled()?;
                             task.report(
                                 Some(step as f32 / steps as f32),
-                                &format!("生成批次 {}/{}", step + 1, steps),
+                                &format!("Generating batch {}/{}", step + 1, steps),
                             );
                             doc.append(25);
                             std::thread::sleep(std::time::Duration::from_millis(120));
@@ -318,7 +370,7 @@ fn register_commands(reg: &mut Registry) {
                         Ok(Some(wb::DocCommit {
                             doc_id: input.doc_id,
                             expect_revision: input.revision,
-                            label: "批量生成图形".to_string(),
+                            label: "Batch Generate Shapes".to_string(),
                             undoable: true,
                             content: Box::new(doc),
                         }))
@@ -330,14 +382,15 @@ fn register_commands(reg: &mut Registry) {
         .enabled_when(|snap| snap.active_document.is_some()),
     );
 
-    // 异步扫描（阶段 2：共享执行器上的轻量异步任务，不独占线程）
+    // Async scan (Phase 2: a lightweight async task on the shared executor; holds no thread
+    // of its own)
     reg.register_command(
         CommandDef::async_command(
             "example.async_scan",
-            "异步扫描（执行器）",
+            "Async Scan (Executor)",
             |_ctx: &mut CommandCtx| {
                 Ok(wb::AsyncSpec {
-                    title: "异步扫描".to_string(),
+                    title: "Async Scan".to_string(),
                     cancellable: true,
                     input: Box::new(()),
                     job: Box::new(|task: wb::TaskCtx| {
@@ -347,12 +400,13 @@ fn register_commands(reg: &mut Registry) {
                                 task.check_cancelled()?;
                                 task.report(
                                     Some(step as f32 / steps as f32),
-                                    &format!("扫描片段 {}/{}", step + 1, steps),
+                                    &format!("Scanning segment {}/{}", step + 1, steps),
                                 );
-                                // 平台无关等待（桌面 async-io 计时器 / Web JS setTimeout）
+                                // Platform-neutral wait (desktop async-io timer / web JS
+                                // setTimeout)
                                 wb::sleep(std::time::Duration::from_millis(100)).await;
                             }
-                            task.log("异步扫描完成（共享执行器线程池）");
+                            task.log("Async scan finished (shared executor thread pool)");
                             Ok(None)
                         })
                     }),
@@ -361,14 +415,14 @@ fn register_commands(reg: &mut Registry) {
         )
         .icon(icons::SCAN),
     );
-    // 慢任务（后台、可取消、无文档提交）
+    // Slow task (background, cancellable, no document commit)
     reg.register_command(
         CommandDef::background(
             "example.slow_job",
-            "慢任务（演示进度与取消）",
+            "Slow Task (Progress and Cancel Demo)",
             |_ctx: &mut CommandCtx| {
                 Ok(wb::TaskSpec {
-                    title: "慢任务".to_string(),
+                    title: "Slow Task".to_string(),
                     cancellable: true,
                     input: Box::new(()),
                     job: Box::new(|task: &mut wb::TaskCtx| {
@@ -377,10 +431,10 @@ fn register_commands(reg: &mut Registry) {
                             task.check_cancelled()?;
                             task.report(
                                 Some(step as f32 / steps as f32),
-                                &format!("步骤 {}/{}", step + 1, steps),
+                                &format!("Step {}/{}", step + 1, steps),
                             );
                             if step == 10 {
-                                task.log("已完成一半，试试取消按钮");
+                                task.log("Halfway done; try the Cancel button");
                             }
                             std::thread::sleep(std::time::Duration::from_millis(120));
                         }
@@ -392,28 +446,30 @@ fn register_commands(reg: &mut Registry) {
         .icon(icons::CLOCK),
     );
 
-    // 失败演示
+    // Failure demo
     reg.register_command(
         CommandDef::sync(
             "example.failing_cmd",
-            "失败演示",
+            "Failure Demo",
             |_ctx: &mut CommandCtx, _a: &CommandArgs| {
-                CommandResult::failed("演示：命令执行失败（见输出面板与状态栏）")
+                CommandResult::failed(
+                    "Demo: the command failed (see the Output panel and the status bar)",
+                )
             },
         )
         .icon(icons::WARNING),
     );
 
-    // 切换工作模式
+    // Toggle the work mode
     reg.register_command(
         CommandDef::sync(
             "example.toggle_mode",
-            "切换工作模式",
+            "Toggle Work Mode",
             |ctx: &mut CommandCtx, _a: &CommandArgs| {
-                let next = if ctx.snapshot().work_mode == "建模" {
-                    "草图"
+                let next = if ctx.snapshot().work_mode == "Modeling" {
+                    "Sketch"
                 } else {
-                    "建模"
+                    "Modeling"
                 };
                 match ctx.set_work_mode(next) {
                     Ok(_) => CommandResult::done(),
@@ -422,16 +478,17 @@ fn register_commands(reg: &mut Registry) {
             },
         )
         .icon(icons::MODE)
-        .checked_when(|snap| snap.work_mode == "草图"),
+        .checked_when(|snap| snap.work_mode == "Sketch"),
     );
 
-    // 线宽选择（Combo 演示）：选项与当前值由 combo_state_when 提供，选中值经 args.value 回传。
+    // Lineweight picker (Combo demo): combo_state_when supplies the options and the current
+    // value; the chosen value comes back through args.value.
     static LINEWEIGHT_SELECTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     const LINEWEIGHTS: [&str; 4] = ["0.13 mm", "0.25 mm", "0.50 mm", "0.80 mm"];
     reg.register_command(
         CommandDef::sync(
             "example.set_lineweight",
-            "线宽",
+            "Lineweight",
             |_ctx: &mut CommandCtx, a: &CommandArgs| {
                 if let Some(v) = &a.value {
                     if let Some(i) = LINEWEIGHTS.iter().position(|o| o == v) {
@@ -452,78 +509,82 @@ fn register_commands(reg: &mut Registry) {
 }
 
 fn register_toolbar(reg: &mut Registry) {
-    // RibbonBar（design.md §7）：主页 Tab 与平台默认 Tab 合并，工具 Tab 收纳视图与演示。
-    // 条目同时演示尺寸档（Large/Small）与形态（Command/Toggle/Split/Menu/Combo）。
+    // RibbonBar (design.md §7): the Home tab merges with the platform default tab; the Tools
+    // tab holds the views and demos. The items also demonstrate the size tiers (Large/Small)
+    // and the kinds (Command/Toggle/Split/Menu/Combo).
     reg.add_ribbon_tab(
-        RibbonTab::new("app.home", "主页")
+        RibbonTab::new("app.home", "Home")
             .from_source("wb-example")
             .groups(vec![
-                ToolbarGroup::new("example.file", "文件")
+                ToolbarGroup::new("example.file", "File")
                     .from_source("wb-example")
                     .items(vec![
-                        ToolbarItem::command("app.new_document").large(),
-                        ToolbarItem::command("app.open_document").large(),
-                        ToolbarItem::command("app.save_document").large(),
+                        ToolbarItem::labeled("app.new_document", "New").large(),
+                        ToolbarItem::labeled("app.open_document", "Open").large(),
+                        ToolbarItem::labeled("app.save_document", "Save").large(),
                         ToolbarItem::command("app.import_document"),
                         ToolbarItem::command("app.export_document"),
                     ]),
-                ToolbarGroup::new("example.edit", "编辑")
+                ToolbarGroup::new("example.edit", "Edit")
                     .from_source("wb-example")
                     .items(vec![
                         ToolbarItem::command("app.undo"),
                         ToolbarItem::command("app.redo"),
                     ]),
-                ToolbarGroup::new("example.shapes", "图形")
+                ToolbarGroup::new("example.shapes", "Shapes")
                     .from_source("wb-example")
                     .items(vec![
                         ToolbarItem::command("example.add_shape").large(),
                         ToolbarItem::command("example.remove_selected"),
-                        ToolbarItem::labeled("example.generate_shapes", "批量生成(后台)"),
+                        ToolbarItem::labeled(
+                            "example.generate_shapes",
+                            "Batch Generate (Background)",
+                        ),
                     ]),
-                ToolbarGroup::new("example.properties", "特性")
+                ToolbarGroup::new("example.properties", "Attributes")
                     .from_source("wb-example")
                     .items(vec![
-                        ToolbarItem::labeled("example.set_lineweight", "线宽")
+                        ToolbarItem::labeled("example.set_lineweight", "Lineweight")
                             .combo()
                             .width(110.0),
                     ]),
             ]),
     );
     reg.add_ribbon_tab(
-        RibbonTab::new("wb.example.tools", "工具")
+        RibbonTab::new("wb.example.tools", "Tools")
             .from_source("wb-example")
             .groups(vec![
-                ToolbarGroup::new("example.view", "视图")
+                ToolbarGroup::new("example.view", "Views")
                     .from_source("wb-example")
                     .items(vec![
-                        ToolbarItem::labeled("example.toggle_mode", "草图模式").toggle(),
-                        ToolbarItem::labeled("example.open_canvas", "画布")
+                        ToolbarItem::labeled("example.toggle_mode", "Sketch Mode").toggle(),
+                        ToolbarItem::labeled("example.open_canvas", "Canvas")
                             .split(vec![ToolbarItem::labeled(
                                 "example.open_welcome",
-                                "欢迎页",
+                                "Welcome Page",
                             )]),
-                        ToolbarItem::labeled("example.open_canvas", "窗口").menu(vec![
-                            ToolbarItem::labeled("example.open_canvas", "画布"),
-                            ToolbarItem::labeled("example.open_welcome", "欢迎页"),
+                        ToolbarItem::labeled("example.open_canvas", "View").menu(vec![
+                            ToolbarItem::labeled("example.open_canvas", "Canvas"),
+                            ToolbarItem::labeled("example.open_welcome", "Welcome Page"),
                         ]),
                     ]),
-                ToolbarGroup::new("example.demo", "演示")
+                ToolbarGroup::new("example.demo", "Demo")
                     .from_source("wb-example")
                     .items(vec![
-                        ToolbarItem::labeled("example.async_scan", "异步扫描")
+                        ToolbarItem::labeled("example.async_scan", "Async Scan")
                             .split(vec![
-                                ToolbarItem::labeled("example.slow_job", "慢任务(可取消)"),
-                                ToolbarItem::labeled("example.failing_cmd", "失败演示"),
+                                ToolbarItem::labeled("example.slow_job", "Slow Task (Cancellable)"),
+                                ToolbarItem::labeled("example.failing_cmd", "Failure Demo"),
                             ])
                             .large(),
-                        ToolbarItem::labeled("example.slow_job", "慢任务(可取消)"),
-                        ToolbarItem::labeled("example.failing_cmd", "失败演示"),
+                        ToolbarItem::labeled("example.slow_job", "Slow Task (Cancellable)"),
+                        ToolbarItem::labeled("example.failing_cmd", "Failure Demo"),
                     ]),
             ]),
     );
 }
 
-/// 后台任务输入（UI 线程收集，任务线程消费）。
+/// Background task input (collected on the UI thread, consumed on the task thread).
 #[derive(Clone)]
 struct GenerateInput {
     doc_id: wb::DocumentId,

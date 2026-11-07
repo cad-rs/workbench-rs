@@ -1,6 +1,7 @@
-//! 稳定 ID。持久化（布局、插件清单）只使用这些字符串 ID，绝不使用 GUI 内部控件 ID。
+//! Stable IDs. Persistence (layout, plugin manifest) only ever uses these string IDs, never the
+//! GUI's internal widget IDs.
 
-/// 通用稳定字符串 ID，serde 序列化为纯字符串。
+/// A generic stable string ID; serde serializes it as a plain string.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct StableId(pub String);
@@ -63,38 +64,38 @@ macro_rules! stable_id {
 }
 
 stable_id!(
-    /// 命令稳定 ID，例如 `app.undo`。
+    /// Stable command ID, e.g. `app.undo`.
     CommandId
 );
 stable_id!(
-    /// Dock Panel 稳定 ID。
+    /// Stable dock panel ID.
     PanelId
 );
 stable_id!(
-    /// 中央内容视图类型稳定 ID。
+    /// Stable ID of a central content view type.
     ViewTypeId
 );
 stable_id!(
-    /// 文档类型稳定 ID。
+    /// Stable document type ID.
     DocumentTypeId
 );
 stable_id!(
-    /// Workbench 模块稳定 ID。
+    /// Stable Workbench module ID.
     WorkbenchId
 );
 stable_id!(
-    /// 工具栏（未来的 RibbonBar）Group 稳定 ID。
+    /// Stable toolbar (the future RibbonBar) group ID.
     ToolbarGroupId
 );
 
-/// 运行期文档实例 ID（不持久化；布局恢复后重新分配）。
+/// Runtime document instance ID (not persisted; reassigned after the layout is restored).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct DocumentId(pub u64);
 
-/// 运行期任务实例 ID。
+/// Runtime task instance ID.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct TaskId(pub u64);
 
-/// 运行期中央标签实例 ID（不持久化；持久化使用 ViewTypeId）。
+/// Runtime central tab instance ID (not persisted; persistence uses ViewTypeId).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct TabInstanceId(pub u64);

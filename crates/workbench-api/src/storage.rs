@@ -116,12 +116,12 @@ pub trait StorageProvider: Send + Sync {
     /// The folders and files in the folder `dir` (the root is `""`).
     fn list(&self, dir: &str) -> StorageFuture<Vec<Entry>> {
         let _ = dir;
-        unsupported("浏览")
+        unsupported("Browsing")
     }
     /// Create the folder `key`.
     fn create_dir(&self, key: &str) -> StorageFuture<()> {
         let _ = key;
-        unsupported("新建文件夹")
+        unsupported("Creating folders")
     }
     /// The key of `name` in the folder `dir`: paths by default.
     fn child_key(&self, dir: &str, name: &str) -> String {
@@ -134,7 +134,7 @@ pub trait StorageProvider: Send + Sync {
 }
 
 fn unsupported<T: Send + 'static>(what: &str) -> StorageFuture<T> {
-    Box::pin(std::future::ready(Err(format!("这里不支持{what}"))))
+    Box::pin(std::future::ready(Err(format!("{what} is not supported here"))))
 }
 
 /// The product's storage providers, by id.
@@ -166,7 +166,7 @@ impl Storage {
 
     /// List the folder at `location`.
     pub fn list(&self, location: &Location) -> StorageFuture<Vec<Entry>> {
-        let what = format!("读取文件夹 {location}");
+        let what = format!("read folder {location}");
         match self.providers.get(&location.provider) {
             Some(provider) => with_context(provider.list(&location.key), what),
             None => missing(location, what),
@@ -175,7 +175,7 @@ impl Storage {
 
     /// Create the folder at `location`.
     pub fn create_dir(&self, location: &Location) -> StorageFuture<()> {
-        let what = format!("新建文件夹 {location}");
+        let what = format!("create folder {location}");
         match self.providers.get(&location.provider) {
             Some(provider) => with_context(provider.create_dir(&location.key), what),
             None => missing(location, what),
@@ -184,7 +184,7 @@ impl Storage {
 
     /// Read the file at `location`.
     pub fn read(&self, location: &Location) -> StorageFuture<Vec<u8>> {
-        let what = format!("读取 {location}");
+        let what = format!("read {location}");
         match self.providers.get(&location.provider) {
             Some(provider) => with_context(provider.read(&location.key), what),
             None => missing(location, what),
@@ -193,7 +193,7 @@ impl Storage {
 
     /// Write `bytes` to the file at `location`.
     pub fn write(&self, location: &Location, bytes: Vec<u8>) -> StorageFuture<()> {
-        let what = format!("写入 {location}");
+        let what = format!("write {location}");
         match self.providers.get(&location.provider) {
             Some(provider) => with_context(provider.write(&location.key, bytes), what),
             None => missing(location, what),
@@ -202,12 +202,12 @@ impl Storage {
 }
 
 fn missing<T: Send + 'static>(location: &Location, what: String) -> StorageFuture<T> {
-    let error = format!("{what} 失败: 没有 `{}` 存储", location.provider);
+    let error = format!("Failed to {what}: no `{}` storage", location.provider);
     Box::pin(std::future::ready(Err(error)))
 }
 
 fn with_context<T: 'static>(future: StorageFuture<T>, what: String) -> StorageFuture<T> {
-    Box::pin(async move { future.await.map_err(|e| format!("{what} 失败: {e}")) })
+    Box::pin(async move { future.await.map_err(|e| format!("Failed to {what}: {e}")) })
 }
 
 #[cfg(test)]

@@ -336,7 +336,7 @@ mod tests {
         // runtime has it disabled).
         let edit = group_of(&model.tabs[0], "example.edit");
         let undo = item_of(edit, "app.undo");
-        assert_eq!(undo.label, runtime.command_title("app.undo").unwrap());
+        assert_eq!(undo.label, runtime.host.tr(&runtime.command_title("app.undo").unwrap()));
         assert_eq!(undo.enabled, runtime.is_enabled("app.undo"));
         assert!(!undo.enabled, "fresh runtime has no undoable changes");
         assert_eq!(undo.icon, runtime.command_icon("app.undo"));
@@ -356,7 +356,7 @@ mod tests {
             .find(|i| i.command.0 == "example.generate_shapes")
             .and_then(|i| i.label.clone())
             .expect("the item carries its own label");
-        assert_eq!(generate.label, ws_label);
+        assert_eq!(generate.label, runtime.host.tr(&ws_label), "its own label, translated");
         assert_ne!(generate.label, runtime.command_title("example.generate_shapes").unwrap());
     }
 
@@ -433,7 +433,8 @@ mod tests {
         assert_eq!(qat.id, "app.save_document");
         assert_eq!(qat.size, ItemSize::Icon, "QAT is always Icon tier");
         assert_eq!(qat.kind, RibbonItemKindVm::Command);
-        assert_eq!(qat.label, runtime.command_title("app.save_document").unwrap());
+        let title = runtime.command_title("app.save_document").unwrap();
+        assert_eq!(qat.label, runtime.host.tr(&title), "the command title, translated");
         assert_eq!(qat.enabled, runtime.is_enabled("app.save_document"));
         assert_eq!(qat.icon, runtime.command_icon("app.save_document"));
     }

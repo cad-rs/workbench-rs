@@ -56,8 +56,8 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["Window"] }
 console_error_panic_hook = "0.1"
-# std::time::Instant/SystemTime 在 wasm32-unknown-unknown 上 panic；web-time 桌面转发
-# std、Web 端走 performance.now/Date
+# std::time::Instant/SystemTime panic on wasm32-unknown-unknown; web-time forwards to std on
+# the desktop and uses performance.now/Date on the web
 web-time = "1"
 
 # gpui frontend: gpui-fast (longbridge/gpui-fast, a performance fork of Zed's
@@ -91,14 +91,16 @@ gpui-component-assets = { package = "gpui-kit-assets", version = "0.9.0" }
 # [patch.crates-io]), whose `gpui-pre` pin is moved to =0.3.11.
 gpui-rhai = { version = "=0.4.1", default-features = false }
 
-# GPU 视口（workbench-ui 的原生视图扩展）。版本必须与 gpui-fast pin 的
-# wgpu 一致：Web 端视口直接用 GPUI 的设备与纹理，类型必须同一。
+# GPU viewport (workbench-ui's native view extension). The version must match the wgpu
+# gpui-fast pins: the web viewport uses GPUI's device and textures directly, so the types
+# must be the same.
 wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007" }
 glam = "0.30"
 bytemuck = { version = "1", features = ["derive"] }
-# 窗口图标解码；回读上屏路径（离屏渲染 → CPU 回读 → paint_image）
+# Window icon decoding; the readback present path (offscreen render → CPU readback →
+# paint_image)
 image = "0.25"
-# 桌面 GPU 视口设备创建（同步等 adapter/device）
+# Desktop GPU viewport device creation (blocking wait for adapter/device)
 pollster = "0.4"
 anyhow = "1"
 

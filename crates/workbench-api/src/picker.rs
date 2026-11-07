@@ -121,10 +121,10 @@ mod tests {
 
     fn picker() -> FilePicker {
         let sources = vec![
-            ("opfs".to_string(), "浏览器存储".to_string()),
-            ("cloud".to_string(), "云盘".to_string()),
+            ("opfs".to_string(), "Browser storage".to_string()),
+            ("cloud".to_string(), "Cloud drive".to_string()),
         ];
-        FilePicker::new(Some("零件.rcad".into()), vec!["rcad".into()], sources).unwrap()
+        FilePicker::new(Some("part.rcad".into()), vec!["rcad".into()], sources).unwrap()
     }
 
     #[test]
@@ -152,9 +152,9 @@ mod tests {
         assert_eq!(picker.dir(), Location::new("opfs", "docs/sub"));
 
         picker.up_to(0);
-        assert_eq!(picker.trail, [(String::new(), "浏览器存储".to_string())]);
+        assert_eq!(picker.trail, [(String::new(), "Browser storage".to_string())]);
         picker.browse("cloud");
-        assert_eq!(picker.trail[0].1, "云盘");
+        assert_eq!(picker.trail[0].1, "Cloud drive");
     }
 
     #[test]

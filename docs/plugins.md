@@ -135,8 +135,8 @@ fn clicked(ctx, payload) { ctx.set_state("count", ctx.get_state("count") + 1); }
 
 fn view(ctx) {
     column([
-        label::Label(#{ text: `点击次数：${ctx.get_state("count")}` }),
-        button::Button(#{ text: "加一", variant: "primary", on_click: Fn("clicked") }),
+        label::Label(#{ text: `Clicks: ${ctx.get_state("count")}` }),
+        button::Button(#{ text: "Add one", variant: "primary", on_click: Fn("clicked") }),
     ])
 }
 ```

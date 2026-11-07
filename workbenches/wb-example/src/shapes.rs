@@ -1,5 +1,6 @@
-//! 示例 Workbench 的领域文档：图形列表（JSON 序列化）。
-//! 平台不感知此类型——它只通过 DocumentTypeDef 的编解码函数与内容交互。
+//! The example Workbench's domain document: a list of shapes (serialized as JSON).
+//! The platform does not know this type — it only touches the content through the
+//! DocumentTypeDef codec functions.
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Shape {
@@ -21,7 +22,7 @@ pub struct ShapeDoc {
 impl Default for ShapeDoc {
     fn default() -> Self {
         Self {
-            name: "图形文档".to_string(),
+            name: "Shape Document".to_string(),
             shapes: Vec::new(),
             next_hue: 12.0,
         }
@@ -29,7 +30,8 @@ impl Default for ShapeDoc {
 }
 
 impl ShapeDoc {
-    /// 确定性的“伪随机”添加：色相递进 + 位置按数量轮转，避免引入随机库。
+    /// A deterministic "pseudo-random" add: the hue steps forward and the position rotates
+    /// with the count, so no random-number crate is needed.
     pub fn add_shape(&mut self) -> usize {
         let n = self.shapes.len();
         let hue = self.next_hue;
@@ -47,7 +49,8 @@ impl ShapeDoc {
         self.shapes.len() - 1
     }
 
-    /// 追加 n 个图形（后台批量生成用），返回新增起始索引。
+    /// Append n shapes (used by the background batch generation); returns the index of the
+    /// first new one.
     pub fn append(&mut self, n: usize) -> usize {
         let start = self.shapes.len();
         for _ in 0..n {
@@ -57,16 +60,16 @@ impl ShapeDoc {
     }
 }
 
-/// 序列化（平台回调：不感知领域类型，通过 Any 下溯）。
+/// Serialize (platform callback: unaware of the domain type, downcasts through Any).
 pub fn serialize(content: &dyn workbench_api::DocumentContent) -> Result<Vec<u8>, String> {
     let doc = content
         .as_any()
         .downcast_ref::<ShapeDoc>()
-        .ok_or("内容不是 ShapeDoc")?;
+        .ok_or("content is not a ShapeDoc")?;
     serde_json::to_vec_pretty(doc).map_err(|e| e.to_string())
 }
 
-/// 反序列化。
+/// Deserialize.
 pub fn deserialize(bytes: &[u8]) -> Result<Box<dyn workbench_api::DocumentContent>, String> {
     let doc: ShapeDoc = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     Ok(Box::new(doc))

@@ -1,5 +1,5 @@
-//! 相机：3D 轨道球相机 + 2D 正交投影（俯视）相机。
-//! 移植自 gpui-wgpu 参考实现（javagg/gpui-demo）。
+//! Cameras: a 3D orbit camera + a 2D orthographic (top-down) camera.
+//! Ported from the gpui-wgpu reference implementation (javagg/gpui-demo).
 
 use glam::{Mat4, Vec3};
 
@@ -32,7 +32,7 @@ impl OrbitCamera {
         proj * view
     }
 
-    /// 屏幕坐标系下的相机右/上方向（用于平移）
+    /// The camera's right/up directions in screen space (used for panning)
     fn basis(&self) -> (Vec3, Vec3) {
         let (sy, cy) = self.yaw.sin_cos();
         let right = Vec3::new(sy, 0.0, -cy);
@@ -57,11 +57,11 @@ impl OrbitCamera {
     }
 }
 
-/// 俯视图正交相机：沿 -Y 向下看，屏幕上方为世界 -Z。
+/// Top-view orthographic camera: looks down along -Y, with world -Z at the top of the screen.
 pub struct OrthoCamera {
-    /// 注视的世界 XZ 点
+    /// The world XZ point being looked at
     pub center: Vec3,
-    /// 视口半高（世界单位）
+    /// Viewport half-height (world units)
     pub half_h: f32,
 }
 

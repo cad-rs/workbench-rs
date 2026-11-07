@@ -1,6 +1,7 @@
-//! 简单参数化网格：长方体、圆柱，平面着色（每面法线），
-//! 以及 CAD 里常用的"特征边"提取（相邻面夹角超过阈值的多边形边）。
-//! 移植自 gpui-wgpu 参考实现（javagg/gpui-demo）。
+//! Simple parametric meshes: boxes and cylinders, flat shaded (per-face normals),
+//! plus the "feature edge" extraction common in CAD (polygon edges whose adjacent faces meet at an
+//! angle above a threshold).
+//! Ported from the gpui-wgpu reference implementation (javagg/gpui-demo).
 
 use glam::Vec3;
 use std::collections::HashMap;
@@ -50,10 +51,11 @@ impl Mesh {
         self.push_tri(a, c, d, color);
     }
 
-    /// 轴对齐长方体
+    /// Axis-aligned box
     pub fn box_mesh(center: Vec3, size: Vec3, color: Vec3) -> Self {
         let h = size * 0.5;
-        // 8 个角点只算一次，保证共享顶点数值完全一致（特征边提取依赖这一点）
+        // Compute the 8 corners only once so shared vertices are numerically identical
+        // (feature edge extraction relies on this)
         let c = |sx: f32, sy: f32, sz: f32| center + Vec3::new(sx * h.x, sy * h.y, sz * h.z);
         let p = [
             c(-1.0, -1.0, -1.0),
@@ -66,7 +68,7 @@ impl Mesh {
             c(-1.0, 1.0, 1.0),
         ];
         let mut m = Mesh::default();
-        // 底 / 顶 / -Z / +Z / -X / +X
+        // bottom / top / -Z / +Z / -X / +X
         m.push_quad(p[0], p[3], p[2], p[1], color);
         m.push_quad(p[4], p[5], p[6], p[7], color);
         m.push_quad(p[0], p[1], p[5], p[4], color);
@@ -76,15 +78,15 @@ impl Mesh {
         m
     }
 
-    /// Y 轴向上的圆柱，`base` 为底面圆心
+    /// A Y-up cylinder; `base` is the center of the bottom face
     pub fn cylinder_y(base: Vec3, radius: f32, height: f32, segments: usize, color: Vec3) -> Self {
         let ring = ring_points(base, radius, height, segments);
         let mut m = Mesh::default();
         for i in 0..segments {
             let j = (i + 1) % segments;
-            // 侧面
+            // sides
             m.push_quad(ring[i].0, ring[j].0, ring[j].1, ring[i].1, color);
-            // 上下封盖
+            // top and bottom caps
             m.push_tri(base, ring[j].0, ring[i].0, color);
             let top_c = base + Vec3::Y * height;
             m.push_tri(top_c, ring[i].1, ring[j].1, color);
@@ -92,13 +94,13 @@ impl Mesh {
         m
     }
 
-    /// 拼接另一个网格
+    /// Append another mesh
     pub fn merge(&mut self, other: &Mesh) {
         self.verts.extend_from_slice(&other.verts);
     }
 }
 
-/// 返回圆周点列表，每项为（下环点、上环点）
+/// Returns the ring points, each item being (lower ring point, upper ring point)
 fn ring_points(base: Vec3, radius: f32, height: f32, segments: usize) -> Vec<(Vec3, Vec3)> {
     let mut ring = Vec::with_capacity(segments);
     for i in 0..segments {
@@ -110,8 +112,9 @@ fn ring_points(base: Vec3, radius: f32, height: f32, segments: usize) -> Vec<(Ve
     ring
 }
 
-/// 特征边提取：按共享边的两侧法线夹角判断。
-/// 返回压平的线段端点列表（每条边两个点）。
+/// Feature edge extraction: judged by the angle between the normals on the two sides of a
+/// shared edge.
+/// Returns a flattened list of segment endpoints (two points per edge).
 pub fn feature_edges(mesh: &Mesh, cos_threshold: f32) -> Vec<LineVertex> {
     #[derive(Default)]
     struct EdgeInfo {
@@ -150,7 +153,7 @@ pub fn feature_edges(mesh: &Mesh, cos_threshold: f32) -> Vec<LineVertex> {
     let mut out = Vec::new();
     let dark = [0.05, 0.05, 0.07, 1.0];
     for (_, info) in edges {
-        let mut is_feature = info.normals.len() < 2; // 边界边也算特征边
+        let mut is_feature = info.normals.len() < 2; // boundary edges count as feature edges too
         if !is_feature {
             'outer: for i in 0..info.normals.len() {
                 for j in (i + 1)..info.normals.len() {
@@ -175,7 +178,7 @@ pub fn feature_edges(mesh: &Mesh, cos_threshold: f32) -> Vec<LineVertex> {
     out
 }
 
-/// XZ 平面网格线
+/// Grid lines on the XZ plane
 pub fn grid_lines(span: f32, step: f32, color: [f32; 4]) -> Vec<LineVertex> {
     let mut out = Vec::new();
     let mut v = |a: Vec3, b: Vec3| {
@@ -197,7 +200,7 @@ pub fn grid_lines(span: f32, step: f32, color: [f32; 4]) -> Vec<LineVertex> {
     out
 }
 
-/// 坐标轴：X 红、Z 蓝、Y 绿
+/// Coordinate axes: X red, Z blue, Y green
 pub fn axes_lines(len: f32) -> Vec<LineVertex> {
     let mut out = Vec::new();
     let mut seg = |a: Vec3, b: Vec3, c: [f32; 4]| {

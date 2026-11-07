@@ -1,8 +1,9 @@
-//! 无头自检：不打开窗口，驱动平台核心走一遍关键路径，验证架构闭环。
-//! 产品以 `--selfcheck` 调用，输出 PASS/FAIL 行，进程退出码 0/1。
+//! Headless selfcheck: without opening a window, drives the platform core through its key
+//! paths to verify the architecture end to end. Products invoke it with `--selfcheck`; it
+//! prints PASS/FAIL lines and exits with code 0/1.
 //!
-//! 领域内容通过文档类型注册的序列化接口 + 通用 JSON 读取校验，
-//! 核心不依赖任何领域 crate。
+//! Domain content is checked through the serialization interface registered with the document
+//! type + generic JSON reads, so the core depends on no domain crate.
 
 use std::time::{Duration, Instant};
 
@@ -21,15 +22,16 @@ impl Check {
     fn new(name: impl Into<String>, ok: bool, detail: impl Into<String>) -> Self {
         Self { name: name.into(), ok, skipped: false, detail: detail.into() }
     }
-    /// 前置条件不满足时跳过（探测式自检：任何产品都能运行，无关项自动 SKIP）。
+    /// Skipped when a precondition is not met (a probing selfcheck: any product can run it,
+    /// irrelevant checks SKIP automatically).
     fn skip(name: impl Into<String>, reason: impl Into<String>) -> Self {
         Self { name: name.into(), ok: false, skipped: true, detail: reason.into() }
     }
 }
 
 /// Recovered-document title prefix (`recover_autosaves` renames to
-/// `[恢复] <title>`), so a probe can identify what recovery produced.
-const RECOVERED_PREFIX: &str = "[恢复]";
+/// `[Recovered] <title>`), so a probe can identify what recovery produced.
+const RECOVERED_PREFIX: &str = "[Recovered]";
 
 /// Session A of the crash-recovery probe (phase 5, `--selfcheck-crash` with
 /// `WB_CRASH_PHASE=A`): give the product's own default document a probe title,
@@ -211,7 +213,7 @@ fn run_probe_phase(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("无法启动子进程: {e}"))?;
+        .map_err(|e| format!("Cannot start the subprocess: {e}"))?;
     let start = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -220,40 +222,42 @@ fn run_probe_phase(
                 if start.elapsed() > Duration::from_secs(30) {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("子进程超时（phase {phase}）"));
+                    return Err(format!("The subprocess timed out (phase {phase})"));
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
-            Err(e) => return Err(format!("等待子进程失败: {e}")),
+            Err(e) => return Err(format!("Failed to wait for the subprocess: {e}")),
         }
     };
     let mut out = child
         .wait_with_output()
-        .map_err(|e| format!("读取子进程输出失败: {e}"))?;
+        .map_err(|e| format!("Failed to read the subprocess output: {e}"))?;
     out.status = status;
     Ok(out)
 }
 
-/// 崩溃恢复子进程自举检查（返回 (是否通过, 详情)）。
+/// The crash-recovery subprocess bootstrap check (returns (passed, detail)).
 ///
-/// 三次子进程启动覆盖机制的两个方向：
-/// - A：准备脏文档 + 自动保存，随后不跑 Drop 直接退出（无 clean 标记）；
-/// - B：启动时恢复，回读内容一致性；再留一份脏文档并正常退出（写标记）；
-/// - C：标记存在 → 必须不恢复（即便自动保存目录里仍有文件）。
+/// Three subprocess launches cover both directions of the mechanism:
+/// - A: prepare a dirty document + autosave, then exit without running Drop (no clean marker);
+/// - B: recover at startup and read the content back for consistency; then leave another dirty
+///   document and exit normally (writes the marker);
+/// - C: the marker is present → must not recover (even though the autosave directory still
+///   holds files).
 fn crash_probe_check() -> (bool, String) {
     let dir = std::env::temp_dir().join("workbench-rs-crash-test");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
     let mut ok = false;
     let detail = match std::env::current_exe() {
-        Err(_) => "无法定位当前 exe".to_string(),
+        Err(_) => "Cannot locate the current exe".to_string(),
         Ok(exe) => {
             let mut outcome: Result<(), String> = Ok(());
             for phase in ["A", "B", "C"] {
                 outcome = match run_probe_phase(&exe, &dir, phase) {
                     Err(e) => Err(e),
                     Ok(o) if !o.status.success() => Err(format!(
-                        "会话 {phase} 失败 status={:?} stdout={} stderr={}",
+                        "Session {phase} failed status={:?} stdout={} stderr={}",
                         o.status,
                         String::from_utf8_lossy(&o.stdout),
                         String::from_utf8_lossy(&o.stderr)
@@ -297,7 +301,7 @@ fn read_json_vec(path: &std::path::Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 无头自检并退出进程（供产品 main 的 `--selfcheck` 模式）。
+/// Run the headless selfcheck and exit the process (for a product main's `--selfcheck` mode).
 pub fn exit_with(app: &mut AppRuntime) -> ! {
     std::process::exit(run(app))
 }
@@ -305,40 +309,48 @@ pub fn exit_with(app: &mut AppRuntime) -> ! {
 pub fn run(app: &mut AppRuntime) -> i32 {
     let mut checks: Vec<Check> = Vec::new();
     app.frame_tick(0.0);
-    // 装配时的插件清单：阶段 18 会禁用插件（此后 `plugins_loaded()` 为空），
-    // 因此装配探针（阶段 19）必须用这份早期快照。
+    // The plugins at assembly time: step 18 disables plugins (after which `plugins_loaded()` is
+    // empty), so the assembly probe (step 19) must use this early snapshot.
     let plugins_at_assembly: Vec<String> = app.plugins_loaded().to_vec();
 
     let has_cmd = |app: &AppRuntime, id: &str| app.command_title(id).is_some();
     let has_plugin = |app: &AppRuntime, id: &str| app.plugins_loaded().contains(&id.to_string());
 
-    // 1. 装配：示例 Workbench 的命令已注册（探测式：未装配示例 Workbench 时跳过）
+    // 1. Assembly: the example Workbench's commands are registered (probing: skipped without the
+    //    example Workbench)
     if has_cmd(app, "example.add_shape") {
         checks.push(Check::new(
-            "装配: 示例命令已注册",
+            "Assembly: example commands registered",
             true,
             format!("example.add_shape = {:?}", app.command_title("example.add_shape")),
         ));
     } else {
-        checks.push(Check::skip("装配: 示例命令已注册", "未装配示例 Workbench（wb-example）"));
+        checks.push(Check::skip(
+            "Assembly: example commands registered",
+            "Example Workbench (wb-example) not assembled",
+        ));
     }
 
-    // 2. 打开画布视图并检查上下文快照
+    // 2. Open the canvas view and check the context snapshot
     if has_cmd(app, "example.open_canvas") {
         let _ = app.execute_command("example.open_canvas", &api::CommandArgs::default());
         app.frame_tick(0.0);
         let has_doc = app.snapshot().active_document.is_some();
         let canvas_active = app.snapshot().active_view_is("example.canvas");
         checks.push(Check::new(
-            "上下文: 默认文档 + 画布视图",
+            "Context: default document + canvas view",
             has_doc && canvas_active,
             format!("doc={has_doc} view={canvas_active}"),
         ));
     } else {
-        checks.push(Check::skip("上下文: 默认文档 + 画布视图", "未装配示例 Workbench"));
+        checks.push(Check::skip(
+            "Context: default document + canvas view",
+            "Example Workbench not assembled",
+        ));
     }
 
-    // 3. 同步命令 + 文档变更（以文档修订号增长为准，领域无关）
+    // 3. Sync command + document change (judged by the document revision growing; domain
+    //    agnostic)
     if has_cmd(app, "example.add_shape") {
         let doc_id = app.snapshot().active_document.as_ref().map(|d| d.id);
         let rev_before = doc_id.and_then(|id| app.host.docs.revision(id));
@@ -350,57 +362,66 @@ pub fn run(app: &mut AppRuntime) -> i32 {
         let rev_after = doc_id.and_then(|id| app.host.docs.revision(id));
         let grew = matches!((rev_before, rev_after), (Some(b), Some(a)) if a > b);
         checks.push(Check::new(
-            "命令: 同步命令驱动文档变更",
+            "Commands: sync command changes the document",
             added && grew,
             format!("added={added} revision {rev_before:?}→{rev_after:?}"),
         ));
     } else {
-        checks.push(Check::skip("命令: 同步命令驱动文档变更", "未装配示例 Workbench"));
+        checks.push(Check::skip(
+            "Commands: sync command changes the document",
+            "Example Workbench not assembled",
+        ));
     }
 
-    // 4. 撤销 / 重做
+    // 4. Undo / redo
     if has_cmd(app, "example.add_shape") {
         app.execute_command("app.undo", &api::CommandArgs::default());
         let after_undo = shape_count(app);
         app.execute_command("app.redo", &api::CommandArgs::default());
         let after_redo = shape_count(app);
         checks.push(Check::new(
-            "撤销/重做",
+            "Undo/redo",
             after_undo == 2 && after_redo == 3,
             format!("undo={after_undo} redo={after_redo}"),
         ));
     } else {
-        checks.push(Check::skip("撤销/重做", "未装配示例 Workbench"));
+        checks.push(Check::skip("Undo/redo", "Example Workbench not assembled"));
     }
 
-    // 5. 失败命令传播
+    // 5. Failing command propagation
     if has_cmd(app, "example.failing_cmd") {
         let r = app.execute_command("example.failing_cmd", &api::CommandArgs::default());
         checks.push(Check::new(
-            "错误: 失败命令返回 Failed 且不崩溃",
+            "Errors: a failing command returns Failed without crashing",
             matches!(r, api::CommandResult::Failed { .. }),
             format!("{r:?}"),
         ));
     } else {
-        checks.push(Check::skip("错误: 失败命令返回 Failed 且不崩溃", "未装配示例 Workbench"));
+        checks.push(Check::skip(
+            "Errors: a failing command returns Failed without crashing",
+            "Example Workbench not assembled",
+        ));
     }
 
-    // 6. 后台任务：进度 + 版本校验提交
+    // 6. Background task: progress + revision-checked commit
     if has_cmd(app, "example.generate_shapes") {
         let before = shape_count(app);
         let _ = app.execute_command("example.generate_shapes", &api::CommandArgs::default());
         let done = pump_until_idle(app, Duration::from_secs(20));
         let after = shape_count(app);
         checks.push(Check::new(
-            "后台任务: 完成 + 文档提交",
+            "Background tasks: completion + document commit",
             done && after > before,
             format!("done={done} shapes {before}→{after}"),
         ));
     } else {
-        checks.push(Check::skip("后台任务: 完成 + 文档提交", "未装配示例 Workbench"));
+        checks.push(Check::skip(
+            "Background tasks: completion + document commit",
+            "Example Workbench not assembled",
+        ));
     }
 
-    // 7. 后台任务：协作式取消
+    // 7. Background task: cooperative cancellation
     if has_cmd(app, "example.slow_job") {
         let _ = app.execute_command("example.slow_job", &api::CommandArgs::default());
         std::thread::sleep(Duration::from_millis(200));
@@ -408,7 +429,7 @@ pub fn run(app: &mut AppRuntime) -> i32 {
             .host
             .tasks
             .all()
-            .find(|t| t.title.contains("慢任务"))
+            .find(|t| t.title.contains("Slow Task"))
             .map(|t| t.id);
         if let Some(id) = task_id {
             app.host.tasks.request_cancel(id);
@@ -416,15 +437,18 @@ pub fn run(app: &mut AppRuntime) -> i32 {
         let settled = pump_until_idle(app, Duration::from_secs(10));
         let status = task_id.and_then(|id| app.host.tasks.get(id)).map(|t| t.status);
         checks.push(Check::new(
-            "后台任务: 协作式取消 → Cancelled",
+            "Background tasks: cooperative cancel → Cancelled",
             settled && status == Some(api::TaskStatus::Cancelled),
             format!("status={status:?}"),
         ));
     } else {
-        checks.push(Check::skip("后台任务: 协作式取消 → Cancelled", "未装配示例 Workbench"));
+        checks.push(Check::skip(
+            "Background tasks: cooperative cancel → Cancelled",
+            "Example Workbench not assembled",
+        ));
     }
 
-    // 8. 保存 / 打开（前置：存在活动文档）
+    // 8. Save / open (precondition: an active document exists)
     let doc_id = app.snapshot().active_document.as_ref().map(|d| d.id);
     if doc_id.is_some() {
         let dir = std::env::temp_dir().join("workbench-rs-selfcheck");
@@ -458,15 +482,15 @@ pub fn run(app: &mut AppRuntime) -> i32 {
                 .active()
                 .is_some_and(|d| d.id != id && d.location.as_ref() == Some(&location));
         checks.push(Check::new(
-            "文档: 保存 + 打开",
+            "Documents: save + open",
             saved_ok && opened,
             format!("saved={saved_ok} opened={opened}"),
         ));
     } else {
-        checks.push(Check::skip("文档: 保存 + 打开", "没有活动文档"));
+        checks.push(Check::skip("Documents: save + open", "No active document"));
     }
 
-    // 9. 布局持久化：含未知面板的布局可安全恢复（验收 #9）
+    // 9. Layout persistence: a layout with an unknown panel restores safely (acceptance #9)
     let mut layout = app.host.ws.save_layout();
     layout.panels.push(api::SavedPanel {
         id: "ghost.panel".to_string(),
@@ -478,12 +502,13 @@ pub fn run(app: &mut AppRuntime) -> i32 {
     let skipped = app.host.ws.apply_layout(&layout);
     let tab_restored = !app.host.ws.tabs.is_empty();
     checks.push(Check::new(
-        "布局: 未知面板跳过、标签恢复",
+        "Layout: unknown panel skipped, tabs restored",
         skipped.iter().any(|m| m.contains("ghost.panel")) && tab_restored,
         format!("skipped={} tabs={}", skipped.len(), app.host.ws.tabs.len()),
     ));
 
-    // 10.（阶段 2）异步命令：共享执行器完成 + 调用记录到终态
+    // 10. (Phase 2) Async command: completes on the shared executor + its invocation record
+    //     reaches a final state
     if has_cmd(app, "example.async_scan") {
         let r = app.execute_command("example.async_scan", &api::CommandArgs::default());
         let submitted = r.is_ok();
@@ -494,15 +519,19 @@ pub fn run(app: &mut AppRuntime) -> i32 {
             .map(|rec| rec.status == api::InvocationStatus::Succeeded && rec.task_id.is_some())
             .unwrap_or(false);
         checks.push(Check::new(
-            "阶段2: 异步命令（共享执行器）完成且调用记录到终态",
+            "Phase 2: async command (shared executor) completes, its record reaches a final state",
             submitted && done && async_record_ok,
             format!("submitted={submitted} done={done} record_ok={async_record_ok}"),
         ));
     } else {
-        checks.push(Check::skip("阶段2: 异步命令（共享执行器）", "未装配示例 Workbench"));
+        checks.push(Check::skip(
+            "Phase 2: async command (shared executor)",
+            "Example Workbench not assembled",
+        ));
     }
 
-    // 11.（阶段 2）统一命令调用结果：同步立即终态；未注册命令可查询失败记录
+    // 11. (Phase 2) Unified invocation results: sync commands are final at once; an
+    //     unregistered command leaves a queryable failure record
     let known_cmd = if has_cmd(app, "example.open_welcome") {
         Some("example.open_welcome".to_string())
     } else {
@@ -518,7 +547,7 @@ pub fn run(app: &mut AppRuntime) -> i32 {
             && inv_bad.record.status == api::InvocationStatus::Failed
             && inv_bad.record.execution.is_none();
         checks.push(Check::new(
-            "阶段2: 统一命令调用结果（同步终态 + 未注册可查询）",
+            "Phase 2: unified invocation results (sync final state + unregistered queryable)",
             sync_ok && unknown_ok,
             format!(
                 "sync_ok={sync_ok} unknown_ok={unknown_ok} history={}",
@@ -526,10 +555,14 @@ pub fn run(app: &mut AppRuntime) -> i32 {
             ),
         ));
     } else {
-        checks.push(Check::skip("阶段2: 统一命令调用结果", "产品没有已注册命令"));
+        checks.push(Check::skip(
+            "Phase 2: unified invocation results",
+            "The product has no registered commands",
+        ));
     }
 
-    // 12.（阶段 2）文档修订号查询 API（提交策略的数据基础；前置：活动文档）
+    // 12. (Phase 2) Document revision query API (the data the commit policy builds on;
+    //     precondition: an active document)
     if app.snapshot().active_document.is_some() {
         let revision_ok = app
             .snapshot()
@@ -538,16 +571,16 @@ pub fn run(app: &mut AppRuntime) -> i32 {
             .map(|d| app.host.docs.revision(d.id) == Some(d.revision))
             .unwrap_or(false);
         checks.push(Check::new(
-            "阶段2: 文档修订号查询 API",
+            "Phase 2: document revision query API",
             revision_ok,
             format!("revision_ok={revision_ok}"),
         ));
     } else {
-        checks.push(Check::skip("阶段2: 文档修订号查询 API", "没有活动文档"));
+        checks.push(Check::skip("Phase 2: document revision query API", "No active document"));
     }
 
-    // 13.（阶段 3）Rhai 脚本插件：发现、命令注册与 Ribbon 贡献
-    //    （前置：探测 rhai demo 插件命令存在）
+    // 13. (Phase 3) Rhai script plugin: discovery, command registration and ribbon
+    //     contributions (precondition: the rhai demo plugin's commands are present)
     if has_plugin(app, "com.example.demo") {
         let plugin_cmd = app.command_title("rhai.hello");
         let toolbar_contrib = app.host.ws.ribbon.iter().any(|t| {
@@ -563,7 +596,7 @@ pub fn run(app: &mut AppRuntime) -> i32 {
             .any(|p| p.id.0 == "rhai.panel" && p.script.is_some());
         let plugin_ok = plugin_cmd.is_some() && toolbar_contrib && script_panel;
         checks.push(Check::new(
-            "阶段3: Rhai 脚本插件发现/注册/工具栏/脚本面板",
+            "Phase 3: Rhai script plugin discovery/registration/toolbar/script panel",
             plugin_ok,
             format!(
                 "rhai.hello={plugin_cmd:?} toolbar={toolbar_contrib} script_panel={script_panel} loaded={:?}",
@@ -571,17 +604,21 @@ pub fn run(app: &mut AppRuntime) -> i32 {
             ),
         ));
     } else {
-        checks.push(Check::skip("阶段3: Rhai 脚本插件发现/注册/工具栏/脚本面板", "未装载 rhai demo 插件"));
+        checks.push(Check::skip(
+            "Phase 3: Rhai script plugin discovery/registration/toolbar/script panel",
+            "rhai demo plugin not loaded",
+        ));
     }
 
-    // 14.（阶段 3）插件命令执行：同步返回备注 + 后台 Rhai 任务完成
+    // 14. (Phase 3) Plugin command execution: a sync note comes back + a background Rhai task
+    //     completes
     if has_cmd(app, "rhai.hello") {
         let inv = app.execute_command_tracked(
             "rhai.hello",
-            &api::CommandArgs::new().with("name", "自检"),
+            &api::CommandArgs::new().with("name", "selfcheck"),
         );
         let hello_ok = match &inv.result {
-            api::CommandResult::Done { note } => note.as_deref().map(|n| n.contains("问候")).unwrap_or(false),
+            api::CommandResult::Done { note } => note.as_deref().map(|n| n.contains("Hello")).unwrap_or(false),
             _ => false,
         };
         let r = app.execute_command("rhai.progress", &api::CommandArgs::default());
@@ -590,24 +627,29 @@ pub fn run(app: &mut AppRuntime) -> i32 {
             t.title.contains("Rhai") && t.status == api::TaskStatus::Succeeded
         });
         checks.push(Check::new(
-            "阶段3: 插件命令执行（同步备注 + 后台进度任务）",
+            "Phase 3: plugin command execution (sync note + background progress task)",
             hello_ok && r.is_ok() && bg_done && rhai_task_ok,
             format!("hello_ok={hello_ok} bg_done={bg_done} rhai_task_ok={rhai_task_ok}"),
         ));
     } else {
-        checks.push(Check::skip("阶段3: 插件命令执行", "未装载 rhai demo 插件"));
+        checks.push(Check::skip(
+            "Phase 3: plugin command execution",
+            "rhai demo plugin not loaded",
+        ));
     }
 
-    // 15.（Ribbon）Tab 模型（前置：默认 Tab 存在 —— 平台「窗口」组并入其中）
+    // 15. (Ribbon) Tab model (precondition: the default tab exists — the platform's "View"
+    //     group merges into it)
     let ribbon_ok = if app.host.ws.ribbon.iter().any(|t| t.id.0 == "app.home") {
         let ws = &mut app.host.ws;
         let home = ws.ribbon.iter().find(|t| t.id.0 == "app.home");
         let home_groups = home.map(|t| t.groups.len()).unwrap_or(0);
-        // legacy（平台「窗口」组）并入默认 Tab
+        // Legacy groups (the platform's "View" group) merge into the default tab
         let has_window_group = home
             .map(|t| t.groups.iter().any(|g| g.id.0 == "app.window"))
             .unwrap_or(false);
-        // 活动 Tab 切换 + 布局持久化往返：有第二个 Tab 才测切换
+        // Active tab switching + layout persistence round trip: switching is tested only when
+        // there is a second tab
         let other = ws
             .ribbon
             .iter()
@@ -637,49 +679,54 @@ pub fn run(app: &mut AppRuntime) -> i32 {
             ok,
             format!(
                 "home_groups={home_groups} window={has_window_group} other_tab={} persist={restored_active}/{restored}",
-                other.as_deref().unwrap_or("（无）")
+                other.as_deref().unwrap_or("(none)")
             ),
         )
     } else {
-        (false, "没有默认 Ribbon Tab".to_string())
+        (false, "No default ribbon tab".to_string())
     };
     checks.push(Check::new(
-        "Ribbon: Tab 合并/legacy 兼容/活动 Tab 持久化",
+        "Ribbon: tab merging/legacy compatibility/active tab persistence",
         ribbon_ok.0,
         ribbon_ok.1,
     ));
 
-    // 16.（阶段 5）设置服务：写入 → 重新加载 → 读回
+    // 16. (Phase 5) Settings service: write → reload → read back
     let settings_ok = {
         let ok = app.host.settings.set("selfcheck.key", serde_json::json!(42)).is_ok();
         let (reloaded, err) = api::Settings::load(app.state().clone(), crate::app::SETTINGS);
         ok && err.is_none() && reloaded.get_f64("selfcheck.key", 0.0) == 42.0
     };
     checks.push(Check::new(
-        "阶段5: 设置服务持久化往返",
+        "Phase 5: settings service persistence round trip",
         settings_ok,
         format!("settings_ok={settings_ok}"),
     ));
 
-    // 17.（阶段 5）自动保存 + 崩溃恢复：两次子进程启动构成一次真实崩溃——
-    //     会话 A 把产品自己的默认文档改脏并自动保存，随后不跑 Drop 直接退出
-    //     （无 clean 标记）→ 会话 B 启动时恢复，并校验恢复文档的内容与 A 落盘
-    //     的字节一致。探针只走平台文档服务（改标题 + 提交内容副本），与领域无关，
-    //     因此任何注册了文档类型的产品都会执行（未实现 --selfcheck-crash 的产品
-    //     由子进程超时兜住，判 FAIL 而非挂起）。
+    // 17. (Phase 5) Autosave + crash recovery: subprocess launches make up a real crash —
+    //     session A makes the product's own default document dirty and autosaves it, then
+    //     exits without running Drop (no clean marker) → session B recovers at startup and
+    //     checks the recovered document's content matches the bytes A persisted. The probe
+    //     only uses the platform document service (rename + commit a content duplicate) and is
+    //     domain agnostic, so it runs for any product that registers a document type (a product
+    //     without --selfcheck-crash is caught by the subprocess timeout and FAILs instead of
+    //     hanging).
     if !app.host.docs.types().is_empty() {
         let crash_ok = crash_probe_check();
         checks.push(Check::new(
-            "阶段5: 自动保存 + 崩溃恢复",
+            "Phase 5: autosave + crash recovery",
             crash_ok.0,
             crash_ok.1,
         ));
     } else {
-        checks.push(Check::skip("阶段5: 自动保存 + 崩溃恢复", "产品没有注册文档类型"));
+        checks.push(Check::skip(
+            "Phase 5: autosave + crash recovery",
+            "The product registers no document types",
+        ));
     }
 
-    // 18.（阶段 5）插件运行时禁用：命令移除 + Ribbon 清理 + 状态镜像
-    // 注意：必须最后执行（禁用后 rhai demo 插件命令不再可用）
+    // 18. (Phase 5) Runtime plugin disable: commands removed + ribbon cleaned + state mirrored
+    // Note: must run last (the rhai demo plugin's commands are gone once it is disabled)
     if has_plugin(app, "com.example.demo") {
         let disable_ok = {
             let before = app.command_title("rhai.hello").is_some();
@@ -707,15 +754,16 @@ pub fn run(app: &mut AppRuntime) -> i32 {
             )
         };
         checks.push(Check::new(
-            "阶段5: 插件运行时禁用",
+            "Phase 5: runtime plugin disable",
             disable_ok.0,
             disable_ok.1,
         ));
     } else {
-        checks.push(Check::skip("阶段5: 插件运行时禁用", "未装载 demo 插件"));
+        checks.push(Check::skip("Phase 5: runtime plugin disable", "demo plugin not loaded"));
     }
 
-    // 19. 装配探针：视图类型 / 文档类型 / 插件（任何产品都应注册了什么）
+    // 19. Assembly probes: view types / document types / plugins (what any product should
+    //     have registered)
     let view_types: Vec<String> = app
         .host
         .ws
@@ -723,7 +771,7 @@ pub fn run(app: &mut AppRuntime) -> i32 {
         .map(|t| t.0.clone())
         .collect();
     checks.push(Check::new(
-        "装配: 视图类型已注册",
+        "Assembly: view types registered",
         !view_types.is_empty(),
         format!("views={view_types:?}"),
     ));
@@ -736,18 +784,18 @@ pub fn run(app: &mut AppRuntime) -> i32 {
         .map(|t| t.id.0.clone())
         .collect();
     checks.push(Check::new(
-        "装配: 文档类型已注册",
+        "Assembly: document types registered",
         !doc_types.is_empty(),
         format!("doc_types={doc_types:?}"),
     ));
 
     checks.push(Check::new(
-        "装配: 插件已装载",
+        "Assembly: plugins loaded",
         !plugins_at_assembly.is_empty(),
         format!("plugins={plugins_at_assembly:?}"),
     ));
 
-    // 汇总
+    // Summary
     let failed = checks.iter().filter(|c| !c.ok && !c.skipped).count();
     let skipped = checks.iter().filter(|c| c.skipped).count();
     for c in &checks {
@@ -762,7 +810,7 @@ pub fn run(app: &mut AppRuntime) -> i32 {
     }
     let run_total = checks.len() - skipped;
     println!(
-        "selfcheck: {}/{} 项通过（{} 项跳过）",
+        "selfcheck: {}/{} passed ({} skipped)",
         run_total - failed,
         run_total,
         skipped
@@ -774,7 +822,8 @@ pub fn run(app: &mut AppRuntime) -> i32 {
     }
 }
 
-/// 通过文档类型的序列化接口读取 shapes 数量（平台不感知领域类型）。
+/// Read the shape count through the document type's serialization interface (the platform
+/// knows nothing of domain types).
 fn shape_count(app: &AppRuntime) -> usize {
     let Some(summary) = app.snapshot().active_document.as_ref() else {
         return 0;
@@ -795,7 +844,7 @@ fn shape_count(app: &AppRuntime) -> usize {
         .unwrap_or(0)
 }
 
-/// 反复 frame_tick 直到没有运行中的任务与在途 I/O（或超时）。
+/// Call frame_tick repeatedly until no task is running and no I/O is in flight (or timeout).
 fn pump_until_idle(app: &mut AppRuntime, timeout: Duration) -> bool {
     let start = Instant::now();
     loop {

@@ -49,7 +49,7 @@ fn heading(text: &str) -> Div {
         .child(text.to_string())
 }
 
-// ---------------------------------------------------------------- 欢迎 ----
+// ---------------------------------------------------------------- Welcome ----
 
 pub struct WelcomeView;
 
@@ -58,59 +58,68 @@ impl wb::ViewInstance for WelcomeView {
         wb::ViewTypeId::new("example.welcome")
     }
     fn title(&self) -> String {
-        "欢迎".to_string()
+        "Welcome".to_string()
     }
     fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
         let snap = host.snapshot();
         let doc_line = match &snap.active_document {
             Some(doc) => format!(
-                "活动文档：{}{}（修订 r{}）",
+                "Active document: {}{} (rev r{})",
                 doc.title,
-                if doc.dirty { " •未保存" } else { "" },
+                if doc.dirty { " • Unsaved" } else { "" },
                 doc.revision
             ),
-            None => "活动文档：（无）".to_string(),
+            None => "Active document: (none)".to_string(),
         };
 
         let rows: Vec<Div> = vec![
             div()
                 .text_size(px(24.))
                 .text_color(gpui::white())
-                .child("workbench-rs 演示产品".to_string()),
+                .child("workbench-rs Demo Product".to_string()),
             div().h(px(16.)),
-            line(format!("工作模式：{}", snap.work_mode), rgb(0xC7C7CC), 14.0),
+            line(format!("Work mode: {}", snap.work_mode), rgb(0xC7C7CC), 14.0),
             line(doc_line, rgb(0xC7C7CC), 14.0),
             line(
                 format!(
-                    "活动视图：{}",
-                    snap.active_view_type.as_deref().unwrap_or("（无）")
+                    "Active view: {}",
+                    snap.active_view_type.as_deref().unwrap_or("(none)")
                 ),
                 rgb(0xC7C7CC),
                 14.0,
             ),
             div().h(px(12.)),
             line(
-                "· 工具栏「图形」→ 添加图形：在画布中添加并撤销/重做".to_string(),
+                "· Toolbar \"Shapes\" → Add Shape: add shapes on the canvas, then undo/redo"
+                    .to_string(),
                 rgb(0xC7C7CC),
                 14.0,
             ),
             line(
-                "· 工具栏「演示」→ 批量生成：后台任务，可取消，完成后经文档版本校验提交".to_string(),
+                "· Toolbar \"Demo\" → Batch Generate: a cancellable background task whose result \
+                 is committed after a document revision check"
+                    .to_string(),
                 rgb(0xC7C7CC),
                 14.0,
             ),
             line(
-                "· 工具栏「演示」→ 慢任务：观察状态栏进度与协作式取消".to_string(),
+                "· Toolbar \"Demo\" → Slow Task: watch the status-bar progress and cooperative \
+                 cancellation"
+                    .to_string(),
                 rgb(0xC7C7CC),
                 14.0,
             ),
             line(
-                "· 画布中点击图形可选中，右侧属性/任务/输出面板联动".to_string(),
+                "· Click a shape on the canvas to select it; the Properties/Tasks/Output panels \
+                 follow"
+                    .to_string(),
                 rgb(0xC7C7CC),
                 14.0,
             ),
             line(
-                "· Ctrl+S 保存 / Ctrl+Z 撤销 / Ctrl+W 关闭标签；布局自动保存恢复".to_string(),
+                "· Ctrl+S Save / Ctrl+Z Undo / Ctrl+W Close Tab; the layout is saved and restored \
+                 automatically"
+                    .to_string(),
                 rgb(0xC7C7CC),
                 14.0,
             ),
@@ -126,7 +135,7 @@ impl wb::ViewInstance for WelcomeView {
     }
 }
 
-// ---------------------------------------------------------------- 画布 ----
+// ---------------------------------------------------------------- Canvas ----
 
 #[derive(Default)]
 pub struct CanvasView;
@@ -291,7 +300,7 @@ impl wb::ViewInstance for CanvasView {
         wb::ViewTypeId::new(CANVAS_VIEW)
     }
     fn title(&self) -> String {
-        "图形画布".to_string()
+        "Shape Canvas".to_string()
     }
     fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
         let snap = host.snapshot();
@@ -349,7 +358,7 @@ fn add_button(enabled: bool) -> Div {
         .bg(rgb(if enabled { 0x3D8BEC } else { 0x4A4D55 }))
         .text_size(px(13.))
         .text_color(gpui::white())
-        .child("添加".to_string());
+        .child("Add".to_string());
     if enabled {
         button.on_mouse_down(gpui::MouseButton::Left, |_ev, _window, _cx| {
             wb::dispatch("example.add_shape", wb::CommandArgs::default());
@@ -359,7 +368,7 @@ fn add_button(enabled: bool) -> Div {
     }
 }
 
-// ---------------------------------------------------------------- 面板 ----
+// ---------------------------------------------------------------- Panels ----
 
 /// Left: the open documents and their shape counts.
 pub struct ExplorerPanel;
@@ -369,7 +378,7 @@ impl wb::ViewInstance for ExplorerPanel {
         wb::ViewTypeId::new("example.panel.explorer")
     }
     fn title(&self) -> String {
-        "资源管理器".to_string()
+        "Explorer".to_string()
     }
     fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
         let snap = host.snapshot();
@@ -386,7 +395,7 @@ impl wb::ViewInstance for ExplorerPanel {
             })
             .collect();
 
-        let mut rows: Vec<Div> = vec![heading("打开的文档")];
+        let mut rows: Vec<Div> = vec![heading("Open Documents")];
         for (title, dirty, rev, count) in docs {
             let color = if dirty { rgb(0xE6BF33) } else { rgb(0xC7C7CC) };
             rows.push(line(
@@ -395,21 +404,21 @@ impl wb::ViewInstance for ExplorerPanel {
                 13.0,
             ));
             rows.push(line(
-                format!("图形 ×{count} · 修订 r{rev}"),
+                format!("Shapes ×{count} · rev r{rev}"),
                 rgb(0x808088),
                 11.0,
             ));
         }
-        rows.push(heading("上下文"));
+        rows.push(heading("Context"));
         rows.push(line(
-            format!("工作模式：{}", snap.work_mode),
+            format!("Work mode: {}", snap.work_mode),
             rgb(0xC7C7CC),
             12.0,
         ));
         rows.push(line(
             format!(
-                "活动视图：{}",
-                snap.active_view_type.as_deref().unwrap_or("（无）")
+                "Active view: {}",
+                snap.active_view_type.as_deref().unwrap_or("(none)")
             ),
             rgb(0xC7C7CC),
             12.0,
@@ -435,13 +444,13 @@ impl wb::ViewInstance for TasksPanel {
         wb::ViewTypeId::new("example.panel.tasks")
     }
     fn title(&self) -> String {
-        "任务".to_string()
+        "Tasks".to_string()
     }
     fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
         let tasks: Vec<wb::TaskInfo> = host.host().tasks.all().cloned().collect();
         let rows: Vec<Div> = if tasks.is_empty() {
             vec![line(
-                "暂无后台任务。试试工具栏「演示」。".to_string(),
+                "No background tasks yet. Try the \"Demo\" toolbar group.".to_string(),
                 rgb(0x808088),
                 13.0,
             )]
@@ -522,7 +531,7 @@ fn cancel_button(task_id: wb::TaskId) -> Div {
         .rounded(px(3.))
         .bg(rgb(0x4A4D55))
         .text_size(px(11.))
-        .child("取消".to_string())
+        .child("Cancel".to_string())
         .on_mouse_down(gpui::MouseButton::Left, move |_ev, _window, _cx| {
             wb::dispatch(
                 "app.tasks.cancel",
@@ -539,14 +548,14 @@ impl wb::ViewInstance for PropertiesPanel {
         wb::ViewTypeId::new("example.panel.properties")
     }
     fn title(&self) -> String {
-        "属性".to_string()
+        "Properties".to_string()
     }
     fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
         let snap = host.snapshot();
         let host = host.host();
         let Some(doc) = snap.active_document.as_ref().map(|d| d.id) else {
             return Some(simple_panel(
-                "没有活动文档".to_string(),
+                "No active document".to_string(),
                 rgb(0x808088),
             ));
         };
@@ -566,14 +575,14 @@ impl wb::ViewInstance for PropertiesPanel {
 
         let rows: Vec<Div> = match shape {
             Some((x, y, w, h, round, hue)) => {
-                let mut rows = vec![heading(&format!("图形 #{}", selected.unwrap_or(0)))];
+                let mut rows = vec![heading(&format!("Shape #{}", selected.unwrap_or(0)))];
                 for (k, v) in [
                     ("X", format!("{x:.0}")),
                     ("Y", format!("{y:.0}")),
-                    ("宽", format!("{w:.0}")),
-                    ("高", format!("{h:.0}")),
-                    ("圆角", if round { "是" } else { "否" }.to_string()),
-                    ("色相", format!("{hue:.0}°")),
+                    ("Width", format!("{w:.0}")),
+                    ("Height", format!("{h:.0}")),
+                    ("Rounded", if round { "Yes" } else { "No" }.to_string()),
+                    ("Hue", format!("{hue:.0}°")),
                 ] {
                     rows.push(kv(k, v));
                 }
@@ -587,7 +596,7 @@ impl wb::ViewInstance for PropertiesPanel {
                 rows
             }
             None => vec![line(
-                "在画布中点击图形以查看属性".to_string(),
+                "Click a shape on the canvas to see its properties".to_string(),
                 rgb(0x808088),
                 13.0,
             )],
@@ -613,7 +622,7 @@ impl wb::ViewInstance for OutputPanel {
         wb::ViewTypeId::new("example.panel.output")
     }
     fn title(&self) -> String {
-        "输出".to_string()
+        "Output".to_string()
     }
     fn element(&mut self, host: &mut dyn wb::AppServices) -> Option<Box<dyn std::any::Any>> {
         let entries = host.host().log.tail(64);

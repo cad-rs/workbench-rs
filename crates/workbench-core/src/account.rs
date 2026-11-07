@@ -68,7 +68,7 @@ impl<T: HttpTransport> DeviceFlowClient<T> {
         let id = claims
             .get("sub")
             .and_then(Value::as_str)
-            .ok_or("userinfo 响应缺少 sub")?
+            .ok_or("The userinfo response is missing sub")?
             .to_string();
         let name = claims
             .get("name")
@@ -97,7 +97,7 @@ impl DeviceEndpoints {
             doc.get(key)
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .ok_or_else(|| format!("discovery 缺少 {key}"))
+                .ok_or_else(|| format!("The discovery document is missing {key}"))
         };
         Ok(Self {
             device_authorization: get("device_authorization_endpoint")?,
@@ -121,7 +121,7 @@ impl<T: HttpTransport> AccountService for DeviceFlowClient<T> {
             body.get(key)
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .ok_or_else(|| format!("device_authorization 响应缺少 {key}"))
+                .ok_or_else(|| format!("The device_authorization response is missing {key}"))
         };
         let device_code = str_field("device_code")?;
         *self
@@ -146,7 +146,7 @@ impl<T: HttpTransport> AccountService for DeviceFlowClient<T> {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
-            .ok_or("尚未开始登录（无 device code）")?;
+            .ok_or("Sign-in has not started (no device code)")?;
         let eps = self.endpoints()?;
         let body = self.transport.post_form(
             &eps.token,
@@ -178,8 +178,8 @@ impl<T: HttpTransport> AccountService for DeviceFlowClient<T> {
             Some("slow_down") => Ok(PollResult::SlowDown),
             Some("access_denied") => Ok(PollResult::Denied),
             Some("expired_token") => Ok(PollResult::Expired),
-            Some(other) => Err(format!("token 端点返回未知错误: {other}")),
-            None => Err("token 响应既无 access_token 也无 error".to_string()),
+            Some(other) => Err(format!("The token endpoint returned an unknown error: {other}")),
+            None => Err("The token response has neither access_token nor error".to_string()),
         }
     }
 
@@ -246,10 +246,10 @@ impl HttpTransport for UreqTransport {
 fn read_json(
     result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
 ) -> Result<Value, String> {
-    let res = result.map_err(|e| format!("HTTP 请求失败: {e}"))?;
+    let res = result.map_err(|e| format!("HTTP request failed: {e}"))?;
     let text = res
         .into_body()
         .read_to_string()
-        .map_err(|e| format!("读取响应失败: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("响应不是 JSON: {e}; 原文: {text}"))
+        .map_err(|e| format!("Failed to read the response: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("The response is not JSON: {e}; body: {text}"))
 }

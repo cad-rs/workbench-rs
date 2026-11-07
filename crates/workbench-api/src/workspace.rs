@@ -1,7 +1,9 @@
-//! 工作区模型（design.md §6）：工具栏、Dock Panel、中央多标签内容区与布局持久化。
+//! The workspace model (design.md §6): toolbar, dock panels, the central multi-tab content area
+//! and layout persistence.
 //!
-//! 该模型完全 GUI 无关；egui/gpui 前端负责把它渲染成具体控件。
-//! 布局持久化只使用稳定 ID；恢复时跳过未注册的面板/视图并记录诊断。
+//! The model is entirely GUI-independent; the egui/gpui frontends render it as concrete widgets.
+//! Layout persistence only uses stable IDs; restoring skips unregistered panels/views and records
+//! a diagnostic.
 
 use std::collections::HashMap;
 
@@ -10,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{DocumentId, PanelId, StableId, TabInstanceId, ToolbarGroupId, ViewTypeId};
 use crate::view::ViewInstance;
 
-/// 停靠区域。
+/// Dock area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DockArea {
     Left,
@@ -30,28 +32,32 @@ impl DockArea {
     }
 }
 
-// ---- 工具栏（RibbonBar：Tab → Group → Items，稳定 ID + 命令绑定 + 按钮形态，ribbon-bar.md §2.4/§6）----
+// ---- Toolbar (RibbonBar: Tab → Group → Items, stable IDs + command binding + button kinds,
+// ribbon-bar.md §2.4/§6) ----
 
-/// Ribbon 条目形态（ribbon-bar.md §2.4）。默认（`Default` 与 serde）为
-/// [`RibbonItemKind::Command`]，旧数据与旧注册代码零改动兼容。
+/// Ribbon item kind (ribbon-bar.md §2.4). Defaults (`Default` and serde) to
+/// [`RibbonItemKind::Command`], so old data and old registration code keep working unchanged.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum RibbonItemKind {
-    /// 普通命令按钮：点击执行命令（默认形态，等价现状）。
+    /// Plain command button: a click runs the command (the default kind, same as before).
     Command,
-    /// 开关按钮：点击只发命令，checked 态由命令系统查询（`is_checked`）。
+    /// Toggle button: a click only sends the command; the checked state is queried from the
+    /// command system (`is_checked`).
     Toggle,
-    /// 分裂按钮：主区执行默认命令，箭头区弹出子命令菜单。
+    /// Split button: the main area runs the default command, the arrow area pops up a menu of
+    /// sub-commands.
     Split {
-        /// 下拉子命令条目。
+        /// The drop-down sub-command items.
         items: Vec<ToolbarItem>,
     },
-    /// 纯菜单按钮：整体只弹出菜单，不直接执行。
+    /// Pure menu button: the whole button only pops up a menu and runs nothing directly.
     Menu {
-        /// 菜单条目。
+        /// The menu items.
         items: Vec<ToolbarItem>,
     },
-    /// 选择框（select-only）：当前值与选项由命令系统查询（`combo_state`），
-    /// 选中执行命令并经 [`CommandArgs::value`](crate::command::CommandArgs) 带值传入。
+    /// Select box (select-only): the current value and options are queried from the command
+    /// system (`combo_state`); picking one runs the command with the value passed in
+    /// [`CommandArgs::value`](crate::command::CommandArgs).
     Combo,
 }
 
@@ -61,15 +67,16 @@ impl Default for RibbonItemKind {
     }
 }
 
-/// Ribbon 条目尺寸档（ribbon-bar.md §2.2）。默认（`Default` 与 serde）为
-/// [`ItemSize::Small`]（与现状视觉最接近）。
+/// Ribbon item size (ribbon-bar.md §2.2). Defaults (`Default` and serde) to [`ItemSize::Small`]
+/// (closest to the previous look).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum ItemSize {
-    /// 大按钮：24px 图标上置 + 标签下置，独占一列。
+    /// Large button: a 24px icon above the label below, taking a column of its own.
     Large,
-    /// 小按钮：16px 图标 + 标签同行（默认档）。
+    /// Small button: a 16px icon and the label on one line (the default size).
     Small,
-    /// 仅图标：无标签（QAT 与图标自明命令；图标缺失时回退标签首字占位）。
+    /// Icon only: no label (QAT and self-explanatory icon commands; without an icon it falls back
+    /// to the label's first character as a placeholder).
     Icon,
 }
 
@@ -81,17 +88,17 @@ impl Default for ItemSize {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ToolbarItem {
-    /// 绑定的命令稳定 ID。
+    /// Stable ID of the bound command.
     pub command: crate::ids::CommandId,
-    /// 显示文本；None 时回退到命令标题。
+    /// Display text; None falls back to the command title.
     pub label: Option<String>,
-    /// 按钮形态；缺省为 [`RibbonItemKind::Command`]（向后兼容）。
+    /// Button kind; defaults to [`RibbonItemKind::Command`] (backward compatible).
     #[serde(default)]
     pub kind: RibbonItemKind,
-    /// 尺寸档；缺省为 [`ItemSize::Small`]（向后兼容）。
+    /// Size; defaults to [`ItemSize::Small`] (backward compatible).
     #[serde(default)]
     pub size: ItemSize,
-    /// Combo 声明宽度（逻辑像素）；None 时用组件默认宽度。
+    /// Declared Combo width (logical pixels); None uses the component's default width.
     #[serde(default)]
     pub width: Option<f32>,
 }
@@ -115,37 +122,39 @@ impl ToolbarItem {
             width: None,
         }
     }
-    /// Toggle 形态（checked 态由命令系统查询）。
+    /// Toggle kind (the checked state is queried from the command system).
     pub fn toggle(mut self) -> Self {
         self.kind = RibbonItemKind::Toggle;
         self
     }
-    /// Split 形态：主按钮执行默认命令，箭头区弹出 `items` 子命令菜单。
+    /// Split kind: the main button runs the default command, the arrow area pops up the `items`
+    /// sub-command menu.
     pub fn split(mut self, items: Vec<ToolbarItem>) -> Self {
         self.kind = RibbonItemKind::Split { items };
         self
     }
-    /// Menu 形态：整体弹出 `items` 菜单，不直接执行。
+    /// Menu kind: the whole button pops up the `items` menu and runs nothing directly.
     pub fn menu(mut self, items: Vec<ToolbarItem>) -> Self {
         self.kind = RibbonItemKind::Menu { items };
         self
     }
-    /// Combo 形态：选项/当前值由命令系统查询（`combo_state`）。
+    /// Combo kind: the options/current value are queried from the command system
+    /// (`combo_state`).
     pub fn combo(mut self) -> Self {
         self.kind = RibbonItemKind::Combo;
         self
     }
-    /// 大按钮档。
+    /// Large button size.
     pub fn large(mut self) -> Self {
         self.size = ItemSize::Large;
         self
     }
-    /// 仅图标档（无标签）。
+    /// Icon-only size (no label).
     pub fn icon_only(mut self) -> Self {
         self.size = ItemSize::Icon;
         self
     }
-    /// 声明宽度（Combo 选择框等；逻辑像素）。
+    /// Declare a width (Combo select boxes, …; logical pixels).
     pub fn width(mut self, w: f32) -> Self {
         self.width = Some(w);
         self
@@ -157,7 +166,7 @@ pub struct ToolbarGroup {
     pub id: ToolbarGroupId,
     pub title: String,
     pub items: Vec<ToolbarItem>,
-    /// 贡献来源（Workbench/插件 ID）；插件卸载清理用。
+    /// Contribution source (Workbench/plugin ID); for cleanup when a plugin is unloaded.
     pub source: Option<String>,
 }
 
@@ -170,31 +179,31 @@ impl ToolbarGroup {
             source: None,
         }
     }
-    /// 标记贡献来源。
+    /// Mark the contribution source.
     pub fn from_source(mut self, source: impl Into<String>) -> Self {
         self.source = Some(source.into());
         self
     }
-    /// 设置条目（builder 风格）。
+    /// Set the items (builder style).
     pub fn items(mut self, items: Vec<ToolbarItem>) -> Self {
         self.items = items;
         self
     }
 }
 
-// ---- 视图 / 面板定义 ----
+// ---- View / panel definitions ----
 
-/// 创建视图实例的工厂。
+/// A factory that creates view instances.
 pub type ViewFactory = Box<dyn Fn() -> Box<dyn ViewInstance> + Send + Sync>;
 
-/// 中央内容视图类型注册。
+/// Registration of a central content view type.
 pub struct ViewDef {
     pub type_id: ViewTypeId,
     pub title: String,
-    /// 图标资源路径（如 `"icons/canvas.svg"`，由产品的 AssetSource 解析）；
-    /// 中央标签展示用，None 时回退为纯文本。
+    /// Icon asset path (such as `"icons/canvas.svg"`, resolved by the product's AssetSource);
+    /// shown on the central tab, and None falls back to plain text.
     pub icon: Option<String>,
-    /// 是否单例：同类型同时只开一个标签。
+    /// Whether it is a singleton: only one tab of this type is open at a time.
     pub singleton: bool,
     /// Script central view: gpui-rhai script file path (mounted by the gpui
     /// frontend). When set the tab content is fully defined by the script and
@@ -222,7 +231,7 @@ impl ViewDef {
             factory: Box::new(factory),
         }
     }
-    /// 设置图标资源路径（中央标签展示用）。
+    /// Set the icon asset path (shown on the central tab).
     pub fn icon(mut self, path: impl Into<String>) -> Self {
         self.icon = Some(path.into());
         self
@@ -241,18 +250,18 @@ impl ViewDef {
     }
 }
 
-/// Dock Panel 注册。
+/// Dock panel registration.
 pub struct PanelDef {
     pub id: PanelId,
     pub title: String,
-    /// 图标资源路径（如 `"icons/explorer.svg"`，由产品的 AssetSource 解析）；
-    /// 面板头展示用，None 时回退为纯文本。
+    /// Icon asset path (such as `"icons/explorer.svg"`, resolved by the product's AssetSource);
+    /// shown on the panel header, and None falls back to plain text.
     pub icon: Option<String>,
-    /// 脚本面板：gpui-rhai 脚本文件路径（由 gpui 前端挂载渲染）。
-    /// 设置后面板内容完全由脚本定义，`factory` 不再被调用。
+    /// Script panel: gpui-rhai script file path (mounted and rendered by the gpui frontend).
+    /// When set the panel content is fully defined by the script and `factory` is never called.
     pub script: Option<String>,
     pub area: DockArea,
-    /// 默认尺寸：左右为宽度，上下为高度（逻辑像素）。
+    /// Default size: the width for left/right, the height for top/bottom (logical pixels).
     pub default_size: f32,
     pub order: i32,
     /// The plugin this panel was contributed by, if any.
@@ -281,13 +290,13 @@ impl PanelDef {
             factory: Box::new(factory),
         }
     }
-    /// 设置图标资源路径（面板头展示用）。
+    /// Set the icon asset path (shown on the panel header).
     pub fn icon(mut self, path: impl Into<String>) -> Self {
         self.icon = Some(path.into());
         self
     }
-    /// 脚本面板：内容由 gpui-rhai 脚本（返回 UiNode 树）定义。
-    /// `path` 是脚本文件路径；`factory` 不会被调用（传一个占位即可）。
+    /// Script panel: the content is defined by a gpui-rhai script (returning a UiNode tree).
+    /// `path` is the script file path; `factory` is never called (pass a placeholder).
     pub fn script(mut self, path: impl Into<String>) -> Self {
         self.script = Some(path.into());
         self
@@ -299,13 +308,14 @@ impl PanelDef {
     }
 }
 
-/// 面板运行槽位：定义 + 布局状态 + 实例。
+/// A panel's runtime slot: definition + layout state + instance.
 pub struct PanelSlot {
     pub id: PanelId,
     pub title: String,
-    /// 图标资源路径（注册时从 [`PanelDef`] 复制）。
+    /// Icon asset path (copied from the [`PanelDef`] at registration).
     pub icon: Option<String>,
-    /// 脚本面板路径（注册时从 [`PanelDef`] 复制）；Some 时不创建 instance。
+    /// Script panel path (copied from the [`PanelDef`] at registration); with Some no instance
+    /// is created.
     pub script: Option<String>,
     pub area: DockArea,
     pub order: i32,
@@ -313,32 +323,33 @@ pub struct PanelSlot {
     pub visible: bool,
 }
 
-/// 中央标签槽位。
+/// A central tab slot.
 pub struct TabSlot {
     pub instance_id: TabInstanceId,
     pub type_id: ViewTypeId,
     pub title: String,
-    /// 图标资源路径（打开时从 [`ViewDef`] 复制）。
+    /// Icon asset path (copied from the [`ViewDef`] when opened).
     pub icon: Option<String>,
     /// Script path copied from the [`ViewDef`] when the tab was opened; `Some`
     /// means the frontend mounts the script instead of a Rust instance.
     pub script: Option<String>,
-    /// 绑定的文档（文档视图）。
+    /// The bound document (document views).
     pub document: Option<DocumentId>,
 }
 
-// ---- RibbonBar（design.md §7：Tab → Group → Item，稳定 ID + 命令绑定）----
+// ---- RibbonBar (design.md §7: Tab → Group → Item, stable IDs + command binding) ----
 
-/// Ribbon Tab。Group 复用 [`ToolbarGroup`](crate::ToolbarGroup)（稳定 ID、条目、来源标记）。
+/// A Ribbon tab. Groups reuse [`ToolbarGroup`](crate::ToolbarGroup) (stable ID, items, source
+/// mark).
 #[derive(Clone, Debug)]
 pub struct RibbonTab {
     pub id: StableId,
     pub title: String,
     pub groups: Vec<ToolbarGroup>,
-    /// 贡献来源（Workbench/插件 ID）。
+    /// Contribution source (Workbench/plugin ID).
     pub source: Option<String>,
-    /// 上下文标记（ribbon-bar.md §4.7）：空 = 常驻 Tab；
-    /// 含当前 work_mode 名时该模式下可见（渲染层过滤）。
+    /// Context marks (ribbon-bar.md §4.7): empty = an always-present tab; when it contains the
+    /// current work_mode name the tab is visible in that mode (filtered by the render layer).
     pub contexts: Vec<String>,
 }
 
@@ -360,11 +371,11 @@ impl RibbonTab {
         self.groups = groups;
         self
     }
-    /// 平台默认 Tab（兼容入口：`add_toolbar_group` 的组落入此处）。
+    /// The platform default tab (compatibility entry: groups from `add_toolbar_group` land here).
     pub const DEFAULT_TAB_ID: &'static str = "app.home";
 }
 
-// ---- 布局持久化 ----
+// ---- Layout persistence ----
 
 #[derive(Serialize, Deserialize)]
 pub struct SavedPanel {
@@ -379,11 +390,12 @@ pub struct SavedPanel {
 pub struct SavedTab {
     pub type_id: String,
     pub title: String,
-    /// 恢复时是否绑定默认文档。
+    /// Whether to bind the default document on restore.
     pub bind_document: bool,
 }
 
-/// 布局文件（design.md §6.5）。`ui` 字段留给 GUI 前端保存各自的物理布局细节。
+/// The layout file (design.md §6.5). The `ui` field is left for GUI frontends to save their own
+/// physical layout details.
 #[derive(Serialize, Deserialize)]
 pub struct LayoutFile {
     pub version: u32,
@@ -391,24 +403,28 @@ pub struct LayoutFile {
     pub active_tab: usize,
     pub panels: Vec<SavedPanel>,
     pub tabs: Vec<SavedTab>,
-    /// 各停靠区域的活动面板 ID。
+    /// The active panel ID of each dock area.
     pub area_active: Vec<(DockArea, String)>,
-    /// 活动 Ribbon Tab（稳定 ID；旧布局文件无此字段时回落首个 Tab）。
+    /// The active Ribbon tab (stable ID; old layout files without this field fall back to the
+    /// first tab).
     #[serde(default)]
     pub ribbon_active_tab: Option<String>,
-    /// Ribbon 折叠态（ribbon-bar.md §4.1）；None = 未记录。
-    /// 折叠态持久化由前端 bridge 接线（后续里程碑），核心不消费。
+    /// Ribbon collapsed state (ribbon-bar.md §4.1); None = not recorded.
+    /// Persisting the collapsed state is wired up by the frontend bridge (a later milestone); the
+    /// core does not consume it.
     #[serde(default)]
     pub ribbon_collapsed: Option<bool>,
-    /// Ribbon 空间不足策略（ribbon-bar.md §4.5）："scroll"（默认）| "collapse"；
-    /// None = 未记录，核心不消费。
+    /// Ribbon policy when space runs out (ribbon-bar.md §4.5): "scroll" (default) | "collapse";
+    /// None = not recorded, and the core does not consume it.
     #[serde(default)]
     pub ribbon_overflow: Option<String>,
-    /// GUI 前端私有的物理布局（如 egui_tiles 树）。无 GUI 语义，核心不解析。
+    /// The GUI frontend's private physical layout (such as an egui_tiles tree). It has no GUI
+    /// semantics and the core does not parse it.
     #[serde(default)]
     pub ui: Option<serde_json::Value>,
-    /// 停靠区的物理布局（gpui 前端的 `DockArea::dump` 状态：各停靠区的尺寸、
-    /// 分组与标签顺序）。同样无 GUI 语义、核心不解析；恢复时由前端 `load`。
+    /// The physical layout of the dock areas (the gpui frontend's `DockArea::dump` state: each
+    /// dock area's size, grouping and tab order). Likewise without GUI semantics and not parsed
+    /// by the core; the frontend `load`s it on restore.
     #[serde(default)]
     pub dock: Option<serde_json::Value>,
 }
@@ -483,21 +499,24 @@ pub enum AccountPhase {
     Failed(String),
 }
 
-/// 工作区状态。UI 线程所有。
+/// Workspace state. Owned by the UI thread.
 pub struct WorkspaceState {
-    /// RibbonBar：Tab 列表（§7.2）。
+    /// RibbonBar: the tab list (§7.2).
     pub ribbon: Vec<RibbonTab>,
-    /// 活动 Ribbon Tab ID（持久化）。
+    /// Active Ribbon tab ID (persisted).
     pub active_ribbon_tab: String,
-    /// QAT 快速访问工具条（ribbon-bar.md §4.1）：产品静态集，复用 [`ToolbarItem`]
-    /// （渲染取 Icon 档），折叠态仍可见。用户自定义增删与持久化二期。
+    /// The quick access toolbar (QAT, ribbon-bar.md §4.1): a static product set reusing
+    /// [`ToolbarItem`] (rendered at icon size), still visible when collapsed. User customization
+    /// (add/remove) and its persistence are phase 2.
     pub qat: Vec<ToolbarItem>,
-    /// Ribbon 折叠态（ribbon-bar.md §4.1）；持久化于 LayoutFile.ribbon_collapsed。
+    /// Ribbon collapsed state (ribbon-bar.md §4.1); persisted in LayoutFile.ribbon_collapsed.
     pub ribbon_collapsed: bool,
-    /// Ribbon 折叠能力开关（ribbon-bar.md §4.5）；默认 false（禁用），
-    /// 产品经 builder 开启。门控折叠钮渲染、Tab 双击与 Ctrl+F1 快捷键。
+    /// Whether the Ribbon can collapse (ribbon-bar.md §4.5); false (disabled) by default, the
+    /// product turns it on through the builder. Gates rendering the collapse button, tab
+    /// double-click and the Ctrl+F1 hotkey.
     pub ribbon_collapse_enabled: bool,
-    /// About 对话框打开标志（`app.about` 命令置位；前端渲染对话框并负责关闭）。
+    /// About dialog open flag (set by the `app.about` command; the frontend renders the dialog
+    /// and closes it).
     pub about_open: bool,
     /// Active settings text edit (`app.settings.edit_begin`): the key being
     /// edited and the edit buffer. Frontend renders an input overlay and
@@ -513,12 +532,13 @@ pub struct WorkspaceState {
     pub panels: Vec<PanelSlot>,
     pub tabs: Vec<TabSlot>,
     pub active_tab: usize,
-    /// 当前工作模式（Perspective 的简化：影响命令启用状态）。
+    /// The current work mode (a simplified Perspective: affects whether commands are enabled).
     pub work_mode: String,
     pub work_modes: Vec<String>,
-    /// 产品指定的默认文档类型 ID（多文档类型时用；None = 第一个注册的）。
+    /// The default document type ID the product specifies (used with several document types;
+    /// None = the first registered).
     pub default_document_type: Option<String>,
-    /// 各区域的活动面板。
+    /// The active panel of each area.
     pub area_active: HashMap<DockArea, PanelId>,
 
     view_defs: HashMap<String, ViewDef>,
@@ -551,11 +571,11 @@ impl WorkspaceState {
         }
     }
 
-    // ---- 注册 ----
+    // ---- Registration ----
 
     pub fn register_view(&mut self, def: ViewDef) -> Result<(), String> {
         if self.view_defs.contains_key(def.type_id.as_str()) {
-            return Err(format!("视图类型重复注册: {}", def.type_id));
+            return Err(format!("Duplicate view type registration: {}", def.type_id));
         }
         self.view_defs.insert(def.type_id.0.clone(), def);
         Ok(())
@@ -563,7 +583,7 @@ impl WorkspaceState {
 
     pub fn register_panel(&mut self, def: PanelDef, visible_by_default: bool) -> Result<(), String> {
         if self.panel_defs.contains_key(def.id.as_str()) {
-            return Err(format!("面板重复注册: {}", def.id));
+            return Err(format!("Duplicate panel registration: {}", def.id));
         }
         let slot = PanelSlot {
             id: def.id.clone(),
@@ -586,13 +606,15 @@ impl WorkspaceState {
 
     // ---- RibbonBar ----
 
-    /// 兼容入口（工具栏时代 API）：组落入平台默认 Tab「主页」。
-    /// 同 ID 组在 Tab 内合并条目（受控贡献，§7.3）。
+    /// Compatibility entry (the toolbar-era API): the group lands in the platform default tab
+    /// "Home". Groups with the same ID merge their items within the tab (controlled
+    /// contributions, §7.3).
     pub fn add_toolbar_group(&mut self, group: ToolbarGroup) {
-        self.add_group_to_tab(RibbonTab::DEFAULT_TAB_ID, "主页", group);
+        self.add_group_to_tab(RibbonTab::DEFAULT_TAB_ID, "Home", group);
     }
 
-    /// 注册/合并一个 Ribbon Tab：同 ID Tab 合并其组（组内同 ID 合并条目）。
+    /// Register/merge a Ribbon tab: tabs with the same ID merge their groups (groups with the
+    /// same ID merge their items).
     pub fn add_ribbon_tab(&mut self, tab: RibbonTab) {
         if let Some(existing) = self.ribbon.iter_mut().find(|t| t.id == tab.id) {
             for group in tab.groups {
@@ -606,14 +628,14 @@ impl WorkspaceState {
         }
     }
 
-    /// 切换活动 Ribbon Tab（稳定 ID）。
+    /// Switch the active Ribbon tab (stable ID).
     pub fn set_active_ribbon_tab(&mut self, id: &str) {
         if self.ribbon.iter().any(|t| t.id.0 == id) {
             self.active_ribbon_tab = id.to_string();
         }
     }
 
-    /// 当前活动 Tab 的组列表；无 Tab 时为空。
+    /// The active tab's group list; empty when there are no tabs.
     pub fn active_ribbon(&self) -> Option<&RibbonTab> {
         self.ribbon
             .iter()
@@ -647,7 +669,7 @@ impl WorkspaceState {
         self.work_mode = default.into();
     }
 
-    // ---- 中央标签 ----
+    // ---- Central tabs ----
 
     pub fn view_def(&self, type_id: &ViewTypeId) -> Option<&ViewDef> {
         self.view_defs.get(type_id.as_str())
@@ -661,8 +683,8 @@ impl WorkspaceState {
         self.view_defs.values().map(|d| &d.type_id)
     }
 
-    /// 打开一个中央视图；singleton 类型复用已有标签。
-    /// `bind_document` 决定新标签是否绑定当前活动文档。
+    /// Open a central view; singleton types reuse the existing tab.
+    /// `bind_document` decides whether the new tab is bound to the active document.
     pub fn open_view(
         &mut self,
         type_id: &ViewTypeId,
@@ -672,11 +694,11 @@ impl WorkspaceState {
         let def = self
             .view_defs
             .get(type_id.as_str())
-            .ok_or_else(|| format!("未注册的视图类型: {type_id}"))?;
+            .ok_or_else(|| format!("Unregistered view type: {type_id}"))?;
         if def.singleton {
             if let Some(slot) = self.tabs.iter_mut().find(|t| t.type_id == *type_id) {
                 let id = slot.instance_id;
-                // 文档绑定视图：切换单例标签的文档绑定到当前文档
+                // Document-bound view: rebind the singleton tab to the current document
                 if let Some(doc) = bind_document {
                     slot.document = Some(doc);
                 }
@@ -738,7 +760,7 @@ impl WorkspaceState {
         self.tabs.get_mut(self.active_tab)
     }
 
-    // ---- 面板 ----
+    // ---- Panels ----
 
     pub fn panels_in_area(&self, area: DockArea) -> Vec<&PanelSlot> {
         let mut list: Vec<&PanelSlot> = self.panels.iter().filter(|p| p.area == area).collect();
@@ -751,7 +773,7 @@ impl WorkspaceState {
             .panels
             .iter_mut()
             .find(|p| &p.id == id)
-            .ok_or_else(|| format!("未注册的面板: {id}"))?;
+            .ok_or_else(|| format!("Unregistered panel: {id}"))?;
         slot.visible = !slot.visible;
         if slot.visible {
             self.area_active.insert(slot.area, slot.id.clone());
@@ -766,10 +788,11 @@ impl WorkspaceState {
             .find(|p| p.area == area && &p.id == active_id && p.visible)
     }
 
-    // ---- 模式 ----
+    // ---- Modes ----
 
-    /// 插件禁用/卸载的 Ribbon 侧清理（design.md §16.2）：
-    /// 从所有组摘除被移除命令的条目，清掉该来源贡献的空组与整个 Tab。
+    /// Ribbon-side cleanup when a plugin is disabled/unloaded (design.md §16.2):
+    /// removes the items of the removed commands from every group, and drops the groups and whole
+    /// tabs that source contributed once they are empty.
     pub fn remove_commands(&mut self, removed: &[String], source: &str) {
         for tab in &mut self.ribbon {
             for group in &mut tab.groups {
@@ -833,7 +856,7 @@ impl WorkspaceState {
         self.work_mode = mode.into();
     }
 
-    // ---- 布局持久化 ----
+    // ---- Layout persistence ----
 
     pub fn save_layout(&self) -> LayoutFile {
         LayoutFile {
@@ -873,10 +896,11 @@ impl WorkspaceState {
         }
     }
 
-    /// 应用布局：跳过未注册的面板/视图（诊断由调用方记录），缺失项保留默认状态。
+    /// Apply a layout: skips unregistered panels/views (the caller records the diagnostics);
+    /// missing entries keep their default state.
     pub fn apply_layout(&mut self, file: &LayoutFile) -> Vec<String> {
         let mut skipped = Vec::new();
-        // 面板
+        // Panels
         for sp in &file.panels {
             if let Some(slot) = self.panels.iter_mut().find(|p| p.id.0 == sp.id) {
                 slot.area = sp.area;
@@ -884,16 +908,16 @@ impl WorkspaceState {
                 slot.size = sp.size.max(80.0);
                 slot.visible = sp.visible;
             } else {
-                skipped.push(format!("面板 `{}` 未注册，跳过", sp.id));
+                skipped.push(format!("Panel `{}` is not registered; skipped", sp.id));
             }
         }
-        // 区域活动面板
+        // Active panel of each area
         for (area, pid) in &file.area_active {
             if self.panels.iter().any(|p| &p.id.0 == pid && p.area == *area) {
                 self.area_active.insert(*area, PanelId::new(pid.clone()));
             }
         }
-        // 中央标签
+        // Central tabs
         let saved_active = file.active_tab;
         self.tabs.clear();
         self.active_tab = 0;
@@ -908,23 +932,40 @@ impl WorkspaceState {
                         title: st.title.clone(),
                         icon: def.icon.clone(),
                         script: def.script.clone(),
-                        document: None, // 文档不跨会话恢复；需要时由工作台重新绑定
+                        // Documents are not restored across sessions; the workbench rebinds
+                        // them when needed
+                        document: None,
                     });
                 }
-                None => skipped.push(format!("视图类型 `{}` 未注册，跳过", st.type_id)),
+                None => skipped.push(format!(
+                    "View type `{}` is not registered; skipped",
+                    st.type_id
+                )),
             }
         }
         self.active_tab = saved_active.min(self.tabs.len().saturating_sub(1));
-        self.work_mode = file.work_mode.clone();
+        // A mode the product no longer has (renamed, or from another product)
+        // keeps the current one, like an unregistered panel or tab.
+        if self.work_modes.is_empty() || self.work_modes.contains(&file.work_mode) {
+            self.work_mode = file.work_mode.clone();
+        } else {
+            skipped.push(format!(
+                "Work mode `{}` is not registered; kept `{}`",
+                file.work_mode, self.work_mode
+            ));
+        }
         // Restore the ribbon collapse state (defaults to expanded when absent).
         self.ribbon_collapsed = file.ribbon_collapsed.unwrap_or(false);
-        // 活动 Ribbon Tab：未注册的 Tab 回落首个 Tab（§6.5 失效项可诊断）
+        // Active Ribbon tab: an unregistered tab falls back to the first tab (§6.5: stale entries
+        // are diagnosable)
         match &file.ribbon_active_tab {
             Some(id) if self.ribbon.iter().any(|t| t.id.0 == *id) => {
                 self.active_ribbon_tab = id.clone();
             }
             Some(id) if !self.ribbon.is_empty() => {
-                skipped.push(format!("RibbonTab `{id}` 未注册，回落首个 Tab"));
+                skipped.push(format!(
+                    "RibbonTab `{id}` is not registered; fell back to the first tab"
+                ));
                 self.active_ribbon_tab = self.ribbon[0].id.0.clone();
             }
             _ => {}
@@ -946,10 +987,27 @@ mod tests {
 
     #[test]
     fn a_prompt_carries_its_command_and_caption() {
-        let edit = TextEdit::prompt("3/width", "12", "rcad.part.set_property", "长方体 · width");
+        let edit = TextEdit::prompt("3/width", "12", "rcad.part.set_property", "Box · width");
         assert_eq!(edit.commit_command(), "rcad.part.set_property");
-        assert_eq!(edit.caption(), "长方体 · width");
+        assert_eq!(edit.caption(), "Box · width");
         assert_eq!(edit.key, "3/width");
         assert_eq!(edit.buffer, "12");
+    }
+
+    #[test]
+    fn a_layout_with_an_unknown_work_mode_keeps_the_current_one() {
+        let mut ws = super::WorkspaceState::new("Modeling");
+        ws.set_work_modes(vec!["Modeling".into(), "Sketch".into()], "Modeling");
+        let mut file = ws.save_layout();
+
+        file.work_mode = "Sketch".into();
+        assert!(ws.apply_layout(&file).is_empty());
+        assert_eq!(ws.work_mode, "Sketch");
+
+        // A layout saved before the modes were renamed.
+        file.work_mode = "Retired".into();
+        let skipped = ws.apply_layout(&file);
+        assert_eq!(ws.work_mode, "Sketch");
+        assert!(skipped.iter().any(|s| s.contains("Work mode")), "{skipped:?}");
     }
 }

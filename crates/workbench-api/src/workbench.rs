@@ -1,19 +1,21 @@
-//! Workbench 模块契约（design.md §8）。
+//! The Workbench module contract (design.md §8).
 //!
-//! 模块在产品装配阶段静态链接（Cargo crate），通过 `init` 注册贡献；
-//! 模块自身不持有运行期状态——领域状态放扩展服务或文档内容。
+//! Modules are statically linked when the product is assembled (Cargo crates) and register their
+//! contributions in `init`; a module holds no runtime state itself — domain state lives in
+//! extension services or document content.
 
 use crate::ids::WorkbenchId;
 use crate::registry::Registry;
 
 pub trait Workbench: 'static {
-    /// 模块稳定 ID。
+    /// Stable module ID.
     fn id(&self) -> WorkbenchId;
-    /// 注册贡献。允许 panic——核心装配时会捕获并隔离（验收 #19）。
+    /// Register contributions. May panic — the core catches and isolates it during assembly
+    /// (acceptance #19).
     fn init(&self, registry: &mut Registry);
 }
 
-/// 便捷：为实现了 Workbench 的类型生成 Box 装配项。
+/// Convenience: build a boxed assembly item for a type that implements Workbench.
 pub fn boxed<W: Workbench>(wb: W) -> Box<dyn Workbench> {
     Box::new(wb)
 }

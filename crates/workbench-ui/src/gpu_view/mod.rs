@@ -1,30 +1,34 @@
-//! GPU 视口（前端原生视图扩展）：自建 wgpu 管线渲染 3D/2D 视图。
+//! GPU viewport (a native view extension of the frontend): renders 3D/2D views with its own wgpu
+//! pipelines.
 //!
-//! 帧怎么上屏由 [`present`] 按平台决定：Web 在 GPUI 自己的设备上渲进
-//! `WgpuDynamicTexture`（按 sprite 参与绘制顺序）；Windows 在 GPUI 窗口合成
-//! 里拿一个原生表面（DirectComposition visual），挂视口自己的 DX12 交换链
-//! （位于 GPUI 基础内容之上、菜单/弹层/对话框之下）；其余桌面或合成不可用
-//! 时离屏渲染 + 回读贴图。移植自 gpui-wgpu 参考实现（javagg/gpui-demo），
-//! 上屏方式依 javagg/gpui-fast-wgpu-demo。
+//! How a frame reaches the screen is decided per platform by [`present`]: the web renders on
+//! GPUI's own device into a `WgpuDynamicTexture` (joining the draw order as a sprite); Windows
+//! takes a native surface (a DirectComposition visual) in the GPUI window's composition and hangs
+//! the viewport's own DX12 swap chain on it (above GPUI's base content, below menus / popovers /
+//! dialogs); other desktops, or Windows without composition, render offscreen + read back into a
+//! texture. Ported from the gpui-wgpu reference implementation (javagg/gpui-demo); the
+//! presentation approach follows javagg/gpui-fast-wgpu-demo.
 //!
-//! 集成方式：[`GpuViewportView`] 实现 [`wb::ViewInstance`]，其 `element`
-//! 返回一个 [`GpuViewportElement`]——一个自绘的 gpui `Element`，在 prepaint
-//! 定位、paint 渲染；上屏、输入与脏标记由 [`present::Viewport`] 统一承担，
-//! 本模块与 [`host`] 只提供各自的 [`present::ViewportContent`]。
+//! Integration: [`GpuViewportView`] implements [`wb::ViewInstance`], and its `element` returns a
+//! [`GpuViewportElement`], a self-drawn gpui `Element` that positions itself in prepaint and
+//! renders in paint; presentation, input and dirty tracking are all handled by
+//! [`present::Viewport`], and this module and [`host`] only supply their own
+//! [`present::ViewportContent`].
 //!
-//! 设备不归属任何一个视图：[`shared_gpu`] 提供全进程共享的 [`Gpu`]，
-//! 供插件自带的自定义 gpui `Element` 建自己的渲染资源。
+//! The device belongs to no single view: [`shared_gpu`] provides the process-wide shared [`Gpu`],
+//! on which plugins' own custom gpui `Element`s build their render resources.
 
 mod camera;
 mod gpu;
 mod present;
-// 产品注入契约（设计文档「gpu 视口注入 API」）：mesh/scene 公开，产品可
-// 自建着色网格（Scene::from_mesh）并经 GpuViewportView::new3d_with_scene
-// 注入轨道视口；camera 仍由框架驱动（Orbit3d 交互复用）。
+// Product injection contract (design doc, "GPU viewport injection API"): mesh/scene are public,
+// so a product can build its own shaded mesh (Scene::from_mesh) and inject it into an orbit
+// viewport via GpuViewportView::new3d_with_scene; the camera is still driven by the framework
+// (reusing the Orbit3d interaction).
 pub mod mesh;
 pub mod scene;
-// 通用视口宿主 Element（workbench-render 渲染核心的壳：裸输入转发 +
-// 按平台上屏；产品递 RenderScene + 基准视角）。
+// Generic viewport host Element (the shell around the workbench-render render core: raw input
+// forwarding + per-platform presentation; the product passes a RenderScene + base view).
 pub mod host;
 pub use host::RenderViewportElement;
 
@@ -45,9 +49,9 @@ pub(crate) use gpu::set_requirements;
 
 #[derive(Clone, Copy)]
 enum ViewKind {
-    /// 3D 轨道视图：左键拖拽旋转，Shift+左键平移，滚轮缩放
+    /// 3D orbit view: left-drag rotates, Shift+left-drag pans, the wheel zooms
     Orbit3d,
-    /// 俯视正交视图：左键拖拽平移，滚轮缩放
+    /// Top-down orthographic view: left-drag pans, the wheel zooms
     Top2d,
 }
 
@@ -181,9 +185,10 @@ impl DepthTarget {
     }
 }
 
-/// 产品场景提供者：每次 paint 调用，返回注入场景（`None` → 占位符）。
-/// 实现方自缓存（按内容身份判定重建），返回 `Rc` 保证与注入缓存指针
-/// 同一性对比成立（避免每帧重建上传缓冲）。
+/// Product scene provider: called on every paint, returns the injected scene (`None` →
+/// placeholder). The implementor does its own caching (deciding on rebuilds by content identity)
+/// and returns an `Rc` so the pointer-identity comparison against the injection cache holds
+/// (avoiding a rebuild of the upload buffers every frame).
 pub type SceneProvider = dyn Fn(&wgpu::Device) -> Option<Rc<Scene>>;
 
 /// What a demo (or product-injected) viewport draws, and its camera.
@@ -345,9 +350,10 @@ impl GpuViewportView {
         }
     }
 
-    /// 产品注入场景的 3D 轨道视口（注入 API）：`type_id`/`title` 由产品
-    /// 指定；`scene_provider` 每次 paint 调用（实现方自缓存），`None` 时
-    /// 显示占位符。相机交互（轨道/平移/缩放）复用框架实现。
+    /// A 3D orbit viewport for a product-injected scene (injection API): the product picks
+    /// `type_id`/`title`; `scene_provider` is called on every paint (the implementor caches), and
+    /// `None` shows the placeholder. Camera interaction (orbit/pan/zoom) reuses the framework's
+    /// implementation.
     pub fn new3d_with_scene(
         type_id: &'static str,
         title: &'static str,
@@ -457,18 +463,19 @@ impl Element for GpuViewportElement {
     }
 }
 
-/// 注册两个演示 GPU 视图、打开命令与 Ribbon 入口（产品装配时调用；
-/// 视图类型由本模块提供，Workbench 模块层不接触 GUI，故不放在 wb-example）。
+/// Registers the two demo GPU views, their open commands and the Ribbon entries (called during
+/// product assembly; the view types come from this module and the Workbench module layer doesn't
+/// touch the GUI, so this doesn't live in wb-example).
 pub fn register_views(reg: &mut wb::Registry) {
-    reg.register_view(wb::ViewDef::new("example.gpu3d", "三维视图 (wgpu)", true, || {
-        Box::new(GpuViewportView::new(ViewKind::Orbit3d, "example.gpu3d", "三维视图 (wgpu)"))
+    reg.register_view(wb::ViewDef::new("example.gpu3d", "3D View (wgpu)", true, || {
+        Box::new(GpuViewportView::new(ViewKind::Orbit3d, "example.gpu3d", "3D View (wgpu)"))
     }));
-    reg.register_view(wb::ViewDef::new("example.gpu_top", "俯视图 (wgpu)", true, || {
-        Box::new(GpuViewportView::new(ViewKind::Top2d, "example.gpu_top", "俯视图 (wgpu)"))
+    reg.register_view(wb::ViewDef::new("example.gpu_top", "Top View (wgpu)", true, || {
+        Box::new(GpuViewportView::new(ViewKind::Top2d, "example.gpu_top", "Top View (wgpu)"))
     }));
     for (command, title, view) in [
-        ("example.open_gpu3d", "三维视图", "example.gpu3d"),
-        ("example.open_gpu_top", "俯视图", "example.gpu_top"),
+        ("example.open_gpu3d", "3D View", "example.gpu3d"),
+        ("example.open_gpu_top", "Top View", "example.gpu_top"),
     ] {
         reg.register_command(wb::CommandDef::sync(
             command,
@@ -480,13 +487,24 @@ pub fn register_views(reg: &mut wb::Registry) {
         ));
     }
     reg.add_ribbon_tab(
-        wb::RibbonTab::new("wb.gpu", "三维")
+        wb::RibbonTab::new("wb.gpu", "3D")
             .from_source("gpu-view")
-            .groups(vec![wb::ToolbarGroup::new("gpu.views", "视图")
+            .groups(vec![wb::ToolbarGroup::new("gpu.views", "Views")
                 .from_source("gpu-view")
                 .items(vec![
-                    wb::ToolbarItem::labeled("example.open_gpu3d", "三维视图"),
-                    wb::ToolbarItem::labeled("example.open_gpu_top", "俯视图"),
+                    wb::ToolbarItem::labeled("example.open_gpu3d", "3D View"),
+                    wb::ToolbarItem::labeled("example.open_gpu_top", "Top View"),
                 ])]),
+    );
+    reg.register_locales(
+        "zh-CN",
+        [
+            ("3D View (wgpu)", "三维视图 (wgpu)"),
+            ("Top View (wgpu)", "俯视图 (wgpu)"),
+            ("3D View", "三维视图"),
+            ("Top View", "俯视图"),
+            ("3D", "三维"),
+            ("Views", "视图"),
+        ],
     );
 }

@@ -37,7 +37,7 @@ const DOCK_AREA_ID: &str = "wb-main";
 const DOCK_AREA_VERSION: usize = 1;
 
 /// Shown in the centre while no tab is open (the pre-dock front end's text).
-const EMPTY_CENTER_TITLE: &str = "没有打开的视图";
+const EMPTY_CENTER_TITLE: &str = "No open views";
 
 /// The dock identifies a panel by a `&'static str` name that must never
 /// change once chosen, while the model's panel ids and tab instances are
@@ -79,7 +79,7 @@ fn live_names(snap: &ShellSnapshot) -> HashSet<&'static str> {
     live
 }
 
-// ---- 共享状态（面板实体携带） ----
+// ---- Shared state (carried by the panel entities) ----
 
 /// The gpui-rhai view domain, shared between the root view (which mounts) and
 /// the script panels (which draw the mounted view).
@@ -143,7 +143,7 @@ impl ScriptRuntime {
                 .px_3()
                 .text_color(col(wb::Color::GRAY))
                 .text_size(px(12.0))
-                .child(format!("脚本面板加载失败：{err}"))
+                .child(format!("Script panel failed to load: {err}"))
                 .into_any_element();
         }
         match self.views.get(panel_id) {
@@ -159,7 +159,7 @@ impl ScriptRuntime {
                     .justify_center()
                     .text_color(col(wb::Color::GRAY))
                     .text_size(px(12.0))
-                    .child(format!("脚本视图错误：{e}"))
+                    .child(format!("Script view error: {e}"))
                     .into_any_element(),
             },
             // Not mounted yet (the mount runs in the sync, once, per panel).
@@ -193,7 +193,7 @@ fn with_removal_suppressed<T>(mirror: &SharedMirror, f: impl FnOnce() -> T) -> T
     out
 }
 
-// ---- 面板适配层 ----
+// ---- Panel adapter layer ----
 
 /// Where a dock panel comes from in the model.
 pub(crate) enum PanelRef {
@@ -275,7 +275,7 @@ fn model_title(r: &PanelRef, core: &SharedCore) -> (String, Option<String>) {
             .find(|t| t.instance_id.0 == *instance_id)
             .map(|t| (core.host.tr(&t.title), t.icon.clone()))
             .unwrap_or_default(),
-        PanelRef::Empty => (EMPTY_CENTER_TITLE.to_string(), None),
+        PanelRef::Empty => (core.host.tr(EMPTY_CENTER_TITLE), None),
     }
 }
 
@@ -409,7 +409,14 @@ impl Render for WbPanel {
                     .items_center()
                     .justify_center()
                     .text_color(col(wb::Color::GRAY))
-                    .child(EMPTY_CENTER_TITLE)
+                    .child(
+                        self.ctx
+                            .core
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .host
+                            .tr(EMPTY_CENTER_TITLE),
+                    )
                     .into_any_element(),
                 false,
             ),
@@ -432,7 +439,7 @@ impl Render for WbPanel {
         // A view with background work in flight (the sheet's HLR generation)
         // asks for continued frames: gpui only re-renders on invalidation, so
         // without this the task's result sits unread in its channel and the
-        // view stays on "生成中" until the user happens to click something.
+        // view stays on "generating" until the user happens to click something.
         if wants_repaint {
             cx.notify();
         }
@@ -440,7 +447,7 @@ impl Render for WbPanel {
     }
 }
 
-// ---- 模型快照（每帧读取一次） ----
+// ---- Model snapshot (read once per frame) ----
 
 /// One visible panel of a side dock.
 pub(crate) struct PanelSnapshot {
@@ -473,7 +480,7 @@ pub(crate) struct ShellSnapshot {
     pub active_tab: Option<u64>,
 }
 
-// ---- 同步器 ----
+// ---- Synchronizer ----
 
 /// What each region's layout tree was last built from. Only a change here — or
 /// of the region's displayed panel — rebuilds a region.
@@ -1222,7 +1229,7 @@ mod tests {
         assert_eq!(core.host.ws.active_tab().map(|t| t.instance_id.0), Some(1));
     }
 
-    // ---- 持久化：恢复前的剪枝（只留本会话能重建的面板） ----
+    // ---- Persistence: pruning before restore (keep only panels this session can rebuild) ----
 
     fn allowed(names: &[&str]) -> HashSet<String> {
         names.iter().map(|name| name.to_string()).collect()

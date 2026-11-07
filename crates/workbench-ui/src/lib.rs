@@ -36,22 +36,24 @@ pub mod platform_panels;
 
 pub(crate) mod dock_panel;
 
-/// Ribbon 挂载桥（唯一 ribbon crate 耦合点，ribbon-bar.md §5.1）。
+/// Ribbon mount bridge (the only coupling point with the ribbon crate, ribbon-bar.md §5.1).
 pub(crate) mod ribbon_bridge;
 
-/// UI 主题（dark/light）：shell 配色 + 全窗口主题应用。
+/// UI theme (dark/light): shell colors + applying the theme to the whole window.
 pub mod theme;
 
-/// 平台运行时句柄：全部使用都在 UI 主线程（gpui 前台执行器），故用 `Rc`。
+/// Platform runtime handle: every use is on the UI main thread (gpui's foreground executor),
+/// hence `Rc`.
 type SharedCore = std::rc::Rc<Mutex<AppRuntime>>;
 
-/// 拉丁基础字体（IBM Plex Sans，OFL 许可，随 license.txt 一并提交）。
-/// gpui_web 不带字体，Web 端必须在首帧前显式注入。
+/// Base Latin font (IBM Plex Sans, OFL licensed, committed together with license.txt).
+/// gpui_web ships no fonts, so the web must inject them explicitly before the first frame.
 #[cfg(target_arch = "wasm32")]
 const LATIN_FONT: &[u8] = include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf");
 
-/// 组合资源源：产品资源优先，gpui-component 内置图标资源兜底。
-/// （组件图标在桌面与 Web 都编入二进制，见 component_assets）
+/// Combined asset source: product assets first, gpui-component's built-in icon assets as the
+/// fallback. (Component icons are compiled into the binary on both desktop and web; see
+/// component_assets)
 struct WbAssets {
     app: Arc<dyn wb::AssetSource>,
     component: component_assets::ComponentAssets,
@@ -69,10 +71,12 @@ impl gpui::AssetSource for WbAssets {
     }
 
     fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
-        // gpui 的 AssetRegistry 由 list("") 枚举建表（AssetSource::iter_ondemand）：
-        // 只登记这里报出的路径，未登记的路径 load 永远 miss（图标静默不渲染）。
-        // 因此根路径必须并集产品/平台标准路径与组件内置路径；同名路径（如
-        // icons/delete.svg 两边都有）去重——registry 重复 insert 会报错。
+        // gpui's AssetRegistry builds its table by enumerating list("")
+        // (AssetSource::iter_ondemand): only the paths reported here get registered, and loading
+        // an unregistered path always misses (the icon silently doesn't render). So the root
+        // listing must be the union of the product/platform standard paths and the component's
+        // built-in paths; a path present in both (e.g. icons/delete.svg) is deduplicated, since a
+        // duplicate registry insert is an error.
         let mut paths: Vec<SharedString> = Vec::new();
         if path.is_empty() {
             let mut seen = std::collections::HashSet::new();
@@ -92,7 +96,7 @@ impl gpui::AssetSource for WbAssets {
     }
 }
 
-// ---- 颜色转换 ----
+// ---- Color conversion ----
 
 pub fn col(c: wb::Color) -> Hsla {
     Hsla::from(Rgba { r: c.r, g: c.g, b: c.b, a: c.a })
@@ -104,7 +108,7 @@ enum SlotKey {
     Panel(String),
 }
 
-// ---- 根视图 ----
+// ---- Root view ----
 
 struct RootView {
     core: SharedCore,
@@ -122,7 +126,7 @@ struct RootView {
     views: SharedViews,
     /// What the dock is showing, as last mirrored into the model.
     mirror: dock_panel::SharedMirror,
-    /// Ribbon 挂载点（ribbon crate 实体；首帧懒构建，模式同 dock）。
+    /// Ribbon mount point (a ribbon crate entity; built lazily on the first frame, like the dock).
     ribbon: ribbon_bridge::RibbonHost,
     /// Last-applied `ui.theme` / `ui.accent` settings: the render loop
     /// re-applies the theme when either diverges from what is on screen
@@ -176,7 +180,7 @@ impl RootView {
     }
 }
 
-/// 请求重绘：根视图 + 全部 dock 面板。
+/// Request a repaint: the root view + every dock panel.
 ///
 /// The frontend's command dispatcher for view element handlers (they run at
 /// event time, after the render that built them). It lives as long as the
@@ -191,15 +195,16 @@ fn publish_runtime_dispatcher(core: &SharedCore) {
                 poisoned.into_inner().execute_command(command, &args)
             }
             Err(std::sync::TryLockError::WouldBlock) => {
-                wb::CommandResult::failed("视图构建期间不能执行命令")
+                wb::CommandResult::failed("Commands cannot run while a view is being built")
             }
         }
     }));
 }
 
-/// 面板现在是独立实体，而 dock 用 gpui 的**缓存视图**通路绘制面板内容
-/// （面板实体被 notify 时其子树才重新渲染）。旧布局把面板画在根视图的子树
-/// 里，notify 根视图就够；这层镜像保持"任何输入都驱动每个视口重绘"的语义。
+/// Panels are now independent entities, and the dock draws panel content through gpui's
+/// **cached view** path (a panel entity's subtree re-renders only when that entity is notified).
+/// The old layout drew the panels inside the root view's subtree, so notifying the root view was
+/// enough; this mirroring keeps the "any input drives a repaint of every viewport" semantics.
 /// Save the workspace layout: the core's model plus the dock area's physical
 /// layout. Returns whether anything was written (an unchanged layout isn't).
 fn save_layout(
@@ -232,9 +237,10 @@ fn notify(weak: &gpui::WeakEntity<RootView>, cx: &mut App) {
     }
 }
 
-// ---- 面板/中央视图绘制 ----
+// ---- Panel / central view drawing ----
 
-/// GPU 视口未就绪 / 失败时的占位背景（深色，与视口底色一致）。
+/// Placeholder background while a GPU viewport isn't ready / has failed (dark, matching the
+/// viewport background).
 pub(crate) fn paint_placeholder(window: &mut Window, bounds: Bounds<Pixels>) {
     window.paint_quad(gpui::fill(bounds, col(theme::ui_theme().placeholder)));
 }
@@ -246,8 +252,8 @@ fn modal_overlay(overlay: impl IntoElement) -> gpui::Deferred {
     gpui::deferred(overlay).with_priority(1)
 }
 
-/// 面板/中央视图绘制到 canvas。
-/// 实例存放在核心状态内，绘制需要 &mut 核心——先换出、绘制、再放回。
+/// Draws a panel / central view into a canvas.
+/// The instances live in the core state and drawing needs &mut core: swap out, draw, put back.
 /// The element that renders one workspace slot (central tab or dock panel).
 ///
 /// This replaces the former `canvas`-based slot. `canvas` is a one-shot
@@ -384,7 +390,7 @@ fn view_canvas(
     // until the next frame's publish (round-191: clearing it here made every
     // view-content button dead — gpui fires click handlers between frames,
     // after the clear, so wb::dispatch silently failed with
-    // "视图元素不在渲染上下文中"). The handle points at the same live runtime
+    // "The view element is not in a render context"). The handle points at the same live runtime
     // the view was built from; a new frame always replaces it before any
     // further handler runs.
     let (element, wants_repaint) = {
@@ -411,9 +417,10 @@ fn view_canvas(
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 帧统计只在这里测：它描述的是渲染节奏。平台节拍（任务泵 / 自动保存 /
-        // 上下文快照）由 `launch_app` 的定时器驱动，与渲染解耦——gpui 只在失效时
-        // 重画，渲染驱动的泵在 UI 空闲时停转，任务结果会留在通道里没人取。
+        // Frame stats are measured only here: they describe the render cadence. The platform tick
+        // (task pump / autosave / context snapshot) is driven by `launch_app`'s timer, decoupled
+        // from rendering: gpui only redraws on invalidation, so a render-driven pump stalls while
+        // the UI is idle and task results sit unclaimed in their channel.
         {
             let mut core = self.core.lock().unwrap_or_else(|p| p.into_inner());
             let now = web_time::Instant::now();
@@ -444,7 +451,7 @@ impl Render for RootView {
             }
         }
 
-        // ---- 核心状态读取（一次性） ----
+        // ---- Core state read (once) ----
         let (shell_snap, status) = {
             let core = self.core.lock().unwrap_or_else(|p| p.into_inner());
             let area_of = |a: wb::DockArea| -> dock_panel::AreaSnapshot {
@@ -490,9 +497,9 @@ impl Render for RootView {
             };
             let snap = core.snapshot().clone();
             let (running, last_task) = core.host.tasks.summary();
-            let doc_prefix = core.host.tr("文档：");
-            let doc_none = core.host.tr("（无）");
-            let rev_fmt = core.host.tr(" · 修订 r");
+            let doc_prefix = core.host.tr("Doc: ");
+            let doc_none = core.host.tr("(none)");
+            let rev_fmt = core.host.tr(" · rev r");
             let status = StatusData {
                 doc: snap
                     .active_document
@@ -506,7 +513,7 @@ impl Render for RootView {
                         )
                     })
                     .unwrap_or_else(|| format!("{doc_prefix}{doc_none}")),
-                mode: snap.work_mode.clone(),
+                mode: core.host.tr(&snap.work_mode),
                 running,
                 task: last_task.cloned(),
                 last_log: core
@@ -520,20 +527,20 @@ impl Render for RootView {
                     let tr = |k: &str| core.host.tr(k);
                     match &core.host.ws.account {
                         wb::AccountPhase::LoggedOut => AccountChip::LoggedOut {
-                            login_label: tr("登录"),
+                            login_label: tr("Sign in"),
                         },
                         wb::AccountPhase::Pending(req) => AccountChip::Pending {
                             user_code: req.user_code.clone(),
                             uri: req.verification_uri.clone(),
-                            cancel_label: tr("取消"),
+                            cancel_label: tr("Cancel"),
                         },
                         wb::AccountPhase::LoggedIn(user) => AccountChip::LoggedIn {
                             name: user.name.clone(),
-                            logout_label: tr("登出"),
+                            logout_label: tr("Sign out"),
                         },
                         wb::AccountPhase::Failed(msg) => AccountChip::Failed {
                             message: msg.clone(),
-                            retry_label: tr("登录"),
+                            retry_label: tr("Sign in"),
                         },
                     }
                 }),
@@ -541,7 +548,7 @@ impl Render for RootView {
             (shell_snap, status)
         };
 
-        // ---- Dock 同步（模型 → dock；结构变化才重建） ----
+        // ---- Dock sync (model → dock; rebuilt only on structural changes) ----
         if self.dock.is_none() {
             self.dock = Some(dock_panel::DockShell::new(
                 self.core.clone(),
@@ -569,12 +576,12 @@ impl Render for RootView {
             .min_h(px(0.0))
             .child(self.dock.as_ref().expect("built above").area());
 
-        // ---- RibbonBar（ribbon crate 挂载；ribbon_bridge 每帧喂模型快照） ----
+        // ---- RibbonBar (ribbon crate mount; ribbon_bridge feeds per-frame model snapshots) ----
         self.ribbon.ensure_mounted(&core, weak.clone(), cx);
         self.ribbon.sync(&core, cx);
         let ribbon_element = self.ribbon.element();
 
-        // ---- 组装 ----
+        // ---- Assembly ----
         let mut root_col = div()
             .flex()
             .flex_col()
@@ -630,7 +637,7 @@ impl Render for RootView {
                 }
             });
 
-        // ---- About 对话框 overlay（app.about 命令置位时渲染） ----
+        // ---- About dialog overlay (rendered while the app.about command has it set) ----
         if let Some(overlay) = about::maybe_about_overlay(&core, cx) {
             root_col = root_col.child(modal_overlay(overlay));
         }
@@ -788,7 +795,7 @@ fn render_status_bar(
                         .cursor_pointer()
                         .bg(col(theme::ui_theme().cancel_rest))
                         .hover(|s| s.bg(col(wb::Color::RED)))
-                        .child(core.lock().unwrap_or_else(|p| p.into_inner()).host.tr("取消"))
+                        .child(core.lock().unwrap_or_else(|p| p.into_inner()).host.tr("Cancel"))
                         .on_click(move |_ev: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
                             core_c
                                 .lock()
@@ -830,7 +837,7 @@ fn render_status_bar(
                         .text_color(col(wb::Color::GRAY))
                         .child(format!(
                             "{}{}",
-                            core.lock().unwrap_or_else(|p| p.into_inner()).host.tr("模式："),
+                            core.lock().unwrap_or_else(|p| p.into_inner()).host.tr("Mode: "),
                             data.mode
                         )),
                 ),
@@ -917,24 +924,26 @@ fn render_account_chip(
     .into_any_element()
 }
 
-/// gpui 入口：构建产品并运行主循环。
+/// gpui entry point: builds the product and runs the main loop.
 ///
-/// 桌面：`Application::run` 阻塞直至退出。Web（wasm32）：自建 `gpui_web`
-/// 的 WebPlatform（WebGPU/WebGL 渲染；GPU 视口要它的 wgpu 上下文），浏览器事件循环驱动；
-/// 先注入字体（gpui_web 不带字体：内嵌拉丁 + 异步取同源 CJK，
-/// 均在首帧前，避免排版缓存命中旧字形），并用 `run_embedded` 返回的句柄
-/// 保持应用存活（页面生命周期 = 应用生命周期）。
+/// Desktop: `Application::run` blocks until exit. Web (wasm32): builds `gpui_web`'s WebPlatform
+/// itself (WebGPU/WebGL rendering; the GPU viewports need its wgpu context), driven by the
+/// browser event loop; injects the fonts first (gpui_web ships no fonts: the embedded Latin font
+/// plus a same-origin CJK font fetched asynchronously, all before the first frame so the layout
+/// cache doesn't hit stale glyphs), and keeps the app alive with the handle `run_embedded`
+/// returns (page lifetime = app lifetime).
 pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> Result<(), String> {
     let mut builder = builder;
     // The built-in platform panels are view implementations, so the frontend
     // registers them — before core's `platform_cmds::register` builds the
-    // "窗口" toolbar group, which then picks them up with every other panel.
+    // "View" toolbar group, which then picks them up with every other panel.
     builder = builder.with_plugin_stage(Box::new(platform_panels::register));
     let smoke = builder.smoke_seconds();
     let title: SharedString = window_title.to_string().into();
     let assets = builder.asset_source();
-    // 产品声明的 GPU 设备需求（`gpu_view::GpuRequirements`）：在 GPU 视口
-    // 设备创建前落位；未声明时用视口基线。
+    // The product's declared GPU device requirements (`gpu_view::GpuRequirements`): in place
+    // before the GPU viewport device is created; the viewport baseline applies if none are
+    // declared.
     let gpu_requirements = builder.take_gpu_requirements();
     let runtime = builder.build()?;
     let core: SharedCore = std::rc::Rc::new(Mutex::new(runtime));
@@ -944,8 +953,9 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
         let core = core.lock().unwrap_or_else(|p| p.into_inner());
         core.host.settings.get_str("ui.theme", "dark")
     };
-    // 恢复上次的布局（模型 + 停靠区物理布局）：先落模型，窗口打开后首帧再把
-    // dock 布局叠上去。无布局文件（首次启动）或解析失败时返回 None → 默认布局。
+    // Restore the last layout (model + the dock areas' physical layout): the model lands first,
+    // and the dock layout is laid over it on the first frame after the window opens. With no
+    // layout file (first launch) or a parse failure this returns None → the default layout.
     let dock = {
         let mut core = core.lock().unwrap_or_else(|p| p.into_inner());
         core.load_layout()
@@ -967,9 +977,10 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
     #[cfg(target_arch = "wasm32")]
     {
         wasm_bindgen_futures::spawn_local(async move {
-            // 字体在窗口打开前注入：cosmic-text 的回退解析与 gpui 的排版
-            // 缓存都按内容哈希命中，启动后再加字体会一直命中旧字形。
-            // 拉丁字体由本 crate 内嵌（fork gpui_web 是空字体库）。
+            // Fonts are injected before the window opens: cosmic-text's fallback resolution and
+            // gpui's layout cache both hit by content hash, so fonts added after startup keep
+            // hitting stale glyphs. The Latin font is embedded by this crate (the gpui_web fork
+            // has an empty font library).
             let mut fonts: Vec<std::borrow::Cow<'static, [u8]>> =
                 vec![std::borrow::Cow::Borrowed(LATIN_FONT)];
             for name in ["cjk.ttf", "cjk.otf"] {
@@ -998,8 +1009,8 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
             });
             let handle =
                 app.run_embedded(launch_app(core, title, smoke, fonts, gpu_requirements, dock, theme_name, window_icon));
-            // Web 平台的 run 立即返回，应用状态由句柄保持；
-            // 与页面共存亡，故意泄漏句柄。
+            // The web platform's run returns at once and the handle keeps the app state alive;
+            // it lives and dies with the page, so the handle is leaked on purpose.
             std::mem::forget(handle);
         });
         return Ok(());
@@ -1007,7 +1018,7 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // 产品资源源 + gpui-component 内置资源兜底
+        // Product asset source + gpui-component's built-in assets as the fallback
         let app = gpui_platform::application().with_assets(WbAssets {
             app: assets,
             component: component_assets::ComponentAssets::new(""),
@@ -1047,7 +1058,8 @@ fn decode_window_icon(
     None
 }
 
-/// 构建应用启动闭包：注册组件、打开主窗口、挂任务泵与字体注入。
+/// Builds the app launch closure: registers components, opens the main window, hooks up the task
+/// pump and font injection.
 fn launch_app(
     core: SharedCore,
     title: SharedString,
@@ -1062,8 +1074,8 @@ fn launch_app(
         if !fonts.is_empty() {
             let _ = cx.text_system().add_fonts(fonts);
         }
-        // 产品声明的额外 GPU 设备需求必须在 GPU 视口设备创建（首个 GPU 视图
-        // 绘制）之前落位。
+        // The product's declared extra GPU device requirements must be in place before the GPU
+        // viewport device is created (when the first GPU view draws).
         if let Some(requirements) = gpu_requirements {
             match requirements.downcast::<gpu_view::GpuRequirements>() {
                 Ok(requirements) => gpu_view::set_requirements(*requirements),
@@ -1074,9 +1086,10 @@ fn launch_app(
         }
         gpui_component::init(cx);
         gpui_rhai::install(cx);
-        // 主题在组件初始化后、任何窗口打开前应用：shell 配色、ribbon tokens
-        // 与 gpui-component 全局主题一次切齐。品牌强调色（ui.accent，来自
-        // product.toml 的 branding.accent）同时落到 ribbon tokens。
+        // The theme is applied after component init and before any window opens: shell colors,
+        // ribbon tokens and the gpui-component global theme switch over together. The brand
+        // accent (ui.accent, from product.toml's branding.accent) lands in the ribbon tokens at
+        // the same time.
         theme::apply_theme(&theme_name, cx);
         {
             let accent = core
@@ -1106,12 +1119,13 @@ fn launch_app(
             .open_window(options, |_window, cx| {
                 cx.new(|_cx| RootView::new(core_window, dock_window))
             })
-            .expect("打开窗口失败");
+            .expect("failed to open the window");
         let _ = handle;
         cx.activate(true);
 
-        // 平台节拍定时器：泵任务事件、驱动自动保存、刷新上下文快照，并在有
-        // UI 可见工作（任务在跑 / 取到事件 / 对话框结果）时排帧。
+        // Platform tick timer: pumps task events, drives autosave, refreshes the context snapshot,
+        // and schedules a frame when there is UI-visible work (a task running / events received /
+        // dialog results).
         let root_entity = cx
             .active_window()
             .and_then(|w| w.downcast::<RootView>())
@@ -1119,21 +1133,23 @@ fn launch_app(
         let weak_root = root_entity.as_ref().map(|e| e.downgrade());
         let core_loop = core.clone();
 
-        // 关窗即存布局：核心部分（面板/标签/模式）+ 停靠区物理布局（dock dump）。
-        // 单窗口单工程是产品的既定形态（web 与桌面同构），所以一份布局 = 一个窗口。
+        // Closing the window saves the layout: the core part (panels/tabs/mode) + the dock areas'
+        // physical layout (dock dump). One window, one project is the product's settled shape
+        // (web and desktop alike), so one layout = one window.
         //
-        // 这里持有根视图的**强**句柄：窗口关闭时它自己的句柄先被释放，弱引用
-        // 会来不及 upgrade，布局就存不下来（实测过）。
+        // This holds a **strong** handle to the root view: when the window closes its own handle
+        // is released first, so a weak reference would be too late to upgrade and the layout
+        // wouldn't get saved (verified in practice).
         let core_save = core.clone();
         cx.on_window_closed(move |cx, _| {
             if let Some(root) = &root_entity {
-                // 存盘失败（只读目录等）只记日志，不阻断退出。
+                // A failed save (read-only directory etc.) is only logged; it doesn't block exit.
                 let result = save_layout(&core_save, root, cx);
                 let mut core = core_save.lock().unwrap_or_else(|p| p.into_inner());
                 match result {
-                    Ok(true) => core.host.log.info("已保存布局"),
+                    Ok(true) => core.host.log.info("Layout saved"),
                     Ok(false) => {}
-                    Err(e) => core.host.log.warn(format!("保存布局失败: {e}")),
+                    Err(e) => core.host.log.warn(format!("Failed to save the layout: {e}")),
                 }
             }
             if cx.windows().is_empty() {
@@ -1157,7 +1173,7 @@ fn launch_app(
                     };
                     if let Err(e) = save_layout(&core_web, &root, cx) {
                         let mut core = core_web.lock().unwrap_or_else(|p| p.into_inner());
-                        core.host.log.warn(format!("保存布局失败: {e}"));
+                        core.host.log.warn(format!("Failed to save the layout: {e}"));
                     }
                 });
             })
@@ -1168,10 +1184,11 @@ fn launch_app(
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(100))
                 .await;
-            // 节拍自己返回是否需要重绘：任务在跑、取到终态事件、对话框结果、
-            // 自动保存、活动文档变化都为 true。旧实现只看 `running > 0`，于是
-            // 任务完成的那一刻谓词转假，终态事件永远不被泵——诊断面板的
-            // 「后台任务 运行/累计」就此滞后到下一次输入。
+            // The tick itself returns whether a repaint is needed: true for a running task, a
+            // received terminal event, a dialog result, an autosave or an active-document change.
+            // The old implementation only looked at `running > 0`, so the predicate turned false
+            // the moment a task finished and the terminal event never got pumped; the Diagnostics
+            // panel's "Background tasks running/total" then lagged until the next input.
             let needs_repaint = {
                 let mut core = core_loop.lock().unwrap_or_else(|p| p.into_inner());
                 core.frame_tick(0.1)
@@ -1184,7 +1201,8 @@ fn launch_app(
         })
         .detach();
 
-        // 冒烟模式：N 秒后自动退出（仅桌面有效；Web 无退出语义）
+        // Smoke mode: quit automatically after N seconds (desktop only; the web has no notion of
+        // quitting)
         if let Some(secs) = smoke {
             if secs > 0.0 {
                 cx.spawn(async move |cx: &mut gpui::AsyncApp| {
@@ -1292,8 +1310,9 @@ mod tests {
             }
         };
 
-        // 每条区域都带上了模型里的面板（示例 workbench 注册了 资源管理器/任务/属性/输出，
-        // 平台另有 诊断/插件 落在右区）。
+        // Every area carries the model's panels (the example workbench registers
+        // Explorer/Tasks/Properties/Output, and the platform adds Diagnostics/Plugins on the
+        // right).
         assert_eq!(snap.left.panels[0].id, "example.panel.explorer");
         assert_eq!(snap.left.active.as_deref(), Some("example.panel.explorer"));
         assert_eq!(snap.left.size, 240.0);
@@ -1312,7 +1331,7 @@ mod tests {
         assert_eq!(snap.bottom.panels[0].id, "example.panel.output");
         assert_eq!(snap.bottom.size, 170.0);
 
-        // 中央标签与活动标签。
+        // Central tabs and the active tab.
         assert_eq!(snap.tabs.len(), 1, "the welcome tab is open");
         assert_eq!(snap.active_tab, Some(snap.tabs[0]));
     }

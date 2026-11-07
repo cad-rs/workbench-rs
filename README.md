@@ -195,18 +195,18 @@ entry script whose `register()` calls host-injected globals:
 ```rhai
 // plugin.rhai
 fn register() {
-    register_command("rhai.hello", "Rhai 问候", "hello");           // sync command
-    register_background_command("rhai.progress", "Rhai 后台任务", "progress_job");
-    add_toolbar_item("plugin.rhai", "rhai.hello", "问候");          // Ribbon contribution
-    register_panel("rhai.panel", "Rhai 演示", "ui/main.rhai", "right"); // script UI panel
+    register_command("rhai.hello", "Rhai Hello", "hello");          // sync command
+    register_background_command("rhai.progress", "Rhai Background Task", "progress_job");
+    add_toolbar_item("plugin.rhai", "rhai.hello", "Hello");         // Ribbon contribution
+    register_panel("rhai.panel", "Rhai Demo", "ui/main.rhai", "right"); // script UI panel
 }
 
-fn hello(args) { `来自 Rhai 脚本的问候（{args.name}）` }          // 返回备注字符串
+fn hello(args) { `Hello from the Rhai script ({args.name})` }      // returns the note string
 
-fn progress_job(task, args) {                                      // 后台进度 + 协作式取消
+fn progress_job(task, args) {                                      // background progress + cooperative cancel
     for i in 0..20 {
         task.check_cancelled();
-        task.report(i as float / 20.0, `批次 {i + 1}/20`);
+        task.report(i as float / 20.0, `Batch {i + 1}/20`);
     }
 }
 ```

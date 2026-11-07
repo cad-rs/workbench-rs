@@ -1,4 +1,5 @@
-# Rhai 脚本插件演示：命令（同步/后台）、工具栏贡献与脚本自定义 UI 面板。
+# Rhai script plugin demo: commands (sync/background), toolbar contributions and a custom
+# script UI panel.
 [plugin]
 id = "com.example.demo"
 name = "Rhai Demo Plugin"

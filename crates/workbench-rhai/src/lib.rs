@@ -1,8 +1,10 @@
-//! Rhai 脚本插件宿主：清单发现、Host API v1（命令/工具栏/脚本面板注册）。
+//! Rhai script plugin host: manifest discovery, Host API v1 (command / toolbar / script panel
+//! registration).
 //!
-//! 与平台核心解耦：本 crate 只依赖 workbench-api/core，通过
-//! [`plugin_stage`] 挂进产品装配（与其它 PluginStage 相同的隔离策略）。
-//! 脚本 UI 面板由 gpui 前端经 gpui-rhai 挂载渲染（`PanelDef.script`）。
+//! Decoupled from the platform core: this crate depends only on workbench-api/core and hooks
+//! into product assembly through [`plugin_stage`] (the same isolation policy as any other
+//! PluginStage). Script UI panels are mounted and rendered by the gpui frontend via gpui-rhai
+//! (`PanelDef.script`).
 
 mod host;
 mod loader;

@@ -48,16 +48,16 @@ pub struct Cli {
 /// The run mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CliMode {
-    /// 运行 GUI（默认）。
+    /// Run the GUI (the default).
     Run,
-    /// 无头自检。
+    /// Headless selfcheck.
     Selfcheck,
-    /// 崩溃恢复探针（由 selfcheck 以子进程方式调用）。
+    /// Crash-recovery probe (invoked by the selfcheck as a subprocess).
     CrashProbe,
 }
 
 impl Cli {
-    /// 从进程环境解析。
+    /// Parse from the process environment.
     pub fn from_env() -> Self {
         let args: Vec<String> = std::env::args().collect();
         let mode = args.get(1).cloned().unwrap_or_default();
@@ -83,7 +83,7 @@ impl Cli {
 
 /// Run the headless selfcheck and exit the process (exit code 0 = all passed).
 pub fn selfcheck_exit(builder: WorkbenchAppBuilder) -> ! {
-    let mut app = builder.build().expect("产品装配失败");
+    let mut app = builder.build().expect("product assembly failed");
     std::process::exit(crate::selfcheck::run(&mut app));
 }
 
@@ -128,8 +128,9 @@ pub fn crash_probe_exit(make_builder: impl Fn() -> WorkbenchAppBuilder) -> i32 {
     }
 }
 
-/// 插件发现目录的通用约定：当前工作目录的 `plugins/`（内置插件）
-/// + 用户配置目录下 `<product_id>/plugins`（存在才生效）。
+/// The common plugin discovery directories: `plugins/` under the current working directory
+/// (built-in plugins) + `<product_id>/plugins` under the user config directory (only if it
+/// exists).
 pub fn default_plugin_dirs(product_id: &str) -> Vec<PathBuf> {
     let mut dirs = vec![std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))

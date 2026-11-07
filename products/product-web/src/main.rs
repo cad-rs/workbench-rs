@@ -39,8 +39,8 @@ fn main() {
     }
 }
 
-// trunk 的 wasm-bindgen 加载器只调用 init()：start 标记让 main 在
-// wasm 实例化完成后被自动执行（生成 __wbindgen_start 导出）。
+// trunk's wasm-bindgen loader only calls init(): the start attribute runs main automatically
+// once the wasm instance is ready (it generates the __wbindgen_start export).
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 fn wasm_main() {

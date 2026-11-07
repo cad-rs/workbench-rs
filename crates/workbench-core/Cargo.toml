@@ -15,8 +15,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 
-# 桌面专属：本地文件对话框与本地文件存储（Web 无）、async-io 计时器驱动共享执行器
-# （async-io 2.6 的 rustix/errno 链不支持 wasm32-unknown-unknown）
+# Desktop only: native file dialogs and local file storage (none on the web), and the async-io
+# timer driving the shared executor (async-io 2.6's rustix/errno chain does not support
+# wasm32-unknown-unknown)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = { workspace = true }
 async-io = { workspace = true }

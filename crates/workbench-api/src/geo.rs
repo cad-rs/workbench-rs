@@ -1,6 +1,7 @@
-//! GUI 无关的 2D 几何与颜色原语（y 轴向下，与主流即时模式 GUI 一致）。
+//! GUI-independent 2D geometry and color primitives (y axis points down, as in mainstream
+//! immediate-mode GUIs).
 
-/// 平面上的点。
+/// A point on the plane.
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Point {
     pub x: f32,
@@ -13,7 +14,7 @@ impl Point {
     }
 }
 
-/// 尺寸。
+/// A size.
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Size {
     pub w: f32,
@@ -26,7 +27,7 @@ impl Size {
     }
 }
 
-/// 矩形（左上角原点）。
+/// A rectangle (origin at the top-left corner).
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Rect {
     pub pos: Point,
@@ -61,7 +62,7 @@ impl Rect {
     pub fn translate(&self, dx: f32, dy: f32) -> Rect {
         Rect::new(self.pos.x + dx, self.pos.y + dy, self.size.w, self.size.h)
     }
-    /// 返回 rect 落在 self 内的裁剪结果（可能为空矩形）。
+    /// The part of `rect` that falls inside `self` (possibly an empty rectangle).
     pub fn intersect(&self, rect: Rect) -> Rect {
         let x0 = self.pos.x.max(rect.pos.x);
         let y0 = self.pos.y.max(rect.pos.y);
@@ -71,7 +72,7 @@ impl Rect {
     }
 }
 
-/// RGBA 颜色，分量 0.0..=1.0。
+/// An RGBA color, components in 0.0..=1.0.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Color {
     pub r: f32,
@@ -98,7 +99,7 @@ impl Color {
     pub const RED: Color = Color::rgb(0.85, 0.3, 0.3);
     pub const TRANSPARENT: Color = Color::rgba(0.0, 0.0, 0.0, 0.0);
 
-    /// 由 HSV 的色相生成饱和度/亮度固定的颜色（示例视图用）。
+    /// A color from an HSV hue with fixed saturation/value (used by the example views).
     pub fn from_hue(hue: f32) -> Color {
         let h = hue.rem_euclid(360.0) / 60.0;
         let i = h.floor();
@@ -111,7 +112,7 @@ impl Color {
             4 => (f, 0.0, 1.0),
             _ => (1.0, 0.0, 1.0 - f),
         };
-        // 亮度 0.75、饱和度 0.65 的近似
+        // Approximates value 0.75, saturation 0.65
         let mix = |c: f32| 0.75 * (0.35 + 0.65 * c);
         Color::rgb(mix(r), mix(g), mix(b))
     }

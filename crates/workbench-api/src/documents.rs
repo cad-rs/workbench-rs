@@ -1,13 +1,15 @@
-//! 通用文档基础设施（design.md §12.1/§12.2）。
+//! Generic document infrastructure (design.md §12.1/§12.2).
 //!
-//! 平台管理文档生命周期（新建/打开/保存/脏标记/修订号/撤销历史），
-//! 领域内容由 Workbench 通过 [`DocumentTypeDef`] 注册编解码，以
-//! [`DocumentContent`] 类型擦除存放——平台不侵入领域数据模型。
+//! The platform manages the document lifecycle (new/open/save/dirty flag/revision/undo history);
+//! a Workbench registers the codec of its domain content through a [`DocumentTypeDef`], and the
+//! content is stored type-erased as a [`DocumentContent`] — the platform stays out of the domain
+//! data model.
 
 use crate::ids::{DocumentId, DocumentTypeId};
 use crate::storage::Location;
 
-/// 领域文档内容。通过 blanket impl，任何 `Clone + Send + Sync + 'static` 类型自动实现。
+/// Domain document content. Through a blanket impl, every `Clone + Send + Sync + 'static` type
+/// implements it automatically.
 pub trait DocumentContent: std::any::Any + Send + Sync {
     fn dup(&self) -> Box<dyn DocumentContent>;
     fn as_any(&self) -> &dyn std::any::Any;
@@ -29,34 +31,37 @@ where
     }
 }
 
-/// 文档序列化函数（由领域模块提供；失败返回用户可读错误）。
+/// Document serialize function (supplied by the domain module; a failure returns a
+/// user-readable error).
 pub type DocumentSerializeFn = fn(&dyn DocumentContent) -> Result<Vec<u8>, String>;
-/// 文档反序列化函数（由领域模块提供）。
+/// Document deserialize function (supplied by the domain module).
 pub type DocumentDeserializeFn = fn(&[u8]) -> Result<Box<dyn DocumentContent>, String>;
 
-/// 委托式撤销钩子（由领域模块提供；`DocumentTypeDef::undo_hooks`）。
+/// Delegated undo hooks (supplied by the domain module; `DocumentTypeDef::undo_hooks`).
 ///
-/// 提供后平台不再维护快照历史（全量克隆对参数化文档过重），
-/// 撤销/重做直接转发领域内容自带的命令式历史。`commit`/`edit` 的
-/// `undoable` 参数对委托类型不生效——可撤销性由领域内容自行管理。
+/// When they are supplied the platform no longer keeps a snapshot history (full clones are too
+/// heavy for parametric documents); undo/redo are forwarded straight to the command history the
+/// domain content keeps itself. The `undoable` argument of `commit`/`edit` has no effect on
+/// delegated types — the domain content manages undoability on its own.
 #[derive(Clone, Copy)]
 pub struct UndoHooks {
-    /// 撤销一步；返回操作标签。
+    /// Undo one step; returns the action label.
     pub undo: fn(&mut dyn DocumentContent) -> Result<String, String>,
-    /// 重做一步；返回操作标签。
+    /// Redo one step; returns the action label.
     pub redo: fn(&mut dyn DocumentContent) -> Result<String, String>,
     pub can_undo: fn(&dyn DocumentContent) -> bool,
     pub can_redo: fn(&dyn DocumentContent) -> bool,
 }
 
-/// 文档类型注册信息：编解码由领域模块提供，平台不定义领域 schema。
+/// Document type registration: the codec comes from the domain module; the platform defines no
+/// domain schema.
 ///
-/// 视图选择（`open_view`）按文档内容决定，而非固定视图类型：同一文档类型
-/// 可根据内容打开不同视图。
+/// The view (`open_view`) is chosen from the document's content rather than being a fixed view
+/// type: one document type can open different views depending on its content.
 pub struct DocumentTypeDef {
     pub id: DocumentTypeId,
     pub title: String,
-    /// 关联扩展名（小写、不带点），按此匹配打开文件时的类型。
+    /// Associated extensions (lowercase, no dot), matched to pick the type when opening a file.
     pub extensions: Vec<String>,
     pub create_default: fn() -> Box<dyn DocumentContent>,
     pub serialize: DocumentSerializeFn,
@@ -65,7 +70,7 @@ pub struct DocumentTypeDef {
     /// the document's content, so one document type can open different views
     /// depending on what the document actually holds.
     pub open_view: Option<fn(&dyn DocumentContent) -> Option<crate::ids::ViewTypeId>>,
-    /// 委托式撤销钩子（None = 平台快照式撤销，见 [`UndoHooks`]）。
+    /// Delegated undo hooks (None = the platform's snapshot undo, see [`UndoHooks`]).
     pub undo_hooks: Option<UndoHooks>,
     /// The plugin this document type was contributed by, if any.
     pub source: Option<String>,
@@ -80,14 +85,14 @@ impl DocumentTypeDef {
     }
 }
 
-/// 撤销历史条目（快照式）。
+/// An undo history entry (snapshot style).
 struct UndoEntry {
     label: String,
     before: Box<dyn DocumentContent>,
     after: Box<dyn DocumentContent>,
 }
 
-/// 单个打开的文档。
+/// One open document.
 pub struct Document {
     pub id: DocumentId,
     pub type_id: DocumentTypeId,
@@ -95,11 +100,12 @@ pub struct Document {
     /// The file the document was opened from or last saved to.
     pub location: Option<Location>,
     pub dirty: bool,
-    /// 文档版本号：每次提交（含撤销/重做）递增。后台任务据此做提交校验。
+    /// Document revision: incremented on every commit (including undo/redo). Background tasks
+    /// check their commits against it.
     pub revision: u64,
     pub content: Box<dyn DocumentContent>,
     history: Vec<UndoEntry>,
-    /// 已应用的历史条目数（撤销栈顶位置）。
+    /// Number of history entries applied (the top of the undo stack).
     history_pos: usize,
     /// A save is in flight ([`DocumentService::begin_save`]).
     saving: bool,
@@ -112,15 +118,16 @@ impl Document {
     pub fn can_redo(&self) -> bool {
         self.history_pos < self.history.len()
     }
-    /// 最近一条历史标签（供 UI 显示）。
+    /// The label of the latest history entry (for display in the UI).
     pub fn last_action_label(&self) -> Option<&str> {
         self.history.get(self.history_pos.wrapping_sub(1)).map(|e| e.label.as_str())
     }
-    /// 撤销历史深度上限。
+    /// Maximum undo history depth.
     pub const MAX_HISTORY: usize = 100;
 }
 
-/// 通用文档服务。UI 线程所有（后台任务只能通过 DocCommit 触碰文档）。
+/// The generic document service. Owned by the UI thread (background tasks can only touch
+/// documents through a DocCommit).
 pub struct DocumentService {
     docs: Vec<Document>,
     next_id: u64,
@@ -138,11 +145,11 @@ impl DocumentService {
         }
     }
 
-    // ---- 类型注册 ----
+    // ---- Type registration ----
 
     pub fn register_type(&mut self, def: DocumentTypeDef) -> Result<(), String> {
         if self.types.iter().any(|t| t.id == def.id) {
-            return Err(format!("文档类型重复注册: {}", def.id));
+            return Err(format!("Duplicate document type registration: {}", def.id));
         }
         self.types.push(def);
         Ok(())
@@ -161,7 +168,7 @@ impl DocumentService {
         self.types.iter().find(|t| t.extensions.contains(&ext))
     }
 
-    // ---- 查询 ----
+    // ---- Queries ----
 
     pub fn get(&self, id: DocumentId) -> Option<&Document> {
         self.docs.iter().find(|d| d.id == id)
@@ -187,12 +194,13 @@ impl DocumentService {
         self.active = id;
     }
 
-    /// 查询文档当前修订号（提交策略与测试使用；None 表示文档不存在/已关闭）。
+    /// The document's current revision (for commit policies and tests; None means the document
+    /// does not exist / is closed).
     pub fn revision(&self, id: DocumentId) -> Option<u64> {
         self.get(id).map(|d| d.revision)
     }
 
-    /// 以类型化方式只读访问文档内容。
+    /// Typed read-only access to a document's content.
     pub fn read<T: DocumentContent, R>(
         &self,
         id: DocumentId,
@@ -201,12 +209,12 @@ impl DocumentService {
         self.get(id)?.content.as_any().downcast_ref::<T>().map(f)
     }
 
-    // ---- 生命周期 ----
+    // ---- Lifecycle ----
 
     pub fn create(&mut self, type_id: &DocumentTypeId, title: &str) -> Result<DocumentId, String> {
         let def = self
             .type_of(type_id)
-            .ok_or_else(|| format!("未注册的文档类型: {type_id}"))?;
+            .ok_or_else(|| format!("Unregistered document type: {type_id}"))?;
         let content = (def.create_default)();
         Ok(self.push(type_id.clone(), title.to_string(), None, content))
     }
@@ -235,9 +243,9 @@ impl DocumentService {
         id
     }
 
-    /// 在事务边界提交一份新的文档内容。
-    /// `undoable=false` 表示明确声明不可撤销的操作（design.md §12.2）；
-    /// 委托式撤销类型（`undo_hooks`）不做快照记录，该参数不生效。
+    /// Commit new document content at a transaction boundary.
+    /// `undoable=false` explicitly declares an action that cannot be undone (design.md §12.2);
+    /// delegated undo types (`undo_hooks`) take no snapshots, so the argument has no effect.
     pub fn commit(
         &mut self,
         id: DocumentId,
@@ -246,7 +254,7 @@ impl DocumentService {
         new_content: Box<dyn DocumentContent>,
     ) -> Result<u64, String> {
         let delegated = self.undo_hooks_of(id).is_some();
-        let doc = self.get_mut(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
+        let doc = self.get_mut(id).ok_or_else(|| format!("No such document: {id:?}"))?;
         if !delegated {
             if undoable {
                 let before = doc.content.dup();
@@ -262,7 +270,8 @@ impl DocumentService {
                     doc.history_pos += 1;
                 }
             } else {
-                // 不可撤销操作使既有历史失效（避免撤销回不一致状态）。
+                // An action that cannot be undone invalidates the existing history (so undo
+                // cannot return to an inconsistent state).
                 doc.history.clear();
                 doc.history_pos = 0;
             }
@@ -273,8 +282,9 @@ impl DocumentService {
         Ok(doc.revision)
     }
 
-    /// 类型化编辑：修改前做快照，按域模块逻辑原地修改后登记历史。
-    /// 委托式撤销类型跳过前后快照（全量克隆对参数化文档过重）。
+    /// Typed edit: snapshot before the change, modify in place with the domain module's logic,
+    /// then record the history. Delegated undo types skip the before/after snapshots (full clones
+    /// are too heavy for parametric documents).
     pub fn edit<T: DocumentContent>(
         &mut self,
         id: DocumentId,
@@ -285,14 +295,14 @@ impl DocumentService {
         let delegated = self.undo_hooks_of(id).is_some();
         let type_ok = self
             .get(id)
-            .ok_or_else(|| format!("文档不存在: {id:?}"))?
+            .ok_or_else(|| format!("No such document: {id:?}"))?
             .content
             .as_any()
             .downcast_ref::<T>()
             .is_some();
         if !type_ok {
             return Err(format!(
-                "文档内容类型不是 {}",
+                "The document content type is not {}",
                 std::any::type_name::<T>()
             ));
         }
@@ -303,7 +313,7 @@ impl DocumentService {
                 .content
                 .as_any_mut()
                 .downcast_mut::<T>()
-                .expect("类型已校验");
+                .expect("type checked above");
             f(typed);
         }
         if let Some(before) = before {
@@ -332,7 +342,7 @@ impl DocumentService {
         Ok(doc.revision)
     }
 
-    /// 应用后台任务的 DocCommit（宿主已在 UI 线程校验版本）。
+    /// Apply a background task's DocCommit (the host has checked the revision on the UI thread).
     pub fn apply_commit(&mut self, commit: crate::tasks::DocCommit) -> Result<u64, String> {
         let revision = self.get(commit.doc_id).map(|d| d.revision);
         match revision {
@@ -340,16 +350,20 @@ impl DocumentService {
                 self.commit(commit.doc_id, &commit.label, commit.undoable, commit.content)
             }
             Some(r) => Err(format!(
-                "文档版本过期：任务基于 r{}, 当前 r{}，已拒绝提交「{}」",
+                "Stale document revision: the task was based on r{}, the document is at r{}; \
+                 rejected the commit \"{}\"",
                 commit.expect_revision, r, commit.label
             )),
-            None => Err(format!("文档已关闭，拒绝提交「{}」", commit.label)),
+            None => Err(format!(
+                "The document is closed; rejected the commit \"{}\"",
+                commit.label
+            )),
         }
     }
 
-    // ---- 撤销 / 重做 ----
+    // ---- Undo / redo ----
 
-    /// 文档类型的委托式撤销钩子（None = 平台快照式撤销）。
+    /// The document type's delegated undo hooks (None = the platform's snapshot undo).
     fn undo_hooks_of(&self, id: DocumentId) -> Option<UndoHooks> {
         let doc = self.get(id)?;
         self.type_of(&doc.type_id)?.undo_hooks
@@ -376,15 +390,15 @@ impl DocumentService {
 
     pub fn undo(&mut self, id: DocumentId) -> Result<String, String> {
         if let Some(hooks) = self.undo_hooks_of(id) {
-            let doc = self.get_mut(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
+            let doc = self.get_mut(id).ok_or_else(|| format!("No such document: {id:?}"))?;
             let label = (hooks.undo)(doc.content.as_mut())?;
             doc.dirty = true;
             doc.revision += 1;
             return Ok(label);
         }
-        let doc = self.get_mut(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
+        let doc = self.get_mut(id).ok_or_else(|| format!("No such document: {id:?}"))?;
         if !doc.can_undo() {
-            return Err("没有可撤销的操作".to_string());
+            return Err("Nothing to undo".to_string());
         }
         doc.history_pos -= 1;
         let entry = &doc.history[doc.history_pos];
@@ -396,15 +410,15 @@ impl DocumentService {
 
     pub fn redo(&mut self, id: DocumentId) -> Result<String, String> {
         if let Some(hooks) = self.undo_hooks_of(id) {
-            let doc = self.get_mut(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
+            let doc = self.get_mut(id).ok_or_else(|| format!("No such document: {id:?}"))?;
             let label = (hooks.redo)(doc.content.as_mut())?;
             doc.dirty = true;
             doc.revision += 1;
             return Ok(label);
         }
-        let doc = self.get_mut(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
+        let doc = self.get_mut(id).ok_or_else(|| format!("No such document: {id:?}"))?;
         if !doc.can_redo() {
-            return Err("没有可重做的操作".to_string());
+            return Err("Nothing to redo".to_string());
         }
         let entry = &doc.history[doc.history_pos];
         let label = entry.label.clone();
@@ -415,7 +429,7 @@ impl DocumentService {
         Ok(label)
     }
 
-    // ---- 打开与保存 ----
+    // ---- Open and save ----
     //
     // The service only encodes and decodes: reading and writing the file goes
     // through the storage provider that holds it, off the UI thread (see
@@ -427,15 +441,15 @@ impl DocumentService {
         let ext = crate::storage::split_file_name(file_name).1.unwrap_or_default();
         self.find_type_by_extension(ext)
             .map(|def| def.id.clone())
-            .ok_or_else(|| format!("没有登记 .{ext} 扩展名的文档类型"))
+            .ok_or_else(|| format!("No document type is registered for the .{ext} extension"))
     }
 
     /// A document's content as its type's file format.
     pub fn encode(&self, id: DocumentId) -> Result<Vec<u8>, String> {
-        let doc = self.get(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
+        let doc = self.get(id).ok_or_else(|| format!("No such document: {id:?}"))?;
         let def = self
             .type_of(&doc.type_id)
-            .ok_or_else(|| format!("未注册的文档类型: {}", doc.type_id))?;
+            .ok_or_else(|| format!("Unregistered document type: {}", doc.type_id))?;
         (def.serialize)(doc.content.as_ref())
     }
 
@@ -451,7 +465,7 @@ impl DocumentService {
     ) -> Result<DocumentId, String> {
         let def = self
             .type_of(type_id)
-            .ok_or_else(|| format!("未注册的文档类型: {type_id}"))?;
+            .ok_or_else(|| format!("Unregistered document type: {type_id}"))?;
         let content = (def.deserialize)(bytes)?;
         Ok(self.push(type_id.clone(), title.to_string(), location, content))
     }
@@ -466,13 +480,13 @@ impl DocumentService {
         id: DocumentId,
         target: Option<Location>,
     ) -> Result<(PendingSave, Vec<u8>), String> {
-        let doc = self.get(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
+        let doc = self.get(id).ok_or_else(|| format!("No such document: {id:?}"))?;
         if doc.saving {
-            return Err(format!("文档「{}」正在保存", doc.title));
+            return Err(format!("Document \"{}\" is already being saved", doc.title));
         }
         let location = target
             .or_else(|| doc.location.clone())
-            .ok_or_else(|| format!("文档「{}」尚未关联文件，请使用另存为", doc.title))?;
+            .ok_or_else(|| format!("Document \"{}\" has no file yet; use Save As", doc.title))?;
         let revision = doc.revision;
         let bytes = self.encode(id)?;
         let save = PendingSave {
@@ -494,7 +508,12 @@ impl DocumentService {
     ) -> Result<Location, String> {
         let doc = self
             .get_mut(save.doc)
-            .ok_or_else(|| format!("文档已关闭，保存到 {} 的结果被丢弃", save.location))?;
+            .ok_or_else(|| {
+                format!(
+                    "The document was closed; the result of saving to {} was discarded",
+                    save.location
+                )
+            })?;
         doc.saving = false;
         written?;
         if doc.location.as_ref() != Some(&save.location) {
@@ -548,7 +567,7 @@ mod tests {
             source: None,
         })
         .unwrap();
-        let id = docs.create(&DocumentTypeId::new("test.text"), "未命名").unwrap();
+        let id = docs.create(&DocumentTypeId::new("test.text"), "Untitled").unwrap();
         docs.edit::<Text>(id, "type", true, |t| t.0 = "hello".into()).unwrap();
         (docs, id)
     }
@@ -585,7 +604,7 @@ mod tests {
         let (save, _) = docs.begin_save(id, Some(Location::new("mem", "a.txt"))).unwrap();
         assert!(docs.finish_save(save, Err("disk full".into())).is_err());
         let doc = docs.get(id).unwrap();
-        assert_eq!(doc.title, "未命名");
+        assert_eq!(doc.title, "Untitled");
         assert!(doc.location.is_none() && doc.dirty);
         assert!(docs.begin_save(id, Some(Location::new("mem", "a.txt"))).is_ok());
     }

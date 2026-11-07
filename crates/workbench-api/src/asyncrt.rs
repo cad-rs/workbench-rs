@@ -1,15 +1,15 @@
-//! 平台无关的异步运行时小工具（Web 构建适配）。
+//! Platform-independent async runtime helpers (for the web build).
 //!
-//! 桌面：基于 `async-io` 计时器（共享执行器线程池驱动）。
-//! Web（wasm32）：基于 `performance.now` 截止时间 + JS `setTimeout` 唤醒；
-//! future 自身只持有 `f64`，保持 `Send`（与 `AsyncJob` 的 Send 约束兼容）。
+//! Desktop: based on `async-io` timers (driven by the shared executor thread pool).
+//! Web (wasm32): a `performance.now` deadline plus a JS `setTimeout` wake-up; the future itself
+//! only holds an `f64`, so it stays `Send` (compatible with `AsyncJob`'s Send bound).
 
 use std::time::Duration;
 
-/// 异步睡眠：在异步命令体内等待一段时间，不阻塞线程。
+/// Async sleep: wait for a while inside an async command body without blocking the thread.
 ///
-/// 平台命令/视图/Workbench 应使用它而不是直接依赖 `async-io` 等
-/// 平台相关的计时器，以保持 Web 构建可用。
+/// Platform commands/views/Workbenches should use this rather than depending directly on a
+/// platform-specific timer such as `async-io`, so the web build keeps working.
 pub async fn sleep(dur: Duration) {
     #[cfg(not(target_arch = "wasm32"))]
     async_io::Timer::after(dur).await;
@@ -53,9 +53,10 @@ impl std::future::Future for SleepAfter {
     }
 }
 
-/// fetch 一个同源二进制资源（非 2xx / 不存在 → None）。
+/// Fetch a same-origin binary resource (non-2xx / missing → None).
 ///
-/// 两个 web 前端共用：egui 的 CJK 字体加载与 gpui 的首帧前字体注入。
+/// Shared by both web frontends: egui's CJK font loading and gpui's font injection before the
+/// first frame.
 #[cfg(target_arch = "wasm32")]
 pub async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
     use wasm_bindgen::JsCast;
@@ -69,7 +70,7 @@ pub async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
     }
     let buffer =
         wasm_bindgen_futures::JsFuture::from(response.array_buffer().ok()?).await.ok()?;
-    // ArrayBuffer → Uint8Array：需用构造包装，dyn_into 不跨类型
+    // ArrayBuffer → Uint8Array: needs a constructor wrap; dyn_into does not cross types
     let bytes = js_sys::Uint8Array::new(&buffer.into());
     Some(bytes.to_vec())
 }

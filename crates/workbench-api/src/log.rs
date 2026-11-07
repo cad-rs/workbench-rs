@@ -1,4 +1,4 @@
-//! 结构化日志（内存环形缓冲，由前端展示在 Output 面板）。
+//! Structured logging (an in-memory ring buffer, shown by the frontend in the Output panel).
 
 use std::collections::VecDeque;
 
@@ -23,15 +23,16 @@ impl LogLevel {
 
 #[derive(Clone, Debug)]
 pub struct LogEntry {
-    /// 全局序号（单调递增；stdout 日志镜像的游标用）。
+    /// Global sequence number (monotonically increasing; the cursor for the stdout log mirror).
     pub seq: u64,
     pub level: LogLevel,
-    /// 应用启动以来的秒数，格式化为 `mm:ss.mmm`。
+    /// Seconds since the app started, formatted as `mm:ss.mmm`.
     pub time: String,
     pub message: String,
 }
 
-/// 平台日志存储。UI 线程写入；也可由任务事件泵转发写入。
+/// The platform log store. Written by the UI thread; the task event pump can also forward
+/// writes into it.
 pub struct LogStore {
     entries: VecDeque<LogEntry>,
     capacity: usize,
@@ -85,13 +86,14 @@ impl LogStore {
         self.entries.back()
     }
 
-    /// 截取最后 `n` 条日志。
+    /// The last `n` log entries.
     pub fn tail(&self, n: usize) -> Vec<LogEntry> {
         let len = self.entries.len();
         self.entries.iter().skip(len.saturating_sub(n)).cloned().collect()
     }
 
-    /// 返回全局序号大于 `cursor` 的条目（阶段 5：stdout 日志镜像用）。
+    /// The entries whose global sequence number is greater than `cursor` (phase 5: for the
+    /// stdout log mirror).
     pub fn since(&self, cursor: u64) -> Vec<LogEntry> {
         self.entries
             .iter()

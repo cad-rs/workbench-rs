@@ -191,6 +191,10 @@ pub(crate) fn overlay_shell(
     card = card.child(input_slot);
 
     // Hints + close.
+    let (hint, cancel) = {
+        let guard = core.lock().unwrap_or_else(|p| p.into_inner());
+        (guard.host.tr("Enter to save · Esc to cancel"), guard.host.tr("Cancel"))
+    };
     let core_btn = core.clone();
     let footer = div()
         .flex()
@@ -200,13 +204,13 @@ pub(crate) fn overlay_shell(
             div()
                 .text_size(px(11.0))
                 .text_color(col(wb::Color::GRAY))
-                .child("Enter 保存 · Esc 取消".to_string()),
+                .child(hint),
         )
         .child(
             Button::new("text-edit-close")
                 .outline()
                 .small()
-                .child("取消")
+                .child(cancel)
                 .on_click(cx.listener(
                     move |_: &mut crate::RootView, _: &ClickEvent, _: &mut Window, cx: &mut Context<'_, crate::RootView>| {
                         close(&core_btn);

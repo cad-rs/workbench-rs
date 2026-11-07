@@ -14,7 +14,7 @@ use web_sys::{HtmlAnchorElement, HtmlInputElement};
 pub(crate) async fn pick(extensions: &[String]) -> Result<(String, Vec<u8>), String> {
     let document = web_sys::window()
         .and_then(|window| window.document())
-        .ok_or("没有页面文档")?;
+        .ok_or("No page document")?;
     let input: HtmlInputElement = document
         .create_element("input")
         .map_err(|e| format!("{e:?}"))?
@@ -49,19 +49,19 @@ pub(crate) async fn pick(extensions: &[String]) -> Result<(String, Vec<u8>), Str
     input.remove();
     let file = chosen.map_err(|e| format!("{e:?}"))?;
     if file.is_null() {
-        return Err("已取消".to_string());
+        return Err("Cancelled".to_string());
     }
     let file: web_sys::File = file.unchecked_into();
     let buffer = JsFuture::from(file.array_buffer())
         .await
-        .map_err(|e| format!("读取 {} 失败: {e:?}", file.name()))?;
+        .map_err(|e| format!("Failed to read {}: {e:?}", file.name()))?;
     Ok((file.name(), Uint8Array::new(&buffer).to_vec()))
 }
 
 /// Hand `bytes` to the browser as a download called `name`.
 pub(crate) fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
-    let window = web_sys::window().ok_or("没有页面窗口")?;
-    let document = window.document().ok_or("没有页面文档")?;
+    let window = web_sys::window().ok_or("No page window")?;
+    let document = window.document().ok_or("No page document")?;
     let parts = Array::of1(&Uint8Array::from(bytes));
     let blob = web_sys::Blob::new_with_u8_array_sequence(&parts).map_err(|e| format!("{e:?}"))?;
     let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(|e| format!("{e:?}"))?;

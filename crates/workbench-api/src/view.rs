@@ -1,33 +1,36 @@
-//! 视图契约（design.md §9）：注册、生命周期与呈现。
+//! The view contract (design.md §9): registration, lifecycle and presentation.
 
 use crate::ids::ViewTypeId;
 use crate::services::AppServices;
 
-/// 视图实例：面板与中央标签共用的内容单元。
+/// A view instance: the content unit shared by panels and central tabs.
 ///
-/// 生命周期：工厂创建 → 每帧 `element` → 关闭时丢弃。
+/// Lifecycle: created by a factory → `element` every frame → dropped on close.
 ///
-/// 视图内容是一棵**前端元素树**：前端在渲染期调用 [`ViewInstance::element`]，
-/// 传入平台宿主让视图读取实时状态，视图返回类型擦除的元素句柄（gpui 前端下
-/// 即 `gpui::AnyElement`）。视图不再自己画像素——绘制由前端元素系统负责，
-/// 输入由前端的事件系统负责。
+/// View content is a **frontend element tree**: during rendering the frontend calls
+/// [`ViewInstance::element`], passing the platform host so the view can read live state, and the
+/// view returns a type-erased element handle (`gpui::AnyElement` under the gpui frontend). Views
+/// no longer paint pixels themselves — drawing is handled by the frontend's element system, and
+/// input by the frontend's event system.
 pub trait ViewInstance: 'static {
-    /// 视图类型 ID（应与注册的 ViewTypeId 一致）。
+    /// View type ID (should match the registered ViewTypeId).
     fn type_id(&self) -> ViewTypeId;
-    /// 标题（中央标签 / 面板头显示）。
+    /// Title (shown on the central tab / panel header).
     fn title(&self) -> String;
-    /// 视图内容的前端元素树。
+    /// The frontend element tree of the view content.
     ///
-    /// 返回 `None` 表示本帧不渲染内容。句柄的具体类型由前端与其视图扩展约定。
+    /// Returning `None` renders no content this frame. The concrete handle type is agreed between
+    /// the frontend and its view extensions.
     fn element(&mut self, _host: &mut dyn AppServices) -> Option<Box<dyn std::any::Any>> {
         None
     }
-    /// 是否还有后台工作在跑、需要平台继续排帧。
+    /// Whether background work is still running and the platform should keep scheduling frames.
     ///
-    /// `element` 只在视图**被重画**时调用，而 gpui 在 UI 空闲时不重画。
-    /// 有后台任务（如图纸的 HLR 生成）的视图靠这个方法让平台在任务在途
-    /// 期间持续排帧，否则任务结果回到通道里也没人去取——视图会一直停在
-    /// 「生成中」。默认 `false`（大多数视图没有后台工作）。
+    /// `element` is only called when the view is **repainted**, and gpui does not repaint while the
+    /// UI is idle. Views with background tasks (such as a drawing's HLR generation) use this method
+    /// to make the platform keep scheduling frames while the task is in flight; otherwise nobody
+    /// picks up the task's result when it arrives on the channel — the view would stay stuck at
+    /// "generating". Defaults to `false` (most views have no background work).
     fn wants_repaint(&self) -> bool {
         false
     }

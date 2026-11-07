@@ -33,9 +33,9 @@ use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
 
-/// 渲染顶点：世界坐标 + 法线 + 颜色（三角形与线段共用管线）。color.a
-/// 只在不透明桶语义固定为 1；透明桶（[`RenderScene::tris_alpha`]）承
-/// 载透明度。
+/// Render vertex: world position + normal + color (triangles and lines share the pipeline).
+/// color.a is fixed at 1 in the opaque bucket's semantics; the transparent bucket
+/// ([`RenderScene::tris_alpha`]) carries opacity.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct RenderVertex {
@@ -44,9 +44,10 @@ pub struct RenderVertex {
     pub color: [f32; 4],
 }
 
-/// 线段顶点（pos + 颜色；法线朝向相机由着色器处理）。顶点缓冲按
-/// **一实例 = 一段的两端**连续排列，顶点着色器把段展开为屏幕空间线宽
-/// 四边形（见 [`SHADER_LINE`]）。alpha 恒 1（透明线不在 P0 语义内）。
+/// Line vertex (pos + color; the shader handles facing the camera). The vertex buffer is laid out
+/// as **one instance = both ends of a segment**, back to back, and the vertex shader expands each
+/// segment into a screen-space line-width quad (see [`SHADER_LINE`]). alpha is always 1
+/// (transparent lines are outside the P0 semantics).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct LineVertexGpu {
@@ -54,66 +55,71 @@ pub struct LineVertexGpu {
     pub color: [f32; 4],
 }
 
-/// 相机：正交投影（yaw/pitch 度 + 场域包围盒）。
+/// Camera: orthographic projection (yaw/pitch in degrees + the domain's bounding volume).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OrthoCamera {
     pub yaw_deg: f32,
     pub pitch_deg: f32,
-    /// 场域中心（世界坐标）。
+    /// Domain center (world coordinates).
     pub center: [f32; 3],
-    /// 场域半径（包围球；正交半高 = 半径）。
+    /// Domain radius (bounding sphere; ortho half-height = radius).
     pub radius: f32,
 }
 
-/// 帧参数（uniform；uniform 地址空间成员须 16 字节对齐）。
+/// Frame parameters (uniform; members in the uniform address space must be 16-byte aligned).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct FrameUniform {
     mvp: [[f32; 4]; 4],
     light_dir: [f32; 3],
     _pad: u32,
-    /// xy = 视口尺寸 px；z = 屏幕空间线宽 px（线段展开用）；w = 补齐。
+    /// xy = viewport size in px; z = screen-space line width in px (for line expansion);
+    /// w = padding.
     viewport: [f32; 4],
 }
 
-/// 渲染场景（纯数据；产品侧几何构建产出后转入 GPU 顶点）。
-/// `Default` 是空场景（宿主元素把产品的场景移走后留下的占位）。
+/// Render scene (plain data; the output of the product's geometry build, turned into GPU vertices).
+/// `Default` is the empty scene (the placeholder left once the host element moves the product's
+/// scene out).
 #[derive(Default)]
 pub struct RenderScene {
-    /// 不透明桶（depth write on；alpha 语义恒 1）。
+    /// Opaque bucket (depth write on; alpha is always 1).
     pub tris: Vec<RenderVertex>,
-    /// 透明桶（round-205 P0：depth write **OFF**、只读深 `Less`、
-    /// `ALPHA_BLENDING`，绘制序 = 数组序——组级 far-to-near 排序是产
-    /// 品侧领域知识，桶内逐三角排序是 P1）。头灯着色照旧作用于 rgb，
-    /// alpha 只承载透明度。
+    /// Transparent bucket (round-205 P0: depth write **OFF**, read-only depth `Less`,
+    /// `ALPHA_BLENDING`, draw order = array order; group-level far-to-near sorting is product-side
+    /// domain knowledge, per-triangle sorting within the bucket is P1). Headlight shading still
+    /// applies to rgb; alpha only carries opacity.
     pub tris_alpha: Vec<RenderVertex>,
-    /// 透明桶质心排序开关（round-206 P1）：true 时绘制前按三角形质心
-    /// 到相机距离 far-to-near 重排 `tris_alpha` 顶点（stable——等距保
-    /// 持声明序）。排序在 [`Renderer::render`] 内做：最终相机（视角预
-    /// 设 + 交互相机偏移）此刻已知，排序与最终视向一致——这是机械几
-    /// 何归框架、领域分组归产品的分层（诉求书 §6-5）。凸不交叉三角形
-    /// 下即正确混合序；交叉/凹形仍逐层近似（不承诺逐像素 OIT）。
-    /// false = P0 语义（数组序 = 混合序）。
+    /// Transparent-bucket centroid sort switch (round-206 P1): when true, the `tris_alpha` vertices
+    /// are reordered far-to-near by each triangle's centroid distance to the camera before drawing
+    /// (stable: equal distances keep declaration order). The sort runs inside
+    /// [`Renderer::render`]: the final camera (view preset + interactive camera offset) is known
+    /// there, so the sort matches the final view direction. This is the layering where mechanical
+    /// geometry belongs to the framework and domain grouping to the product (ask doc §6-5). For
+    /// convex, non-intersecting triangles this is the correct blend order; intersecting/concave
+    /// shapes are still approximated layer by layer (no per-pixel OIT is promised).
+    /// false = P0 semantics (array order = blend order).
     pub sort_alpha: bool,
-    /// 不透明线（保持）。
+    /// Opaque lines (unchanged).
     pub lines: Vec<LineVertexGpu>,
     pub camera: OrthoCamera,
     pub bg: [f32; 4],
-    /// 屏幕空间线宽（px）：线段展开四边形的整体宽度，随视口分辨率
-    /// 保持物理厚度不变。
+    /// Screen-space line width (px): the full width of the quads lines expand into; the physical
+    /// thickness stays the same across viewport resolutions.
     pub line_width_px: f32,
-    /// 体渲染切片（round-211 P2 MVP，`docs/multiphysics-volume-render-
-    /// ask.md` §3 数据契约）：递「纹理 + 包围盒 + LUT」不递「场」——
-    /// 框架不认识场。None = 现状语义零回归。绘制序 tris → lines →
-    /// **volume** → tris_alpha（体是最远透明层，诉求书 §5.2）。
+    /// Volume render slice (round-211 P2 MVP, `docs/multiphysics-volume-render-ask.md` §3 data
+    /// contract): passes "texture + bounding box + LUT", not a "field"; the framework knows nothing
+    /// of fields. None = the existing semantics, zero regression. Draw order tris → lines →
+    /// **volume** → tris_alpha (the volume is the farthest transparent layer, ask doc §5.2).
     pub volume: Option<VolumeSlice>,
 }
 
-/// 体渲染数据契约：标量体（已归一化 [0,1]，行主序 x 最快，格心语义）、
-/// 世界 AABB、LUT（256×rgba8：rgb 色标 / a 不透明度曲线，均产品侧
-/// 出）、采样步数（质量/成本旋钮）与全局不透明度倍率。`generation` 为
-/// 重采样代数：(dims, generation) 是 3D 纹理上传缓存键，代数不变不
-/// 重传（产品每帧重建场景，MB 级体数据靠 Arc 共享 + 代数缓存不重传）。
+/// Volume render data contract: a scalar volume (normalized to [0,1], row-major with x fastest,
+/// cell-centered), a world AABB, a LUT (256×rgba8: rgb color scale / a opacity curve, both made on
+/// the product side), the sample step count (the quality/cost knob) and a global opacity
+/// multiplier. `generation` is the resampling generation: (dims, generation) is the 3D texture
+/// upload cache key, and an unchanged generation is not re-uploaded (the product rebuilds the scene
+/// every frame; MB-scale volume data avoids re-uploads through Arc sharing + the generation cache).
 #[derive(Clone, Debug)]
 pub struct VolumeSlice {
     pub data: std::sync::Arc<[f32]>,
@@ -126,11 +132,12 @@ pub struct VolumeSlice {
 }
 
 impl RenderScene {
-    /// 透明桶质心 far-to-near 排序（[`RenderScene::sort_alpha`] 开时的
-    /// 绘制前重排）：逐三角形质心到相机眼点距离降序（远的先画），键
-    /// 预计算 O(n) + stable sort——等距保持声明序（组级发射序的残余语
-    /// 义）。返回 None = 开关关或不足两个三角形（无可排序的顺序问题），
-    /// 调用方回落数组序。
+    /// Transparent-bucket centroid far-to-near sort (the pre-draw reorder while
+    /// [`RenderScene::sort_alpha`] is on): triangles in descending order of centroid-to-eye
+    /// distance (farthest drawn first), keys precomputed in O(n) + a stable sort, so equal
+    /// distances keep declaration order (what remains of the group-level emission-order
+    /// semantics). Returns None when the switch is off or there are fewer than two triangles
+    /// (nothing to order), and the caller falls back to array order.
     pub fn alpha_sorted(&self) -> Option<Vec<RenderVertex>> {
         if !self.sort_alpha || self.tris_alpha.len() < 6 {
             return None;
@@ -163,32 +170,35 @@ impl RenderScene {
     }
 }
 
-// ---- 交互相机（视口语义归属渲染核心；GUI 壳只转发裸输入） ----
+// ---- Interactive camera (viewport semantics belong to the render core; the GUI shell only
+// forwards raw input) ----
 //
-// 轨道灵敏度、平移的世界换算、缩放 clamp 全在本模块；GUI 壳只把鼠标
-// 位移/滚轮原始参数递给 [`cam_orbit`]/[`cam_pan`]/[`cam_zoom`]。
+// Orbit sensitivity, the pan's world conversion and the zoom clamp all live in this module; the
+// GUI shell only passes raw mouse offsets / wheel parameters to
+// [`cam_orbit`]/[`cam_pan`]/[`cam_zoom`].
 
-/// 视角预设（面板按钮序）：(标签, yaw°, pitch°)。俯视不退化（投影的
-/// right 向量只依赖 yaw）。
+/// View presets (in panel button order): (label, yaw°, pitch°). Top-down doesn't degenerate (the
+/// projection's right vector depends only on yaw).
 pub const VIEW_ANGLES: [(&str, f64, f64); 4] = [
-    ("等轴", 35.0, 30.0),
-    ("前", 0.0, 0.0),
-    ("右", 90.0, 0.0),
-    ("上", 0.0, 90.0),
+    ("Iso", 35.0, 30.0),
+    ("Front", 0.0, 0.0),
+    ("Right", 90.0, 0.0),
+    ("Top", 0.0, 90.0),
 ];
 
-/// 当前视角序号（会话级视图偏好；面板按钮切换）。
+/// Current view preset index (a session-level view preference; switched by the panel buttons).
 pub static VIEW_ANGLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// 交互相机偏移（会话级，不持久化）：拖拽轨道（yaw/pitch 叠加在视角
-/// 预设上）+ 滚轮缩放（radius 乘子）+ Shift 拖拽平移（屏幕空间位移，
-/// 世界换算在 [`CamOffset::apply_to`] 按当前视野做）。视角预设按钮重置。
+/// Interactive camera offset (session-level, not persisted): orbit drag (yaw/pitch layered on the
+/// view preset) + wheel zoom (radius multiplier) + Shift-drag pan (a screen-space offset; the
+/// world conversion happens in [`CamOffset::apply_to`] against the current field of view). The
+/// view preset buttons reset it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CamOffset {
     pub yaw: f64,
     pub pitch: f64,
     pub zoom: f64,
-    /// 屏幕空间平移累计（px；+x 右 +y 下）。
+    /// Accumulated screen-space pan (px; +x right, +y down).
     pub pan: [f64; 2],
 }
 
@@ -204,30 +214,31 @@ impl Default for CamOffset {
 }
 
 impl CamOffset {
-    /// 滚轮缩放（乘子 clamp 0.15..6——约 1.6 个数量级视野）。
+    /// Wheel zoom (multiplier clamped to 0.15..6, about 1.6 orders of magnitude of field of view).
     pub fn zoom_by(&mut self, factor: f64) {
         self.zoom = (self.zoom * factor).clamp(0.15, 6.0);
     }
 
-    /// 轨道拖拽（度/像素 × 位移）。
+    /// Orbit drag (degrees/pixel × offset).
     pub fn orbit_by(&mut self, dx: f64, dy: f64) {
         self.yaw += dx * 0.4;
         self.pitch += dy * 0.4;
     }
 
-    /// 平移拖拽（屏幕像素累计；clamp ±视口几倍防迷失）。
+    /// Pan drag (accumulated screen pixels; clamped to ± a few viewports so the view isn't lost).
     pub fn pan_by(&mut self, dx: f64, dy: f64) {
         self.pan[0] = (self.pan[0] + dx).clamp(-4000.0, 4000.0);
         self.pan[1] = (self.pan[1] + dy).clamp(-4000.0, 4000.0);
     }
 
-    /// 预设 + 偏移合成最终正交相机（原地改写 yaw/pitch/radius/center）。
-    /// 平移换算：屏幕 px → NDC（2×半高/视口高，含 zoom）→ 世界（right/up 基）。
+    /// Combines preset + offset into the final ortho camera (rewrites yaw/pitch/radius/center in
+    /// place). Pan conversion: screen px → NDC (2×half-height/viewport height, zoom included) →
+    /// world (right/up basis).
     pub fn apply_to(&self, preset_yaw: f64, preset_pitch: f64, cam: &mut OrthoCamera, view_h_px: f64) {
-        let radius = cam.radius as f64; // 基准半径（zoom 前）
+        let radius = cam.radius as f64; // base radius (before zoom)
         cam.yaw_deg = (preset_yaw + self.yaw) as f32;
         cam.pitch_deg = (preset_pitch + self.pitch) as f32;
-        // 世界单位/px：正交半高 = radius×1.2×zoom → NDC 高 2。
+        // World units/px: ortho half-height = radius×1.2×zoom → NDC height 2.
         let world_per_px = 2.0 * radius * 1.2 * self.zoom / view_h_px.max(1.0);
         let (cy, sy, cp, sp) = (
             (cam.yaw_deg as f64).to_radians().cos(),
@@ -237,7 +248,8 @@ impl CamOffset {
         );
         let r = [-sy, cy, 0.0];
         let u = [-sp * cy, -sp * sy, cp];
-        // 拖拽 +x = 相机左移（场景右移）→ center -= r·dx；+y 下 = center += u·dy。
+        // Drag +x = camera moves left (scene moves right) → center -= r·dx;
+        // +y down = center += u·dy.
         for k in 0..3 {
             cam.center[k] += ((-r[k] * self.pan[0] + u[k] * self.pan[1]) * world_per_px) as f32;
         }
@@ -256,56 +268,58 @@ thread_local! {
     };
 }
 
-/// 壳层裸输入 → 轨道拖拽（位移 px；灵敏度语义在本模块）。
+/// Raw shell input → orbit drag (offset in px; the sensitivity semantics live in this module).
 pub fn cam_orbit(dx: f64, dy: f64) {
     CAM.with(|c| c.borrow_mut().orbit_by(dx, dy));
 }
 
-/// 壳层裸输入 → Shift 平移拖拽（位移 px）。
+/// Raw shell input → Shift pan drag (offset in px).
 pub fn cam_pan(dx: f64, dy: f64) {
     CAM.with(|c| c.borrow_mut().pan_by(dx, dy));
 }
 
-/// 壳层裸输入 → 滚轮缩放（乘子）。
+/// Raw shell input → wheel zoom (multiplier).
 pub fn cam_zoom(factor: f64) {
     CAM.with(|c| c.borrow_mut().zoom_by(factor));
 }
 
-/// 预设 + 偏移合成最终相机（视角预设切换时先 [`reset_cam_offset`]）。
+/// Combines preset + offset into the final camera (switching view presets calls
+/// [`reset_cam_offset`] first).
 pub fn cam_apply(preset_yaw: f64, preset_pitch: f64, cam: &mut OrthoCamera, view_h_px: f64) {
     CAM.with(|c| c.borrow().apply_to(preset_yaw, preset_pitch, cam, view_h_px));
 }
 
-/// 重置相机偏移（视角预设切换时调用）。
+/// Resets the camera offset (called when the view preset switches).
 pub fn reset_cam_offset() {
     CAM.with(|c| *c.borrow_mut() = CamOffset::default());
 }
 
-/// 相机偏移当前值（测试访问器）。
+/// The current camera offset (test accessor).
 pub fn cam_offset_for_test() -> CamOffset {
     CAM.with(|c| *c.borrow())
 }
 
-/// 体渲染帧参数（uniform；16 字节对齐成员）。
+/// Volume render frame parameters (uniform; 16-byte aligned members).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct VolumeUniform {
     mvp: [[f32; 4]; 4],
-    /// 世界 AABB（w = 0）。
+    /// World AABB (w = 0).
     aabb_lo: [f32; 4],
     aabb_hi: [f32; 4],
-    /// 相机眼点（视深 = d·(eye - p) 计算用）。
+    /// Camera eye point (for computing view depth = d·(eye - p)).
     eye: [f32; 4],
-    /// 视线方向（进场景，正交恒定 = -头灯方向）。
+    /// View ray direction (into the scene; constant for ortho = -headlight direction).
     ray_dir: [f32; 4],
-    /// x = near、y = f - near、z = steps、w = alpha_scale。
+    /// x = near, y = f - near, z = steps, w = alpha_scale.
     params: [f32; 4],
 }
 
-/// f32 → f16 位型（IEEE 754 half）：±Inf/NaN 保形、上溢 → Inf、下溢 →
-/// 带符号零（归一化 [0,1] 体数据不触达次正规域），尾数 round-to-
-/// nearest（平局进位简化为 `> 半格` 入——体采样语义下无差别）。
-/// R16Float 上传用，不引入依赖（诉求书 §10-5 倾向已裁决）。
+/// f32 → f16 bit pattern (IEEE 754 half): ±Inf/NaN keep their kind, overflow → Inf, underflow →
+/// signed zero (normalized [0,1] volume data never reaches the subnormal range), mantissa
+/// round-to-nearest (ties simplified to rounding up on `> half a step`, no difference for volume
+/// sampling). Used for the R16Float upload without adding a dependency (ask doc §10-5, the
+/// preference was settled).
 fn f16_bits(v: f32) -> u16 {
     let b = v.to_bits();
     let sign = ((b >> 16) & 0x8000) as u16;
@@ -329,7 +343,7 @@ fn f16_bits(v: f32) -> u16 {
     }
 }
 
-/// 列主序 4×4。
+/// Column-major 4×4.
 type Mat4 = [[f32; 4]; 4];
 
 fn mat_mul(a: &Mat4, b: &Mat4) -> Mat4 {
@@ -342,8 +356,9 @@ fn mat_mul(a: &Mat4, b: &Mat4) -> Mat4 {
     o
 }
 
-/// 相机眼点（正交相机位于中心 + 视向 × 3r——`ortho_mvp` 与透明桶质心
-/// 排序共用，保证排序距离与投影视向同源）。
+/// Camera eye point (the ortho camera sits at center + view direction × 3r; shared by `ortho_mvp`
+/// and the transparent-bucket centroid sort, so sort distances and the projection's view
+/// direction come from the same source).
 fn eye_pos(cam: &OrthoCamera) -> [f32; 3] {
     let (yaw, pitch) = (cam.yaw_deg.to_radians(), cam.pitch_deg.to_radians());
     let d = [yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin()];
@@ -354,22 +369,23 @@ fn eye_pos(cam: &OrthoCamera) -> [f32; 3] {
     ]
 }
 
-/// 深度范围（near, f - near）——正交 NDC z 线性映射参数，`ortho_mvp`
-/// 与体渲染撞墙视深解析共用（round-211）。
+/// Depth range (near, f - near): the parameters of the linear ortho NDC z mapping, shared by
+/// `ortho_mvp` and the volume pass's wall-hit view-depth resolve (round-211).
 fn depth_range(cam: &OrthoCamera) -> (f32, f32) {
     (0.01 * cam.radius.max(1e-6), cam.radius * 8.0)
 }
 
-/// 正交 MVP（view-lookat + ortho；相机在 (0,0,3r) 看向中心，先转 yaw/pitch）。
+/// Ortho MVP (view-lookat + ortho; the camera at (0,0,3r) looks at the center, rotated by
+/// yaw/pitch first).
 fn ortho_mvp(cam: &OrthoCamera, aspect: f32) -> Mat4 {
     let (yaw, pitch) = (cam.yaw_deg.to_radians(), cam.pitch_deg.to_radians());
     let (cy, sy, cp, sp) = (yaw.cos(), yaw.sin(), pitch.cos(), pitch.sin());
-    // 相机基（右手，up=+z 世界）：d 指向相机、r 右、u 上。
+    // Camera basis (right-handed, world up = +z): d points at the camera, r right, u up.
     let d = [cp * cy, cp * sy, sp];
     let r = [-sy, cy, 0.0];
     let u = [-sp * cy, -sp * sy, cp];
     let eye = eye_pos(cam);
-    // view = [r; u; -d] 平移（行主序构造后转列主序）。
+    // view = [r; u; -d] + translation (built row-major, then transposed to column-major).
     let view_rows: [[f32; 4]; 4] = [
         [r[0], r[1], r[2], -(r[0] * eye[0] + r[1] * eye[1] + r[2] * eye[2])],
         [u[0], u[1], u[2], -(u[0] * eye[0] + u[1] * eye[1] + u[2] * eye[2])],
@@ -382,8 +398,9 @@ fn ortho_mvp(cam: &OrthoCamera, aspect: f32) -> Mat4 {
             view[c][rr] = view_rows[rr][c];
         }
     }
-    // 正交投影（半高 = 1.2×半径留边；near/far 覆盖相机前 [0.01r, 8r]）。
-    // **WebGPU NDC 深度是 [0,1]**（非 OpenGL [-1,1]）：z_ndc = (z-n)/(f-n)。
+    // Orthographic projection (half-height = 1.2×radius for a margin; near/far cover [0.01r, 8r]
+    // in front of the camera).
+    // **WebGPU NDC depth is [0,1]** (not OpenGL's [-1,1]): z_ndc = (z-n)/(f-n).
     let hh = cam.radius * 1.2;
     let hw = hh * aspect.max(1e-3);
     let (n, f) = depth_range(cam);
@@ -401,7 +418,7 @@ struct FrameUniform {
     mvp: mat4x4<f32>,
     light_dir: vec3<f32>,
     _pad: u32,
-    viewport: vec4<f32>, // 三角形管线不用（与线段管线共用 uniform 布局）。
+    viewport: vec4<f32>, // unused by the triangle pipeline (same uniform layout as the line one).
 };
 @group(0) @binding(0) var<uniform> frame: FrameUniform;
 
@@ -424,8 +441,9 @@ fn vs_main(@location(0) pos: vec3<f32>,
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    // 头灯：0.45 环境 + 0.55 |n·l|（明暗乘进 rgb，alpha 只承载透明度
-    // ——透明桶管线用 ALPHA_BLENDING，不透明桶 REPLACE 下 a=1 等价现状）。
+    // Headlight: 0.45 ambient + 0.55 |n·l| (shading multiplies into rgb, alpha only carries
+    // opacity: the transparent-bucket pipeline uses ALPHA_BLENDING, and under the opaque bucket's
+    // REPLACE a=1 behaves as before).
     let l = normalize(frame.light_dir);
     let nd = abs(dot(normalize(in.world_normal), l));
     let shade = 0.45 + 0.55 * nd;
@@ -438,7 +456,7 @@ struct FrameUniform {
     mvp: mat4x4<f32>,
     light_dir: vec3<f32>,
     _pad: u32,
-    viewport: vec4<f32>, // xy = 视口 px；z = 屏幕空间线宽 px。
+    viewport: vec4<f32>, // xy = viewport px; z = screen-space line width px.
 };
 @group(0) @binding(0) var<uniform> frame: FrameUniform;
 
@@ -447,7 +465,8 @@ struct VSOut {
     @location(0) color: vec4<f32>,
 };
 
-// 六顶点角表（两三角形拼成一段的四边形）：x = 沿段参数 t，y = 垂直符号。
+// Six-vertex corner table (two triangles making up a segment's quad): x = parameter t along the
+// segment, y = perpendicular sign.
 fn corner(vi: u32) -> vec2<f32> {
     var c = array<vec2<f32>, 6>(
         vec2<f32>(0.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
@@ -455,10 +474,11 @@ fn corner(vi: u32) -> vec2<f32> {
     return c[vi];
 }
 
-// 屏幕空间线宽：一实例读一段的两端，先各自过 MVP 到 clip 空间，再在
-// 屏幕 px 域取垂直方向扩张半宽（NDC→px→NDC 换算含视口尺寸，物理厚度
-// 不随分辨率变）；深度按角点参数在两端 NDC 深度间线性插值——正交投影
-// w=1 恒定，遮挡与 1px LineList 一致。
+// Screen-space line width: one instance reads both ends of a segment, takes each through the MVP
+// into clip space, then expands by half the width along the perpendicular in screen px (the
+// NDC→px→NDC conversion includes the viewport size, so the physical thickness doesn't change with
+// resolution); depth is interpolated linearly between the two ends' NDC depths by the corner
+// parameter. Ortho projection keeps w=1, so occlusion matches the 1px LineList.
 @vertex
 fn vs_main(@location(0) pos_a: vec3<f32>,
            @location(1) color_a: vec4<f32>,
@@ -470,12 +490,14 @@ fn vs_main(@location(0) pos_a: vec3<f32>,
     let cb = frame.mvp * vec4<f32>(pos_b, 1.0);
     let na = ca.xy / ca.w;
     let nb = cb.xy / cb.w;
-    // 线方向 NDC→px（px = ndc × 0.5×视口），取屏幕空间垂直单位向量。
+    // Line direction NDC→px (px = ndc × 0.5×viewport); take the screen-space perpendicular unit
+    // vector.
     let to_px = 0.5 * frame.viewport.xy;
     let d = (nb - na) * to_px;
     let len = length(d);
     let perp = select(vec2<f32>(1.0, 0.0), vec2<f32>(-d.y, d.x) / len, len > 1e-6);
-    // 半宽 px → NDC（逐分量 ÷ 半视口 px），角点沿垂直方向扩张。
+    // Half width px → NDC (per component ÷ half viewport px); corners expand along the
+    // perpendicular.
     let off = perp * (0.5 * frame.viewport.z / to_px) * k.y;
     var out: VSOut;
     out.pos = vec4<f32>(
@@ -498,7 +520,7 @@ struct VolumeUniform {
     aabb_lo: vec4<f32>,
     aabb_hi: vec4<f32>,
     eye: vec4<f32>,
-    ray_dir: vec4<f32>,  // 进场景（正交恒定）。
+    ray_dir: vec4<f32>,  // into the scene (constant for ortho).
     params: vec4<f32>,   // x=near y=f-near z=steps w=alpha_scale
 };
 @group(0) @binding(0) var<uniform> u: VolumeUniform;
@@ -507,8 +529,8 @@ struct VolumeUniform {
 @group(0) @binding(3) var wall_tex: texture_depth_2d;
 @group(0) @binding(4) var lut_tex: texture_1d<f32>;
 
-// 单位立方 12 三角（36 顶点，外向 CCW——cross(v1-v0, v2-v0) = 外法向，
-// cull back 后仅剩朝相机的前面，即射线入口面）。
+// Unit cube, 12 triangles (36 vertices, outward CCW: cross(v1-v0, v2-v0) = outward normal; after
+// back-face culling only the faces toward the camera remain, i.e. the ray entry faces).
 fn cube(vi: u32) -> vec3<f32> {
     var c = array<vec3<f32>, 36>(
         vec3<f32>(0., 0., 1.), vec3<f32>(1., 0., 1.), vec3<f32>(1., 1., 1.),
@@ -540,18 +562,19 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     return out;
 }
 
-// 包围盒前向面 ray-march：正交射线方向全屏恒定，起点 = 前面片元世界
-// 坐标；出点 = AABB slab 解析；撞墙 = 1x 深度预 pass texel 解析视深
-// （正交 w=1 → 深度即 NDC z 线性映射）。等距采样 → LUT → 前向累积，
-// ERT acc_a > 0.99 提前止步；输出 premultiplied（管线 ONE +
-// ONE_MINUS_SRC_ALPHA）。
+// Ray-march from the bounding box's front faces: the ortho ray direction is constant across the
+// screen, the start = the front fragment's world position; the exit = the AABB slab solve; the
+// wall hit = view depth resolved from the 1x depth pre-pass texel (ortho w=1 → depth is a linear
+// mapping of NDC z). Equidistant samples → LUT → front-to-back accumulation, with early ray
+// termination at acc_a > 0.99; the output is premultiplied (pipeline ONE +
+// ONE_MINUS_SRC_ALPHA).
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ro = in.world;
     let rd = normalize(u.ray_dir.xyz);
     var t_far = 1e30;
     for (var k = 0; k < 3; k++) {
-        if (abs(rd[k]) < 1e-12) { continue; } // 平行轴：ro 在 slab 内不约束
+        if (abs(rd[k]) < 1e-12) { continue; } // parallel axis: ro in the slab, no constraint
         let t1 = (u.aabb_lo[k] - ro[k]) / rd[k];
         let t2 = (u.aabb_hi[k] - ro[k]) / rd[k];
         t_far = min(t_far, max(t1, t2));
@@ -581,9 +604,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// 纯 wgpu 渲染核心：只依赖 wgpu 类型——设备/队列/目标格式由宿主递入
-/// （GUI 壳递共享设备走 surface 合成；headless 测试自建本地设备），
-/// 本模块不创建窗口、不触碰任何 GUI 类型。
+/// Pure wgpu render core: depends only on wgpu types. The host passes in the device/queue/target
+/// format (the GUI shell passes the shared device and goes through surface composition; headless
+/// tests build a local device); this module never creates a window or touches any GUI type.
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -591,19 +614,20 @@ pub struct Renderer {
     tri_pipeline: wgpu::RenderPipeline,
     tri_alpha_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
-    /// 体渲染 ray-march 管线（主 MSAA pass 内第四管线，round-211 方案 I）。
+    /// Volume ray-march pipeline (the fourth pipeline in the main MSAA pass, round-211 option I).
     volume_pipeline: wgpu::RenderPipeline,
-    /// 1x 深度预 pass 管线（无 fragment、sample_count 1——撞墙截断）。
+    /// 1x depth pre-pass pipeline (no fragment, sample_count 1; for the wall-hit cutoff).
     depth_pre_pipeline: wgpu::RenderPipeline,
     volume_bgl: wgpu::BindGroupLayout,
     volume_uniform: wgpu::Buffer,
     volume_bind: Option<wgpu::BindGroup>,
-    /// 3D 数据纹理 + 其 (dims, generation) 缓存键——代数不变不重传。
+    /// The 3D data texture + its (dims, generation) cache key; an unchanged generation isn't
+    /// re-uploaded.
     volume_tex: Option<(wgpu::Texture, [u32; 3], u64)>,
-    /// LUT 1D 纹理（256×rgba8；1KB 级每帧重传，免缓存键）。
+    /// LUT 1D texture (256×rgba8; about 1KB, re-uploaded every frame, so no cache key).
     lut_tex: Option<wgpu::Texture>,
-    /// 1x 深度预目标（Depth24Plus，RENDER_ATTACHMENT |
-    /// TEXTURE_BINDING；随尺寸重建）。
+    /// 1x depth pre-pass target (Depth24Plus, RENDER_ATTACHMENT |
+    /// TEXTURE_BINDING; rebuilt on resize).
     wall: Option<(wgpu::TextureView, u32, u32)>,
     uniform_buf: wgpu::Buffer,
     uniform_bind: wgpu::BindGroup,
@@ -613,16 +637,17 @@ pub struct Renderer {
     n_tris: u32,
     n_tris_alpha: u32,
     n_lines: u32,
-    /// 深度目标（两条呈现路径共用；随尺寸重建；MSAA 倍数同颜色）。
+    /// Depth target (shared by both presentation paths; rebuilt on resize; same MSAA count as
+    /// color).
     depth: Option<(wgpu::TextureView, u32, u32)>,
-    /// MSAA 颜色目标（resolve 到宿主传入的颜色 view；随尺寸重建）。
+    /// MSAA color target (resolves into the color view the host passes in; rebuilt on resize).
     msaa: Option<(wgpu::TextureView, u32, u32)>,
-    /// 回读目标（`render_readback` 专用：颜色纹理 + 读回缓冲）。
+    /// Readback target (for `render_readback` only: color texture + readback buffer).
     readback: Option<ReadbackTarget>,
 }
 
-/// 可回读的离屏颜色目标（颜色纹理 + 对齐读回缓冲）：`render_readback` 与
-/// 壳层的回读上屏通路共用。
+/// An offscreen color target that can be read back (color texture + aligned readback buffer):
+/// shared by `render_readback` and the shell's readback presentation path.
 pub struct ReadbackTarget {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -656,17 +681,18 @@ impl ReadbackTarget {
         Self { texture, view, buf, width, height, bytes_per_row }
     }
 
-    /// 尺寸（device 像素）。
+    /// Size (device pixels).
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
-    /// 渲染目标 view。
+    /// The render target view.
     pub fn view(&self) -> &wgpu::TextureView {
         &self.view
     }
 
-    /// 拷出并阻塞等待：紧排 BGRA 行（`width*height*4`，已去行 padding）。
+    /// Copies out and blocks until done: tightly packed BGRA rows (`width*height*4`, row padding
+    /// removed).
     pub fn read(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Vec<u8>> {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("wb-render-readback-enc"),
@@ -706,10 +732,11 @@ impl ReadbackTarget {
 }
 
 impl Renderer {
-    /// MSAA 倍数（4x——WebGPU 规范对可渲染格式保证支持）。
+    /// MSAA sample count (4x: the WebGPU spec guarantees support for renderable formats).
     const MSAA_SAMPLES: u32 = 4;
 
-    /// 共享宿主设备构造（无失败路径：设备/队列由宿主保证可用）。
+    /// Construction on the shared host device (no failure path: the host guarantees a usable
+    /// device/queue).
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, target_format: wgpu::TextureFormat) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("wb-render-shader"),
@@ -750,11 +777,11 @@ impl Renderer {
                              line: bool,
                              alpha: bool|
          -> wgpu::RenderPipeline {
-            // 线段管线：一实例 = 一段的两端（连续 2×LineVertexGpu），
-            // 顶点着色器展开 6 顶点四边形；三角形管线逐顶点。两者同为
-            // TriangleList + 深度 + MSAA。透明三角管线（alpha=true）：
-            // ALPHA_BLENDING + depth write OFF（只读深 Less）——绘制序
-            // 即混合序，排序语义见 RenderScene::tris_alpha 文档。
+            // Line pipeline: one instance = both ends of a segment (2×LineVertexGpu back to back),
+            // and the vertex shader expands a 6-vertex quad; the triangle pipeline goes per
+            // vertex. Both are TriangleList + depth + MSAA. Transparent triangle pipeline
+            // (alpha=true): ALPHA_BLENDING + depth write OFF (read-only depth Less); draw order is
+            // blend order, see the RenderScene::tris_alpha docs for the sorting semantics.
             let vb_layout = [if line {
                 wgpu::VertexBufferLayout {
                     array_stride: (2 * size_of::<LineVertexGpu>()) as u64,
@@ -862,8 +889,8 @@ impl Renderer {
         let line_pipeline = make_pipeline(&module_line, true, false);
         let tri_alpha_pipeline = make_pipeline(&module, false, true);
 
-        // ---- 体渲染（round-211 P2 方案 I：主 MSAA pass 第四管线 + 1x
-        // 深度预 pass；现有三管线字节不动） ----
+        // ---- Volume rendering (round-211 P2 option I: a fourth pipeline in the main MSAA pass +
+        // a 1x depth pre-pass; the existing three pipelines are untouched, byte for byte) ----
         let module_volume = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("wb-render-shader-volume"),
             source: wgpu::ShaderSource::Wgsl(SHADER_VOLUME.into()),
@@ -938,8 +965,8 @@ impl Renderer {
                 module: &module_volume,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                // premultiplied 输出：ONE + ONE_MINUS_SRC_ALPHA（与透明
-                // 桶的非预乘 ALPHA_BLENDING 并存于各自管线）。
+                // premultiplied output: ONE + ONE_MINUS_SRC_ALPHA (coexisting, each in its own
+                // pipeline, with the transparent bucket's non-premultiplied ALPHA_BLENDING).
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
                     blend: Some(wgpu::BlendState {
@@ -959,7 +986,8 @@ impl Renderer {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                // 外向 CCW 立方 cull back → 仅朝相机的前面（射线入口面）。
+                // Outward-CCW cube with back-face culling → only the faces toward the camera
+                // remain (the ray entry faces).
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
@@ -977,8 +1005,9 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
-        // 1x 深度预 pass：复用三角管线顶点级（SHADER vs_main）、无
-        // fragment、sample_count 1——只写专用深度纹理供 ray-march 撞墙。
+        // 1x depth pre-pass: reuses the triangle pipeline's vertex stage (SHADER vs_main), no
+        // fragment, sample_count 1; it only writes a dedicated depth texture for the ray-march's
+        // wall hit.
         let depth_pre_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("wb-render-pipeline-depth-pre"),
             layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1100,7 +1129,8 @@ impl Renderer {
         view
     }
 
-    /// MSAA 颜色目标就绪（resolve 落到宿主 view；尺寸不变即复用）。
+    /// Ensures the MSAA color target (it resolves into the host view; reused while the size is
+    /// unchanged).
     fn ensure_msaa(&mut self, width: u32, height: u32) -> wgpu::TextureView {
         let (w, h) = (width.max(1), height.max(1));
         if let Some((view, mw, mh)) = &self.msaa {
@@ -1123,7 +1153,7 @@ impl Renderer {
         view
     }
 
-    /// 1x 深度预目标就绪（撞墙截断；尺寸不变即复用）。
+    /// Ensures the 1x depth pre-pass target (wall-hit cutoff; reused while the size is unchanged).
     fn ensure_wall(&mut self, width: u32, height: u32) -> wgpu::TextureView {
         let (w, h) = (width.max(1), height.max(1));
         if let Some((view, dw, dh)) = &self.wall {
@@ -1147,17 +1177,19 @@ impl Renderer {
         view
     }
 
-    /// 体渲染资源就绪：3D 数据纹理按 (dims, generation) 缓存（代数不
-    /// 变不重传），LUT 1D 每帧重传（1KB 级），绑定组随纹理重建。
-    /// `wall_view` = 1x 深度预目标视图（撞墙 texel，先于本调用就绪）。
+    /// Ensures the volume resources: the 3D data texture is cached by (dims, generation) (an
+    /// unchanged generation isn't re-uploaded), the 1D LUT is re-uploaded every frame (~1KB), and
+    /// the bind group is rebuilt along with the textures. `wall_view` = the 1x depth pre-pass
+    /// target's view (the wall-hit texels; made ready before this call).
     fn ensure_volume(&mut self, v: &VolumeSlice, wall_view: &wgpu::TextureView) -> wgpu::BindGroup {
         let rebuilt = match (&self.volume_tex, &self.lut_tex) {
             (Some((_, d, g)), Some(_)) if *d == v.dims && *g == v.generation => None,
             _ => Some(()),
         };
         if let Some(()) = rebuilt {
-            // R16Float 3D（行主序 x 最快，格心语义）；上传按行填充到
-            // 256 对齐（write_texture 的 bpr 语义跨行/跨层校验源长度）。
+            // R16Float 3D (row-major, x fastest, cell-centered); the upload pads each row to a
+            // 256 alignment (write_texture's bpr semantics check the source length across
+            // rows/layers).
             let bpr = (v.dims[0] * 2).next_multiple_of(256) as usize;
             let row = v.dims[0] as usize;
             let mut packed: Vec<u16> = Vec::with_capacity(bpr / 2 * v.dims[1] as usize * v.dims[2] as usize);
@@ -1217,13 +1249,13 @@ impl Renderer {
             });
             self.volume_tex = Some((texture, v.dims, v.generation));
             self.lut_tex = Some(lut);
-            self.volume_bind = None; // 纹理重建 → 绑定组随之重建。
+            self.volume_bind = None; // texture rebuilt → the bind group is rebuilt with it.
         }
         let (_, lut) = match (&self.volume_tex, &self.lut_tex) {
             (Some((t, _, _)), Some(l)) => (t, l),
             _ => unreachable!("volume textures just ensured"),
         };
-        // LUT 重传（每帧 1KB 级；write_texture 事件语义足够）。
+        // Re-upload the LUT (~1KB every frame; write_texture's semantics are enough).
         let lut_bytes: Vec<u8> = v.lut.iter().flatten().copied().collect();
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -1285,7 +1317,7 @@ impl Renderer {
         }
         self.volume_bind.clone().unwrap()
     }
-    /// 回读目标就绪（尺寸不变即复用）。
+    /// Ensures the readback target (reused while the size is unchanged).
     fn ensure_readback(&mut self, width: u32, height: u32) -> wgpu::TextureView {
         let size = (width.max(1), height.max(1));
         if self.readback.as_ref().is_none_or(|t| t.size() != size) {
@@ -1295,9 +1327,9 @@ impl Renderer {
         self.readback.as_ref().expect("allocated above").view().clone()
     }
 
-    /// 渲一帧到宿主颜色目标：mvp/头灯 uniform 更新 + 顶点上传 + 绘制编码
-    /// （纹理全程留 GPU——壳层按平台上屏；视口按需渲染，非每帧
-    /// 热路径）。
+    /// Renders a frame into the host's color target: updates the mvp/headlight uniform, uploads the
+    /// vertices and encodes the draws (the texture stays on the GPU throughout and the shell
+    /// presents it per platform; the viewport renders on demand, not on a per-frame hot path).
     pub fn render(
         &mut self,
         scene: &RenderScene,
@@ -1308,7 +1340,7 @@ impl Renderer {
         let width = width.max(1);
         let height = height.max(1);
         let aspect = width as f32 / height as f32;
-        // 相机看向场景的方向 = 光方向（头灯）。
+        // The direction the camera looks into the scene = the light direction (headlight).
         let (yaw, pitch) =
             (scene.camera.yaw_deg.to_radians(), scene.camera.pitch_deg.to_radians());
         let (cy, sy, cp, sp) = (yaw.cos(), yaw.sin(), pitch.cos(), pitch.sin());
@@ -1321,7 +1353,7 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uni));
-        // 顶点上传（必要时扩容）。
+        // Vertex upload (growing the buffers when needed).
         let need_tri = (scene.tris.len() * size_of::<RenderVertex>()) as u64;
         if need_tri > self.tri_buf.size() {
             self.tri_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1335,9 +1367,9 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.tri_buf, 0, bytemuck::cast_slice(&scene.tris));
         }
-        // 透明桶上传：`sort_alpha` 开 = 绘制前质心 far-to-near 重排（最
-        // 终相机此刻已知——交互相机偏移已叠加，排序与最终视向一致）；
-        // 关 = 数组序（P0 语义）。
+        // Transparent-bucket upload: `sort_alpha` on = centroid far-to-near reorder before drawing
+        // (the final camera is known now: the interactive camera offset is already layered on, so
+        // the sort matches the final view direction); off = array order (P0 semantics).
         let alpha_sorted = scene.alpha_sorted();
         let alpha_src: &[RenderVertex] = alpha_sorted.as_deref().unwrap_or(&scene.tris_alpha);
         let need_tri_alpha = size_of_val(alpha_src) as u64;
@@ -1371,9 +1403,10 @@ impl Renderer {
         self.n_tris = scene.tris.len() as u32;
         self.n_tris_alpha = scene.tris_alpha.len() as u32;
         self.n_lines = scene.lines.len() as u32;
-        // 体渲染（round-211）：uniform 上传 + 纹理/绑定准备（深度预
-        // 目标先行——绑定组引用其视图）。绘制序 volume 在 tris_alpha
-        // 之前（体是最远透明层，诉求书 §5.2）。
+        // Volume rendering (round-211): uniform upload + texture/bind preparation (the depth
+        // pre-pass target comes first, since the bind group references its view). In draw order
+        // the volume comes before tris_alpha (the volume is the farthest transparent layer, ask
+        // doc §5.2).
         let volume_draw = match &scene.volume {
             Some(v) => {
                 let (yaw_v, pitch_v) =
@@ -1405,12 +1438,12 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("wb-render-enc"),
             });
-        // 1x 深度预 pass（撞墙截断，诉求书 §5.1）：不透明三角以无
-        // fragment 管线重绘进专用 1x 深度（万级三角微秒级）；ray-march
-        // 每像素读一个 texel 解析 t_wall。
+        // 1x depth pre-pass (wall-hit cutoff, ask doc §5.1): the opaque triangles are redrawn with
+        // the fragment-less pipeline into the dedicated 1x depth (microseconds for tens of
+        // thousands of triangles); the ray-march reads one texel per pixel to resolve t_wall.
         if let Some((wall, _)) = &volume_draw {
-            // pass 必开（Clear 1.0 = 远平面）——无不透明三角时 wall 保持
-            // 远深度，ray-march t_wall 退化为 t_exit。
+            // The pass always runs (Clear 1.0 = far plane): with no opaque triangles the wall stays
+            // at far depth and the ray-march's t_wall degenerates to t_exit.
             let mut pre = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("wb-render-pass-depth-pre"),
                 color_attachments: &[],
@@ -1440,8 +1473,9 @@ impl Renderer {
                 b: scene.bg[2] as f64,
                 a: scene.bg[3] as f64,
             });
-            // 渲进 MSAA 附件，resolve 落到宿主颜色 view（交换链图像 / 动态
-            // 纹理 / readback 纹理均为 RENDER_ATTACHMENT 用法）。
+            // Render into the MSAA attachment and resolve into the host's color view (the
+            // swap-chain image / dynamic texture / readback texture all have RENDER_ATTACHMENT
+            // usage).
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("wb-render-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1472,19 +1506,21 @@ impl Renderer {
                 pass.set_pipeline(&self.line_pipeline);
                 pass.set_bind_group(0, &self.uniform_bind, &[]);
                 pass.set_vertex_buffer(0, self.line_buf.slice(..));
-                // 一实例一段（两端 48 字节），顶点着色器展开 6 顶点四边形。
+                // One instance per segment (both ends, 48 bytes); the vertex shader expands a
+                // 6-vertex quad.
                 pass.draw(0..6, 0..self.n_lines / 2);
             }
-            // 体渲染（round-211）：volume 先于透明桶——体是最远透明层
-            // （诉求书 §5.2）；premultiplied 输出与深度预 pass 的 t_wall
-            // 截断在 shader 内完成。
+            // Volume rendering (round-211): the volume goes before the transparent bucket, as the
+            // farthest transparent layer (ask doc §5.2); the premultiplied output and the t_wall
+            // cutoff from the depth pre-pass are done in the shader.
             if let Some((_, bind)) = &volume_draw {
                 pass.set_pipeline(&self.volume_pipeline);
                 pass.set_bind_group(0, bind, &[]);
                 pass.draw(0..36, 0..1);
             }
-            // 透明桶最后画：只读深（被不透明几何遮挡者被 Less 剔除），
-            // 透明-透明按数组序混合（深度写已关）。
+            // The transparent bucket draws last: depth is read-only (whatever opaque geometry hides
+            // is culled by Less), and transparent-on-transparent blends in array order (depth
+            // writes are off).
             if self.n_tris_alpha > 0 {
                 pass.set_pipeline(&self.tri_alpha_pipeline);
                 pass.set_bind_group(0, &self.uniform_bind, &[]);
@@ -1495,10 +1531,10 @@ impl Renderer {
         self.queue.submit(Some(enc.finish()));
     }
 
-    /// 渲一帧并回读 BGRA 位图（`width*height*4`，行已去 padding）——
-    /// headless 测试断言像素（壳层回读上屏通路直接用 [`ReadbackTarget`]）。
-    /// 阻塞等帧（视口按需渲染，可接受；poll(Wait) 保证 map_async 回调
-    /// 在返回前触发）。
+    /// Renders a frame and reads back a BGRA bitmap (`width*height*4`, row padding removed), for
+    /// headless tests asserting on pixels (the shell's readback presentation path uses
+    /// [`ReadbackTarget`] directly). Blocks for the frame (acceptable, as the viewport renders on
+    /// demand; poll(Wait) guarantees the map_async callback fires before returning).
     pub fn render_readback(&mut self, scene: &RenderScene, width: u32, height: u32) -> Option<Vec<u8>> {
         let view = self.ensure_readback(width, height);
         self.render(scene, width, height, &view);
@@ -1506,7 +1542,7 @@ impl Renderer {
     }
 }
 
-/// GPU 适配器名（诊断用；无设备 None）。
+/// GPU adapter name (for diagnostics; None without a device).
 pub fn adapter_info() -> Option<String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -1520,7 +1556,7 @@ pub fn adapter_info() -> Option<String> {
     Some(format!("{} ({})", info.name, backend::label(info.backend)))
 }
 
-/// 后端标签（wgpu 29 的 Backend 枚举无 Display）。
+/// Backend label (wgpu 29's Backend enum has no Display).
 mod backend {
     pub fn label(b: wgpu::Backend) -> &'static str {
         match b {

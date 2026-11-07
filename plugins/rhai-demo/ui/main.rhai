@@ -22,12 +22,12 @@ fn clicked(ctx, payload) {
 fn view(ctx) {
     column([
         label::Label(#{
-            text: "Rhai 脚本面板",
-            description: "本面板的 UI 完全由本脚本定义（声明式 UiNode + 回调函数）",
+            text: "Rhai Script Panel",
+            description: "This panel's UI is defined entirely by this script (declarative UiNode + callbacks)",
         }),
-        label::Label(#{ text: `点击次数：${ctx.get_state("count")}` }),
+        label::Label(#{ text: `Clicks: ${ctx.get_state("count")}` }),
         button::Button(#{
-            text: "加一",
+            text: "Add one",
             variant: "primary",
             on_click: Fn("clicked"),
         }),

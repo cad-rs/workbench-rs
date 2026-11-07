@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -26,16 +26,17 @@
             color: #a0a5af;
             font-family: "Segoe UI", system-ui, sans-serif;
             font-size: 14px;
-            /* gpui_web 挂载的 canvas 在 body 末尾、无定位；放在底层，
-               应用首帧绘制后自然被覆盖 */
+            /* The canvas gpui_web mounts sits at the end of body, unpositioned; keep this
+               underneath so the app's first frame naturally covers it */
             z-index: -1;
         }
     </style>
 </head>
 
 <body>
-    <!-- 先于 trunk 注入的 module 脚本执行：捕获 wasm 启动期 console 输出，
-         便于在内嵌/无头环境诊断（gpui_web 的日志走 console） -->
+    <!-- Runs before the module script trunk injects: captures console output during wasm
+         startup, for diagnosis in embedded/headless environments (gpui_web logs to the
+         console) -->
     <script>
         window.__logs = [];
         (function () {
@@ -62,8 +63,8 @@
             });
         })();
     </script>
-    <div id="loading">正在加载 Workbench Demo…（gpui web 需要浏览器支持 WebGPU）</div>
-    <!-- gpui_web 会在启动后自行创建并挂载 <canvas> -->
+    <div id="loading">Loading Workbench Demo… (gpui web needs a browser with WebGPU support)</div>
+    <!-- gpui_web creates and mounts its own <canvas> after startup -->
 </body>
 
 </html>

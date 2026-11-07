@@ -1,4 +1,5 @@
-//! 命令系统契约（design.md §10）：RibbonBar/工具栏、菜单、快捷键与插件 API 的统一执行入口。
+//! The command system contract (design.md §10): the single execution entry point for the
+//! RibbonBar/toolbar, menus, hotkeys and the plugin API.
 
 use std::pin::Pin;
 
@@ -7,9 +8,9 @@ use crate::services::{AppServices, FileThen, IoTask, UiThen};
 use crate::storage::{Entry, Location, StorageFuture};
 use crate::tasks::TaskSpec;
 
-// ---- 快捷键 ----
+// ---- Hotkeys ----
 
-/// 支持的按键码（覆盖常用字母/数字/功能键/编辑键）。
+/// Supported key codes (covering the common letter/digit/function/editing keys).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyCode {
     A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
@@ -20,7 +21,7 @@ pub enum KeyCode {
 }
 
 impl KeyCode {
-    /// 规范化名称（小写），如 `n`、`0`、`f5`、`enter`。
+    /// Normalized name (lowercase), such as `n`, `0`, `f5`, `enter`.
     pub fn name(&self) -> &'static str {
         use KeyCode::*;
         match self {
@@ -40,7 +41,7 @@ impl KeyCode {
         }
     }
 
-    /// 由规范化名称解析。
+    /// Parse from a normalized name.
     pub fn from_name(s: &str) -> Option<KeyCode> {
         use KeyCode::*;
         let s = s.to_ascii_lowercase();
@@ -63,7 +64,7 @@ impl KeyCode {
     }
 }
 
-/// 组合快捷键，例如 Ctrl+N。
+/// A key combination, e.g. Ctrl+N.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hotkey {
     pub ctrl: bool,
@@ -88,7 +89,8 @@ impl Hotkey {
         self.shift = on;
         self
     }
-    /// 解析 `Ctrl+Shift+N` 形式的字符串；失败返回 None（注册处会记录诊断）。
+    /// Parse a string of the form `Ctrl+Shift+N`; returns None on failure (the registration site
+    /// records a diagnostic).
     pub fn parse(s: &str) -> Option<Hotkey> {
         let mut ctrl = false;
         let mut alt = false;
@@ -122,24 +124,25 @@ impl std::fmt::Display for Hotkey {
     }
 }
 
-// ---- 命令参数 ----
+// ---- Command arguments ----
 
-/// 命令参数（字符串键值；插件友好，复杂类型由命令自行约定并解析）。
+/// Command arguments (string key/values; plugin-friendly — complex types are agreed on and
+/// parsed by the command itself).
 #[derive(Clone, Debug, Default)]
 pub struct CommandArgs {
     pub values: std::collections::BTreeMap<String, String>,
-    /// 带值执行的值槽（Combo 选中值等）；None = 无值。
+    /// The value slot for running with a value (a Combo's selected value, …); None = no value.
     pub value: Option<String>,
 }
 
-/// Combo（选择框）状态快照（ribbon-bar.md §4.2）：当前值 + 选项列表。
-/// 每帧由命令系统查询（`combo_state`），Ribbon 不持有选项数据——图层增删等
-/// 文档状态变化自然反映。
+/// A Combo (select box) state snapshot (ribbon-bar.md §4.2): current value + option list.
+/// Queried from the command system every frame (`combo_state`); the Ribbon holds no option data,
+/// so document state changes such as adding/removing layers show up naturally.
 #[derive(Clone, Debug)]
 pub struct ComboState {
-    /// 当前选中值。
+    /// The currently selected value.
     pub current: String,
-    /// 可选项列表（有序）。
+    /// The available options (ordered).
     pub options: Vec<String>,
 }
 
@@ -159,9 +162,9 @@ impl CommandArgs {
     }
 }
 
-// ---- 上下文快照 ----
+// ---- Context snapshot ----
 
-/// 活动文档摘要（供启用条件与 UI 展示）。
+/// Active document summary (for enable conditions and UI display).
 #[derive(Clone, Debug)]
 pub struct DocSummary {
     pub id: DocumentId,
@@ -172,8 +175,8 @@ pub struct DocSummary {
     pub can_redo: bool,
 }
 
-/// 命令执行时的应用上下文快照（design.md §6.4）：
-/// 活动文档、活动视图与工作模式共同决定命令的启用状态。
+/// The app context snapshot at command execution (design.md §6.4):
+/// the active document, active view and work mode together decide whether a command is enabled.
 #[derive(Clone, Debug, Default)]
 pub struct CtxSnapshot {
     pub active_document: Option<DocSummary>,
@@ -187,9 +190,9 @@ impl CtxSnapshot {
     }
 }
 
-// ---- 命令定义 ----
+// ---- Command definitions ----
 
-/// 命令执行结果。
+/// The result of running a command.
 #[derive(Clone, Debug)]
 pub enum CommandResult {
     Done { note: Option<String> },
@@ -211,23 +214,27 @@ impl CommandResult {
     }
 }
 
-/// 同步命令处理器（UI 线程立即执行）。
+/// A sync command handler (runs immediately on the UI thread).
 pub type SyncHandler = Box<dyn Fn(&mut CommandCtx, &CommandArgs) -> CommandResult + Send + Sync>;
 
-/// 后台命令启动器：在 UI 线程收集输入（可访问文档快照），返回要投递的任务规格。
+/// A background command starter: collects input on the UI thread (with access to document
+/// snapshots) and returns the task spec to submit.
 pub type BackgroundStarter = Box<dyn Fn(&mut CommandCtx) -> Result<TaskSpec, String> + Send + Sync>;
 
-// ---- 异步命令（阶段 2：共享执行器上的轻量 future，区别于每命令一线程的后台任务）----
+// ---- Async commands (phase 2: lightweight futures on the shared executor, unlike background
+// tasks with one thread per command) ----
 
-/// 异步命令体：接收任务上下文（进度/取消/输入），返回一个可 await 的 future。
-/// future 在平台共享执行器线程池上运行，不得阻塞（用 `Timer::after` 等异步等待）。
+/// An async command body: takes the task context (progress/cancellation/input) and returns an
+/// awaitable future. The future runs on the platform's shared executor thread pool and must not
+/// block (wait asynchronously, e.g. with `Timer::after`).
 pub type AsyncJob =
     Pin<Box<dyn std::future::Future<Output = Result<Option<crate::tasks::DocCommit>, crate::tasks::TaskFailure>> + Send>>;
 
-/// 异步任务体工厂：执行器创建任务会话后调用一次，产出 future。
+/// An async task body factory: called once by the executor after it creates the task session, to
+/// produce the future.
 pub type AsyncJobFactory = Box<dyn FnOnce(crate::tasks::TaskCtx) -> AsyncJob + Send + Sync>;
 
-/// 异步命令在 UI 线程收集输入后产生的规格。
+/// The spec an async command produces after collecting its input on the UI thread.
 pub struct AsyncSpec {
     pub title: String,
     pub cancellable: bool,
@@ -235,45 +242,49 @@ pub struct AsyncSpec {
     pub job: AsyncJobFactory,
 }
 
-/// 异步命令启动器：UI 线程收集输入并返回异步任务规格。
+/// An async command starter: collects input on the UI thread and returns the async task spec.
 pub type AsyncStarter = Box<dyn Fn(&mut CommandCtx) -> Result<AsyncSpec, String> + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandExecution {
-    /// UI 线程立即完成。
+    /// Completes immediately on the UI thread.
     Sync,
-    /// 提交到平台共享异步执行器（轻量、可 await、协作式取消）。
+    /// Submitted to the platform's shared async executor (lightweight, awaitable, cooperative
+    /// cancellation).
     Async,
-    /// 提交为后台线程任务（重 CPU/IO，独占线程）。
+    /// Submitted as a background thread task (heavy CPU/IO, a dedicated thread).
     Background,
 }
 
-/// 命令启用条件（依据 CtxSnapshot 求值；None 表示总是可用）。
+/// A command's enable condition (evaluated against the CtxSnapshot; None means always enabled).
 pub type EnabledWhen = Box<dyn Fn(&CtxSnapshot) -> bool + Send + Sync>;
 
-/// 命令开关状态查询（Toggle checked 态，ribbon-bar.md §4.2；None 表示恒为未选中）。
+/// A command's on/off state query (the Toggle checked state, ribbon-bar.md §4.2; None means
+/// always unchecked).
 pub type CheckedWhen = Box<dyn Fn(&CtxSnapshot) -> bool + Send + Sync>;
 
-/// 命令 Combo 状态查询（当前值 + 选项列表；None 表示无 Combo 状态）。
+/// A command's Combo state query (current value + option list; None means no Combo state).
 pub type ComboStateWhen = Box<dyn Fn(&CtxSnapshot) -> Option<ComboState> + Send + Sync>;
 
-/// 命令定义。
+/// A command definition.
 pub struct CommandDef {
     pub id: CommandId,
     pub title: String,
     pub hotkey: Option<Hotkey>,
-    /// 启用条件（None 表示总是可用）。依据 CtxSnapshot 求值。
+    /// Enable condition (None means always enabled). Evaluated against the CtxSnapshot.
     pub enabled: Option<EnabledWhen>,
-    /// Toggle checked 态查询（None 恒为未选中）。依据 CtxSnapshot 求值，
-    /// 与 `enabled` 同模式——开关状态由命令系统单一来源提供（ribbon-bar.md §4.2）。
+    /// Toggle checked state query (None is always unchecked). Evaluated against the CtxSnapshot,
+    /// in the same pattern as `enabled` — the command system is the single source of the on/off
+    /// state (ribbon-bar.md §4.2).
     pub checked: Option<CheckedWhen>,
-    /// Combo 状态查询（当前值 + 选项列表；None 表示无 Combo 状态）。
+    /// Combo state query (current value + option list; None means no Combo state).
     pub combo: Option<ComboStateWhen>,
     pub kind: CommandKind,
-    /// 图标资源路径（如 `"icons/save.svg"`，由产品的 AssetSource 解析）；
-    /// None 时 UI 回退为纯文本。
+    /// Icon asset path (such as `"icons/save.svg"`, resolved by the product's AssetSource);
+    /// with None the UI falls back to plain text.
     pub icon: Option<String>,
-    /// 贡献来源（Workbench ID 或插件 ID）；诊断与插件卸载清理用。
+    /// Contribution source (Workbench ID or plugin ID); for diagnostics and cleanup when a plugin
+    /// is unloaded.
     pub source: Option<String>,
 }
 
@@ -339,8 +350,8 @@ impl CommandDef {
         self.hotkey = Some(hk);
         self
     }
-    /// 设置图标资源路径（如 `"icons/save.svg"`，由产品的 AssetSource 解析）。
-    /// 未设置或解析失败时 UI 回退为纯文本。
+    /// Set the icon asset path (such as `"icons/save.svg"`, resolved by the product's
+    /// AssetSource). When unset or unresolved, the UI falls back to plain text.
     pub fn icon(mut self, path: impl Into<String>) -> Self {
         self.icon = Some(path.into());
         self
@@ -352,7 +363,8 @@ impl CommandDef {
         self.enabled = Some(Box::new(f));
         self
     }
-    /// Toggle checked 态查询（与 [`CommandDef::enabled_when`] 同模式，依据 CtxSnapshot 求值）。
+    /// Toggle checked state query (same pattern as [`CommandDef::enabled_when`], evaluated
+    /// against the CtxSnapshot).
     pub fn checked_when(
         mut self,
         f: impl Fn(&CtxSnapshot) -> bool + Send + Sync + 'static,
@@ -360,7 +372,8 @@ impl CommandDef {
         self.checked = Some(Box::new(f));
         self
     }
-    /// Combo 状态查询（当前值 + 选项列表，每帧依据 CtxSnapshot 求值）。
+    /// Combo state query (current value + option list, evaluated against the CtxSnapshot every
+    /// frame).
     pub fn combo_state_when(
         mut self,
         f: impl Fn(&CtxSnapshot) -> Option<ComboState> + Send + Sync + 'static,
@@ -368,7 +381,7 @@ impl CommandDef {
         self.combo = Some(Box::new(f));
         self
     }
-    /// 标记贡献来源（Workbench/插件稳定 ID）。
+    /// Mark the contribution source (Workbench/plugin stable ID).
     pub fn from_source(mut self, source: impl Into<String>) -> Self {
         self.source = Some(source.into());
         self
@@ -382,9 +395,9 @@ impl CommandDef {
     }
 }
 
-// ---- 命令上下文 ----
+// ---- Command context ----
 
-/// 命令处理器可用的平台能力门面。
+/// The platform capability facade available to command handlers.
 pub struct CommandCtx<'a> {
     app: &'a mut dyn AppServices,
 }
@@ -393,22 +406,23 @@ impl<'a> CommandCtx<'a> {
     pub fn new(app: &'a mut dyn AppServices) -> Self {
         Self { app }
     }
-    /// 平台服务（文档/任务/工作区/日志/扩展服务）。
+    /// Platform services (documents/tasks/workspace/log/extension services).
     pub fn host(&mut self) -> &mut crate::services::ServiceHost {
         self.app.host()
     }
     pub fn snapshot(&self) -> CtxSnapshot {
         self.app.snapshot()
     }
-    /// 执行另一条命令（命令链）。
+    /// Run another command (command chaining).
     pub fn run(&mut self, command: &str) -> CommandResult {
         self.app.dispatch(command, &CommandArgs::default())
     }
     pub fn run_with(&mut self, command: &str, args: CommandArgs) -> CommandResult {
         self.app.dispatch(command, &args)
     }
-    /// 请求原生文件对话框（非阻塞）。对话框在后台线程执行，`action` 于
-    /// 下一帧节拍在 UI 线程被调用；详见 [`AppServices::request_file_dialog`]。
+    /// Request a native file dialog (non-blocking). The dialog runs on a background thread and
+    /// `action` is called on the UI thread on the next frame tick; see
+    /// [`AppServices::request_file_dialog`].
     pub fn request_file_dialog(
         &mut self,
         extensions: Vec<String>,
@@ -449,7 +463,7 @@ impl<'a> CommandCtx<'a> {
             Box::new(move |app: &mut dyn AppServices| then(app, result)) as UiThen
         }));
     }
-    /// 打开中央视图（可绑定活动文档）。
+    /// Open a central view (optionally bound to the active document).
     pub fn open_view(&mut self, view_type: &str, bind_document: bool) -> Result<(), String> {
         self.app.open_view(view_type, bind_document)
     }
@@ -462,24 +476,25 @@ impl<'a> CommandCtx<'a> {
     pub fn toggle_panel(&mut self, panel_id: &str) -> Result<(), String> {
         self.app.toggle_panel(panel_id)
     }
-    /// 运行时禁用插件（移除其命令与 Ribbon 贡献）。
+    /// Disable a plugin at runtime (removes its commands and Ribbon contributions).
     pub fn disable_plugin(&mut self, plugin_id: &str) -> Result<Vec<String>, String> {
         self.app.disable_plugin(plugin_id)
     }
-    /// 立即自动保存，返回保存文档数。
+    /// Autosave right now; returns the number of documents saved.
     pub fn autosave_now(&mut self) -> Result<usize, String> {
         self.app.autosave_now()
     }
-    /// 活动文档 ID 快捷访问。
+    /// Shortcut to the active document ID.
     pub fn active_document(&self) -> Option<DocumentId> {
         self.app.snapshot().active_document.map(|d| d.id)
     }
 }
 
-// ---- 统一命令调用结果（design.md §10.1/§16.4）----
+// ---- Unified command invocation result (design.md §10.1/§16.4) ----
 
-/// 命令调用状态：同步命令立即到终态；异步/后台命令从 Running 开始，
-/// 由任务终态事件推进到终态。
+/// Command invocation status: a sync command reaches its terminal state immediately; an
+/// async/background command starts as Running and is moved to its terminal state by the task's
+/// terminal event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InvocationStatus {
     Running,
@@ -494,27 +509,30 @@ impl InvocationStatus {
     }
 }
 
-/// 一次命令调用的可查询记录（供日志、自动化测试与产品诊断使用）。
+/// A queryable record of one command invocation (for logs, automated tests and product
+/// diagnostics).
 #[derive(Clone, Debug)]
 pub struct InvocationRecord {
     pub seq: u64,
     pub command: String,
-    /// 执行方式；未注册的命令为 None。
+    /// How it runs; None for an unregistered command.
     pub execution: Option<CommandExecution>,
     pub status: InvocationStatus,
-    /// 异步/后台调用对应的任务句柄。
+    /// The task handle of an async/background invocation.
     pub task_id: Option<crate::ids::TaskId>,
-    /// 终态备注（错误说明 / 完成备注 / 提交的文档变更标签）。
+    /// Terminal note (error description / completion note / label of the committed document
+    /// change).
     pub note: Option<String>,
 }
 
-/// 统一命令调用结果：立即结果 + 异步句柄。
+/// The unified command invocation result: the immediate result + the async handle.
 #[derive(Clone, Debug)]
 pub struct CommandInvocation {
     pub record: InvocationRecord,
-    /// 同步命令的立即结果；异步/后台命令为提交结果（Done）。
+    /// The immediate result of a sync command; for an async/background command, the submission
+    /// result (Done).
     pub result: CommandResult,
-    /// 便捷访问任务句柄。
+    /// Shortcut to the task handle.
     pub task_id: Option<crate::ids::TaskId>,
 }
 

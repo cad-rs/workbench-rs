@@ -1,11 +1,13 @@
-//! 设置服务（design.md §12.4）：应用级/产品级/用户级/插件级设置命名空间。
+//! The settings service (design.md §12.4): app-, product-, user- and plugin-level setting
+//! namespaces.
 //!
-//! 第一阶段实现为扁平点分键（`autosave.interval_secs`、`plugin.<id>.enabled`）
-//! 的 JSON 持久化；写入立即落盘，读取走内存缓存。
+//! Phase 1 implements it as JSON persistence of flat dotted keys (`autosave.interval_secs`,
+//! `plugin.<id>.enabled`); writes hit the disk immediately, reads go through an in-memory cache.
 //!
-//! 设置项的**类型与元数据**由 [`SettingSpec`] 描述：平台与插件在装配期经
-//! [`crate::Registry::register_setting`] 登记，前端设置面板按 spec 渲染控件
-//! 并经 `app.settings.set` 命令写回（写入侧做类型校验与范围钳制）。
+//! A setting's **type and metadata** are described by a [`SettingSpec`]: the platform and
+//! plugins register them during assembly via [`crate::Registry::register_setting`], the
+//! frontend's settings panel renders controls from the spec and writes back through the
+//! `app.settings.set` command (the write side does type checking and range clamping).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -46,7 +48,7 @@ pub struct SettingSpec {
     pub key: String,
     /// Human-readable label for the settings panel.
     pub label: String,
-    /// Panel group heading (`"常规"`, `"外观"`, …).
+    /// Panel group heading (`"General"`, `"Appearance"`, …).
     pub group: String,
     pub kind: SettingKind,
     /// Default applied when no user value is stored.
@@ -62,27 +64,27 @@ impl SettingSpec {
             SettingKind::Bool => value
                 .as_bool()
                 .map(Value::Bool)
-                .ok_or_else(|| format!("{} 需要布尔值", self.key)),
+                .ok_or_else(|| format!("{} needs a boolean", self.key)),
             SettingKind::Int { min, max, .. } => {
                 let n = value
                     .as_i64()
-                    .ok_or_else(|| format!("{} 需要整数", self.key))?;
+                    .ok_or_else(|| format!("{} needs an integer", self.key))?;
                 Ok(Value::Number(n.clamp(*min, *max).into()))
             }
             SettingKind::Enum(options) => {
                 let s = value
                     .as_str()
-                    .ok_or_else(|| format!("{} 需要字符串", self.key))?;
+                    .ok_or_else(|| format!("{} needs a string", self.key))?;
                 if options.iter().any(|o| o == s) {
                     Ok(Value::String(s.to_string()))
                 } else {
-                    Err(format!("{s} 不在 {} 的可选项 {options:?}", self.key))
+                    Err(format!("{s} is not one of the options for {}: {options:?}", self.key))
                 }
             }
             SettingKind::Str => value
                 .as_str()
                 .map(|s| Value::String(s.to_string()))
-                .ok_or_else(|| format!("{} 需要字符串", self.key)),
+                .ok_or_else(|| format!("{} needs a string", self.key)),
         }
     }
 
@@ -99,7 +101,7 @@ impl SettingSpec {
 }
 
 
-/// 产品设置存储（UI 线程所有）。
+/// The product settings store (owned by the UI thread).
 #[derive(Default)]
 pub struct Settings {
     values: BTreeMap<String, Value>,
@@ -109,8 +111,8 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// 从状态存储的 `key` 加载 JSON；不存在/解析失败时返回空设置（解析失败
-    /// 的消息由调用方记录）。之后的写入都落到同一个 `key`。
+    /// Load JSON from `key` in the state store; returns empty settings when it is missing or
+    /// fails to parse (the caller logs the parse error). Later writes all go to the same `key`.
     pub fn load(store: Arc<dyn StateStore>, key: &str) -> (Self, Option<String>) {
         let parsed = store.read(key).map(|bytes| {
             std::str::from_utf8(&bytes)
@@ -120,7 +122,10 @@ impl Settings {
         let (values, error) = match parsed {
             None => (BTreeMap::new(), None),
             Some(Ok(values)) => (values, None),
-            Some(Err(e)) => (BTreeMap::new(), Some(format!("设置文件解析失败，已重置: {e}"))),
+            Some(Err(e)) => (
+                BTreeMap::new(),
+                Some(format!("Failed to parse the settings file; reset: {e}")),
+            ),
         };
         let settings = Self {
             values,
@@ -129,7 +134,7 @@ impl Settings {
         (settings, error)
     }
 
-    /// 不持久化的内存设置（测试用）。
+    /// In-memory settings that are not persisted (for tests).
     pub fn in_memory() -> Self {
         Self::default()
     }
@@ -153,7 +158,8 @@ impl Settings {
         self.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
     }
 
-    /// 写入并立即落盘（无路径时仅内存）。返回错误消息（如有）。
+    /// Write and persist immediately (memory only when there is no store). Returns the error
+    /// message, if any.
     pub fn set(&mut self, key: &str, value: Value) -> Result<(), String> {
         self.values.insert(key.to_string(), value);
         self.save()
@@ -175,7 +181,7 @@ impl Settings {
         self.values.keys().map(|k| k.as_str())
     }
 
-    /// 全量保存到状态存储（内存设置无操作）。
+    /// Save everything to the state store (a no-op for in-memory settings).
     pub fn save(&self) -> Result<(), String> {
         let Some((store, key)) = &self.store else {
             return Ok(());
@@ -194,7 +200,7 @@ mod tests {
         SettingSpec {
             key: "test.key".into(),
             label: "Test".into(),
-            group: "测试".into(),
+            group: "Test".into(),
             kind,
             default,
             scope: SettingScope::User,

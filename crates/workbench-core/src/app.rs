@@ -1,4 +1,5 @@
-//! 平台运行时：产品装配、命令执行、任务事件泵、上下文快照与布局持久化。
+//! The platform runtime: product assembly, command execution, the task event pump, context
+//! snapshots and layout persistence.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -15,7 +16,7 @@ use api::{
 use crate::executor::AsyncExecutor;
 use crate::platform_cmds;
 
-/// 调用历史环形缓冲容量。
+/// Capacity of the invocation history ring buffer.
 const INVOCATION_HISTORY: usize = 100;
 
 /// Autosave and crash recovery run on the desktop only: a web page has no
@@ -29,14 +30,15 @@ const CLEAN_EXIT: &str = "autosave/session.clean";
 /// The settings' key in the state store.
 pub(crate) const SETTINGS: &str = "settings.json";
 
-/// 平台运行时。UI 线程所有；前端在自己的定时器上调用 [`AppRuntime::frame_tick`]
-/// （与视图渲染解耦：gpui 只在失效时重画，渲染驱动的泵在 UI 空闲时停转）。
+/// The platform runtime. Owned by the UI thread; the frontend calls [`AppRuntime::frame_tick`]
+/// on its own timer (decoupled from view rendering: gpui only redraws on invalidation, so a
+/// render-driven pump stalls while the UI is idle).
 pub struct AppRuntime {
     registry: Registry,
     pub host: ServiceHost,
     product_id: String,
     product_name: String,
-    /// 产品身份与品牌（product.toml；未提供时为 builder 的默认值）。
+    /// Product identity and branding (product.toml; the builder's defaults when none is given).
     profile: api::ProductProfile,
     snapshot: CtxSnapshot,
     /// The app's own state: settings, layout, autosaves, the clean-exit marker.
@@ -45,17 +47,19 @@ pub struct AppRuntime {
     layout_key: String,
     /// The layout as last loaded or saved, so an unchanged one isn't rewritten.
     saved_layout: Option<String>,
-    /// 距上次自动保存的累计秒数。
+    /// Seconds accumulated since the last autosave.
     autosave_accum: f32,
     dispatch_depth: u32,
-    /// 共享异步执行器（阶段 2：Async 命令的运行载体）。
+    /// The shared async executor (phase 2: what Async commands run on).
     executor: AsyncExecutor,
     shutdown: Arc<AtomicBool>,
-    /// 命令调用历史（可查询，供日志/自动化测试/诊断，design.md §16.4）。
+    /// Command invocation history (queryable, for logs/automated tests/diagnostics,
+    /// design.md §16.4).
     invocations: VecDeque<InvocationRecord>,
     invocation_seq: u64,
-    /// 在途的文件对话框：系统对话框（后台线程执行，结果按帧排空）或应用内
-    /// 选择器（`ws.file_picker`，由 [`Self::finish_pick`] 结束）。
+    /// The file dialog in flight: a native dialog (run on a background thread, its result
+    /// drained per frame) or the in-app picker (`ws.file_picker`, ended by
+    /// [`Self::finish_pick`]).
     dialog_in_flight: Option<FileDialogRequest>,
     dialog_result_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
     /// Finished I/O's continuations ([`api::AppServices::spawn_io`]), run by
@@ -66,21 +70,21 @@ pub struct AppRuntime {
     io_pending: usize,
 }
 
-/// 需要弹原生对话框的 UI 动作。对话框在后台线程运行（阻塞式 rfd 调用
-/// 绝不能进 UI 线程：会饿死 gpui 事件循环并触发窗口内部重入借用），
-/// 结果经通道回传，由 [`AppRuntime::frame_tick`] 排水并在 UI 线程执行
-/// `action`。
+/// A UI action that needs a native dialog. The dialog runs on a background thread (a blocking
+/// rfd call must never enter the UI thread: it starves the gpui event loop and triggers a
+/// re-entrant borrow inside the window), the result comes back over a channel, and
+/// [`AppRuntime::frame_tick`] drains it and runs `action` on the UI thread.
 pub(crate) struct FileDialogRequest {
-    /// 文件过滤扩展名（空 = 不过滤）。
+    /// File filter extensions (empty = no filter).
     pub extensions: Vec<String>,
-    /// 默认文件名（保存对话框）；打开对话框为 `None`。
+    /// Default file name (save dialog); `None` for an open dialog.
     pub default_name: Option<String>,
-    /// 拿到选择结果后于 UI 线程执行的后续动作（`None` = 取消）。
+    /// The follow-up run on the UI thread once the choice is in (`None` = cancelled).
     pub action: Box<dyn FnOnce(&mut dyn api::AppServices, Option<api::Location>)>,
 }
 
 impl AppRuntime {
-    // ---- 查询（供前端渲染） ----
+    // ---- Queries (for frontend rendering) ----
 
     pub fn product_id(&self) -> &str {
         &self.product_id
@@ -90,7 +94,8 @@ impl AppRuntime {
         &self.product_name
     }
 
-    /// 产品身份与品牌（窗口标题、ribbon logo、About 对话框共用此源）。
+    /// Product identity and branding (the one source for the window title, ribbon logo and
+    /// About dialog).
     pub fn profile(&self) -> &api::ProductProfile {
         &self.profile
     }
@@ -103,7 +108,7 @@ impl AppRuntime {
         self.registry.command(id).map(|c| c.title.clone())
     }
 
-    /// 命令图标资源路径（未设置返回 None，UI 回退为纯文本）。
+    /// The command's icon asset path (None when unset; the UI falls back to plain text).
     pub fn command_icon(&self, id: &str) -> Option<String> {
         self.registry.command(id).and_then(|c| c.icon.clone())
     }
@@ -112,7 +117,7 @@ impl AppRuntime {
         self.registry.command(id).and_then(|c| c.hotkey).map(|h| h.to_string())
     }
 
-    /// 命令当前是否可用（依据最近一次 frame_tick 生成的快照）。
+    /// Whether the command is currently enabled (per the snapshot the last frame_tick made).
     pub fn is_enabled(&self, id: &str) -> bool {
         match self.registry.command(id) {
             Some(def) => match &def.enabled {
@@ -123,8 +128,9 @@ impl AppRuntime {
         }
     }
 
-    /// Toggle 命令当前是否选中（ribbon-bar.md §4.2：checked 态是命令系统的查询结果，
-    /// Ribbon 不自维护开关状态；未注册或未声明 checked 条件恒为 false）。
+    /// Whether a toggle command is currently checked (ribbon-bar.md §4.2: the checked state is
+    /// a query on the command system, the ribbon keeps no toggle state of its own; always false
+    /// when unregistered or without a checked condition).
     pub fn is_checked(&self, id: &str) -> bool {
         match self.registry.command(id) {
             Some(def) => match &def.checked {
@@ -135,8 +141,8 @@ impl AppRuntime {
         }
     }
 
-    /// Combo 命令当前状态（当前值 + 选项列表，ribbon-bar.md §4.2：每帧查询；
-    /// 未注册或未声明 combo 查询恒为 None）。
+    /// A combo command's current state (current value + options, ribbon-bar.md §4.2: queried
+    /// every frame; always None when unregistered or without a combo query).
     pub fn combo_state(&self, id: &str) -> Option<ComboState> {
         match self.registry.command(id) {
             Some(def) => def.combo.as_ref().and_then(|f| f(&self.snapshot)),
@@ -144,22 +150,24 @@ impl AppRuntime {
         }
     }
 
-    /// 最近 N 条命令调用记录（design.md §16.4：自动化测试可查询状态）。
+    /// The last N command invocation records (design.md §16.4: state automated tests can
+    /// query).
     pub fn recent_invocations(&self) -> impl Iterator<Item = &InvocationRecord> {
         self.invocations.iter().rev()
     }
 
-    /// 已成功装载的插件 ID（阶段 3）。
+    /// IDs of the plugins that loaded (phase 3).
     pub fn plugins_loaded(&self) -> &[String] {
         &self.registry.plugins_loaded
     }
 
-    /// 被拒绝/失败的插件及其原因（阶段 3，验收 #19/#20 诊断）。
+    /// Rejected/failed plugins and why (phase 3, acceptance #19/#20 diagnostics).
     pub fn plugins_rejected(&self) -> &[(String, String)] {
         &self.registry.plugins_rejected
     }
 
-    /// 统一命令入口（跟踪版，design.md §10.1）：返回立即结果 + 异步任务句柄。
+    /// The unified command entry point (tracked, design.md §10.1): returns the immediate
+    /// result + the async task handle.
     pub fn execute_command_tracked(&mut self, id: &str, args: &CommandArgs) -> CommandInvocation {
         let seq = self.invocation_seq + 1;
         let result = self.execute_command(id, args);
@@ -168,7 +176,7 @@ impl AppRuntime {
             .iter()
             .find(|r| r.seq == seq)
             .cloned()
-            .expect("调用记录已登记");
+            .expect("the invocation record is registered");
         let task_id = record.task_id;
         CommandInvocation {
             record,
@@ -177,7 +185,7 @@ impl AppRuntime {
         }
     }
 
-    /// 注册的全部快捷键（前端做按键分发）。
+    /// All registered hotkeys (the frontend dispatches key presses).
     pub fn hotkeys(&self) -> Vec<(Hotkey, String)> {
         self.registry
             .commands()
@@ -190,15 +198,16 @@ impl AppRuntime {
         &self.state
     }
 
-    // ---- 帧驱动 ----
+    // ---- Frame driving ----
 
-    /// 请求文件对话框（非阻塞）。有应用内浏览的存储（浏览器存储、云盘）时
-    /// 打开应用内选择器（`ws.file_picker`，前端渲染，选定后调
-    /// [`Self::finish_pick`]）；否则在后台线程弹系统对话框，结果由
-    /// [`Self::frame_tick`] 排水执行。同一时刻只允许一个在途对话框。
+    /// Request a file dialog (non-blocking). When there is storage browsed in the app (browser
+    /// storage, a cloud drive) this opens the in-app picker (`ws.file_picker`, drawn by the
+    /// frontend, which calls [`Self::finish_pick`] on a choice); otherwise a native dialog
+    /// opens on a background thread and [`Self::frame_tick`] drains and runs its result. Only
+    /// one dialog may be in flight at a time.
     pub(crate) fn request_dialog(&mut self, request: FileDialogRequest) {
         if self.dialog_in_flight.is_some() {
-            self.host.log.warn("已有对话框在途，忽略新的打开/保存请求");
+            self.host.log.warn("A dialog is already open; ignoring the new open/save request");
             return;
         }
         let sources = self.host.storage.in_app_sources();
@@ -215,7 +224,7 @@ impl AppRuntime {
         }
         let request = self.dialog_in_flight.as_ref().expect("set above");
         #[cfg(target_arch = "wasm32")]
-        self.host.log.warn("没有可用的文件存储");
+        self.host.log.warn("No file storage is available");
         let rx = crate::dialog::spawn(request.extensions.clone(), request.default_name.clone());
         self.dialog_result_rx = Some(rx);
     }
@@ -228,7 +237,7 @@ impl AppRuntime {
             return;
         };
         if picked.is_none() {
-            self.host.log.info("已取消");
+            self.host.log.info("Cancelled");
         }
         (request.action)(self, picked);
     }
@@ -251,8 +260,8 @@ impl AppRuntime {
         ran
     }
 
-    /// 排空在途对话框结果并在 UI 线程执行其后续动作。
-    /// 返回是否取到了一个结果（UI 需要重绘）。
+    /// Drain the in-flight dialog's result and run its follow-up on the UI thread.
+    /// Returns whether a result was taken (the UI needs a redraw).
     fn drain_dialog_result(&mut self) -> bool {
         let Some(rx) = &self.dialog_result_rx else {
             return false;
@@ -264,7 +273,7 @@ impl AppRuntime {
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => return false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                // 线程异常退出且未发送：按取消处理。
+                // The thread died without sending: treat it as cancelled.
                 self.dialog_result_rx = None;
                 None
             }
@@ -273,18 +282,18 @@ impl AppRuntime {
             return false;
         };
         if picked.is_none() {
-            self.host.log.info("已取消");
+            self.host.log.info("Cancelled");
         }
         (request.action)(self, picked.map(api::Location::local));
         true
     }
 
-    // ---- 账号登录（Phase 3：device flow）----
+    // ---- Account sign-in (Phase 3: device flow) ----
     // The login state machine lives on the ServiceHost (commands reach it via
     // ctx.host()); the runtime only drains phase updates each frame.
 
     /// Drain pending login-phase updates into `ws.account` (once per tick).
-    /// 返回是否消费了阶段更新（UI 需要重绘）。
+    /// Returns whether any phase update was consumed (the UI needs a redraw).
     fn drain_account_login(&mut self) -> bool {
         let Some(rx) = self.host.account_login_rx.as_ref() else {
             return false;
@@ -307,26 +316,28 @@ impl AppRuntime {
         }
         if let Some(phase) = updates.pop() {
             if let api::AccountPhase::LoggedIn(user) = &phase {
-                self.host.log.info(format!("已登录为 {}", user.name));
+                self.host.log.info(format!("Signed in as {}", user.name));
             }
             self.host.ws.account = phase;
         }
         true
     }
 
-    /// 平台节拍：泵任务事件、自动保存计时、同步活动文档/标签标题、刷新上下文快照。
+    /// The platform tick: pumps task events, times autosave, syncs the active document/tab
+    /// titles and refreshes the context snapshot.
     ///
-    /// 返回 `true` 表示本次节拍改动了 UI 可见状态（任务事件、对话框结果、
-    /// 文件读写结果、登录阶段、自动保存、活动文档），前端据此排一次重绘。
-    /// 前端在自己的定时器上驱动本方法，而不是在视图渲染里——gpui 只在失效时重画，渲染驱动的泵
-    /// 会在 UI 空闲时停转，任务结果回到通道里没人取（诊断面板的后台任务计数
-    /// 因此滞后）。
+    /// Returns `true` when this tick changed UI-visible state (task events, a dialog result,
+    /// file I/O results, a sign-in phase, an autosave, the active document), so the frontend
+    /// schedules a redraw. The frontend drives this on its own timer rather than in view
+    /// rendering — gpui only redraws on invalidation, so a render-driven pump stalls while the
+    /// UI is idle and task results sit in the channel unclaimed (the diagnostics panel's
+    /// background task count then lags).
     pub fn frame_tick(&mut self, dt_secs: f32) -> bool {
         let mut changed = self.drain_dialog_result();
         changed |= self.drain_io();
         changed |= self.drain_account_login();
         changed |= self.pump_task_events();
-        // 自动保存（阶段 5：§18 生产级扩展）
+        // Autosave (phase 5: §18 production extensions)
         let interval = self
             .host
             .settings
@@ -338,12 +349,12 @@ impl AppRuntime {
             match self.autosave_now() {
                 Ok(saved) => changed |= saved > 0,
                 Err(e) => {
-                    self.host.log.warn(format!("自动保存失败: {e}"));
+                    self.host.log.warn(format!("Autosave failed: {e}"));
                     changed = true;
                 }
             }
         }
-        // 活动文档跟随活动标签的绑定
+        // The active document follows the active tab's binding
         if let Some(tab) = self.host.ws.active_tab() {
             if tab.document.is_some() {
                 let doc = tab.document;
@@ -352,7 +363,7 @@ impl AppRuntime {
                 changed |= self.host.docs.active_id() != before;
             }
         }
-        // 文档绑定标签的标题同步（含未保存标记）
+        // Sync the titles of document-bound tabs (including the unsaved marker)
         let bindings: Vec<(api::TabInstanceId, Option<api::DocumentId>)> = self
             .host
             .ws
@@ -375,7 +386,8 @@ impl AppRuntime {
                         slot.title = title;
                     }
                 } else {
-                    // 绑定的文档已不存在：解绑（由关闭流程一般不会发生，防御式处理）
+                    // The bound document is gone: unbind (the close flow normally prevents
+                    // this; defensive)
                     if let Some(slot) = self
                         .host
                         .ws
@@ -392,22 +404,24 @@ impl AppRuntime {
             }
         }
         self.snapshot = self.make_snapshot();
-        // 有任务在跑时持续排帧（进度动画），任务终态事件被本节拍取走后
-        // `changed` 为真，面板才会把「运行」计数落回 0。
+        // Keep scheduling frames while tasks run (progress animation); `changed` is true on
+        // the tick that takes a task's terminal event, so the panel drops the "running" count
+        // back to 0.
         changed |= self.host.tasks.summary().0 > 0;
         changed
     }
 
-    // ---- 自动保存与崩溃恢复（阶段 5：§18）----
+    // ---- Autosave and crash recovery (phase 5: §18) ----
     //
-    // 自动保存是状态存储里 `autosave/` 下的成对条目：内容 `<标题>_.<ext>`
-    // 与元数据 `<标题>_.json`；干净退出时写入 `autosave/session.clean`。
+    // Autosaves are pairs of entries under `autosave/` in the state store: the content
+    // `<title>_.<ext>` and the metadata `<title>_.json`; a clean exit writes
+    // `autosave/session.clean`.
 
-    /// 立即把所有脏文档序列化写入自动保存区（`autosave/<标题>_.<ext>`）。
-    /// 不改动文档的 dirty/location 状态——用户保存流程不受影响。
+    /// Serialize every dirty document into the autosave area now (`autosave/<title>_.<ext>`).
+    /// Leaves the documents' dirty/location state alone — the user's save flow is unaffected.
     pub fn autosave_now(&mut self) -> Result<usize, String> {
         if !AUTOSAVE {
-            return Err("Web 版暂不支持自动保存".to_string());
+            return Err("Autosave is not supported on the web yet".to_string());
         }
         let dirty: Vec<(api::DocumentId, String, String)> = {
             let host = &self.host;
@@ -428,21 +442,22 @@ impl AppRuntime {
         for (id, title, ext) in dirty {
             let (bytes, type_id) = {
                 let host = &self.host;
-                let doc = host.docs.get(id).ok_or("文档不存在")?;
+                let doc = host.docs.get(id).ok_or("No such document")?;
                 let def = host
                     .docs
                     .type_of(&doc.type_id)
-                    .ok_or("未注册的文档类型")?;
+                    .ok_or("Unregistered document type")?;
                 ((def.serialize)(doc.content.as_ref())?, doc.type_id.clone())
             };
-            // 文件名清洗：替换路径非法字符
+            // Sanitize the file name: replace characters not allowed in paths
             let safe_title: String = title
                 .chars()
                 .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
                 .collect();
             self.state
                 .write(&format!("{AUTOSAVE_DIR}{safe_title}_.{ext}"), &bytes)?;
-            // 元数据旁车：恢复时的原标题（以及真实类型，供诊断）
+            // Metadata sidecar: the original title for recovery (and the real type, for
+            // diagnostics)
             let meta = serde_json::json!({ "doc_id": id.0, "type_id": type_id.0, "title": title });
             let _ = self.state.write(
                 &format!("{AUTOSAVE_DIR}{safe_title}_.json"),
@@ -452,18 +467,21 @@ impl AppRuntime {
         }
         self.host.stats.autosaves += 1;
         if saved > 0 {
-            self.host.log.info(format!("自动保存：{saved} 个文档"));
+            self.host.log.info(format!("Autosave: {saved} documents"));
         }
         Ok(saved)
     }
 
-    /// 启动时：上次异常退出（没有干净退出标记）就恢复自动保存的文档。上次
-    /// 干净退出、或恢复出了文档，都清空自动保存区——旧会话的自动保存不该在
-    /// 以后的某次崩溃后冒出来；一个都没恢复成功时保留，留待排查。
+    /// At startup: if the last session exited abnormally (no clean-exit marker), recover the
+    /// autosaved documents. After a clean exit, or once documents were recovered, the autosave
+    /// area is cleared — an old session's autosaves must not pop up after some later crash;
+    /// when none could be recovered they are kept for investigation.
     fn restore_session(&mut self) {
         let crashed = self.state.read(CLEAN_EXIT).is_none();
         let recovered = if crashed {
-            self.host.log.warn("[会话] 上次未正常退出，尝试恢复自动保存…");
+            self.host
+                .log
+                .warn("[Session] The last session did not exit cleanly; recovering autosaves…");
             self.recover_autosaves()
         } else {
             0
@@ -475,12 +493,13 @@ impl AppRuntime {
         }
     }
 
-    /// 重新打开自动保存区里的文档（标记为未保存），返回恢复的个数。
+    /// Reopen the documents in the autosave area (marked unsaved); returns how many were
+    /// recovered.
     fn recover_autosaves(&mut self) -> usize {
         let keys = self.state.keys(AUTOSAVE_DIR);
         let mut recovered = 0;
         for (meta_key, stem) in keys.iter().filter_map(|k| Some((k, k.strip_suffix(".json")?))) {
-            // 同名内容条目，扩展名即文档类型的扩展名
+            // The content entry of the same name; its extension is the document type's
             let content = keys.iter().find(|key| {
                 key.strip_prefix(stem)
                     .and_then(|rest| rest.strip_prefix('.'))
@@ -496,7 +515,7 @@ impl AppRuntime {
             };
             let name = stem.strip_prefix(AUTOSAVE_DIR).unwrap_or(stem);
             let title = format!(
-                "[恢复] {}",
+                "[Recovered] {}",
                 meta.get("title").and_then(|t| t.as_str()).unwrap_or(name)
             );
             // The recovered document gets no file: its first save asks where
@@ -506,13 +525,13 @@ impl AppRuntime {
                 .docs
                 .type_for(content_key)
                 .and_then(|type_id| {
-                    let bytes = self.state.read(content_key).ok_or("内容已不在")?;
+                    let bytes = self.state.read(content_key).ok_or("The content is gone")?;
                     self.host.docs.open_bytes(&type_id, &title, None, &bytes)
                 });
             match restored {
                 Ok(id) => {
                     if let Some(d) = self.host.docs.get_mut(id) {
-                        d.dirty = true; // 恢复内容必须由用户确认后保存
+                        d.dirty = true; // recovered content is saved only once the user confirms
                     }
                     self.host.docs.set_active(Some(id));
                     recovered += 1;
@@ -520,26 +539,27 @@ impl AppRuntime {
                 Err(e) => self
                     .host
                     .log
-                    .warn(format!("自动保存恢复失败 {content_key}: {e}")),
+                    .warn(format!("Failed to recover autosave {content_key}: {e}")),
             }
         }
         if recovered > 0 {
             self.host.log.warn(format!(
-                "检测到上次异常退出，已恢复 {recovered} 个自动保存文档（标记为未保存，请确认后保存）"
+                "The last session exited abnormally; recovered {recovered} autosaved documents \
+                 (marked unsaved, please review and save them)"
             ));
         }
         recovered
     }
 
-    // ---- 帧统计（阶段 5：诊断面板）----
+    // ---- Frame stats (phase 5: diagnostics panel) ----
 
-    /// GUI 前端每帧调用。
+    /// Called by the GUI frontend every frame.
     pub fn record_frame(&mut self, dt_ms: f32) {
         self.host.record_frame(dt_ms);
     }
 
-    /// 泵任务事件通道。返回是否取到了事件（任务状态/日志/调用历史变化，
-    /// 前端需要重绘）。
+    /// Pump the task event channel. Returns whether any event was taken (task state/log/
+    /// invocation history changed, so the frontend needs a redraw).
     fn pump_task_events(&mut self) -> bool {
         let rx = self.host.task_events();
         let events: Vec<TaskEvent> = {
@@ -555,7 +575,8 @@ impl AppRuntime {
                     self.host.log.info(message);
                 }
                 TaskEvent::Finished { outcome, id } => {
-                    // 推进命令调用历史中的对应记录（统一调用结果，阶段 2）
+                    // Advance the matching record in the invocation history (unified invocation
+                    // results, phase 2)
                     let (status, note) = match &outcome {
                         api::TaskOutcome::Succeeded { note, commit } => (
                             InvocationStatus::Succeeded,
@@ -578,26 +599,27 @@ impl AppRuntime {
                     match outcome {
                         api::TaskOutcome::Succeeded { note, commit } => {
                             if let Some(commit) = commit {
-                                // 后台任务结果在事务边界提交：文档版本校验（design.md §10.5）
+                                // Background task results commit at a transaction boundary:
+                                // document revision check (design.md §10.5)
                                 let label = commit.label.clone();
                                 match self.host.docs.apply_commit(commit) {
                                     Ok(_) => self
                                         .host
                                         .log
-                                        .info(format!("后台任务提交「{label}」成功")),
+                                        .info(format!("Background task committed \"{label}\"")),
                                     Err(e) => self.host.log.warn(e),
                                 }
                             }
                             self.host.log.info(format!(
-                                "任务完成{}",
-                                note.map(|n| format!("：{n}")).unwrap_or_default()
+                                "Task finished{}",
+                                note.map(|n| format!(": {n}")).unwrap_or_default()
                             ));
                         }
                         api::TaskOutcome::Failed { error } => {
-                            self.host.log.error(format!("任务失败：{error}"));
+                            self.host.log.error(format!("Task failed: {error}"));
                         }
                         api::TaskOutcome::Cancelled => {
-                            self.host.log.info("任务已取消");
+                            self.host.log.info("Task cancelled");
                         }
                     }
                 }
@@ -606,9 +628,9 @@ impl AppRuntime {
         any
     }
 
-    // ---- 命令执行 ----
+    // ---- Command execution ----
 
-    /// 登记/更新一条调用记录。
+    /// Register/update an invocation record.
     fn track(&mut self, record: InvocationRecord) {
         self.invocations.push_back(record);
         while self.invocations.len() > INVOCATION_HISTORY {
@@ -623,9 +645,11 @@ impl AppRuntime {
         }
     }
 
-    /// 统一命令入口（design.md §10.6）。同时登记可查询的调用历史。
+    /// The unified command entry point (design.md §10.6). Also records the queryable
+    /// invocation history.
     pub fn execute_command(&mut self, id: &str, args: &CommandArgs) -> CommandResult {
-        // 登记调用（先于执行；异步/后台保持 Running，由任务终态事件推进）
+        // Record the invocation (before running it; async/background stay Running until the
+        // task's terminal event advances them)
         self.invocation_seq += 1;
         let seq = self.invocation_seq;
         let execution = self.registry.command(id).map(|d| d.execution());
@@ -639,7 +663,7 @@ impl AppRuntime {
         });
 
         if self.dispatch_depth > 16 {
-            let msg = "命令嵌套过深（可能存在自递归）".to_string();
+            let msg = "Commands nested too deeply (possible self-recursion)".to_string();
             self.note_invocation(seq, InvocationStatus::Failed, Some(msg.clone()));
             self.host.log.error(msg.clone());
             return CommandResult::failed(msg);
@@ -673,7 +697,7 @@ impl AppRuntime {
             _ => {}
         }
         let Some(mut def) = self.registry.take_command(id) else {
-            let msg = format!("未注册的命令: {id}");
+            let msg = format!("Unregistered command: {id}");
             self.note_invocation(seq, InvocationStatus::Failed, Some(msg.clone()));
             self.host.log.error(msg.clone());
             return CommandResult::failed(msg);
@@ -682,7 +706,7 @@ impl AppRuntime {
         if let Some(enabled) = &def.enabled {
             if !enabled(&snapshot) {
                 self.registry.put_command(def);
-                let msg = format!("命令 {id} 当前上下文不可用");
+                let msg = format!("Command {id} is unavailable in the current context");
                 self.note_invocation(seq, InvocationStatus::Failed, Some(msg.clone()));
                 self.host.log.warn(msg.clone());
                 return CommandResult::failed(msg);
@@ -701,7 +725,8 @@ impl AppRuntime {
                 self.dispatch_depth -= 1;
                 match started {
                     Ok(spec) => {
-                        // 任务会话（进度/取消）+ 共享执行器驱动 future
+                        // A task session (progress/cancellation) + the shared executor drives
+                        // the future
                         let session =
                             self.host
                                 .tasks
@@ -729,10 +754,10 @@ impl AppRuntime {
                             r.task_id = Some(task_id);
                         }
                         self.host.log.info(format!(
-                            "已提交异步任务 #{}「{}」",
+                            "Submitted async task #{} \"{}\"",
                             task_id.0, spec.title
                         ));
-                        CommandResult::done_with(format!("异步任务 #{}", task_id.0))
+                        CommandResult::done_with(format!("Async task #{}", task_id.0))
                     }
                     Err(e) => CommandResult::failed(e),
                 }
@@ -749,17 +774,18 @@ impl AppRuntime {
                             r.task_id = Some(task_id);
                         }
                         self.host.log.info(format!(
-                            "已提交后台任务 #{}「{title}」",
+                            "Submitted background task #{} \"{title}\"",
                             task_id.0
                         ));
-                        CommandResult::done_with(format!("后台任务 #{}", task_id.0))
+                        CommandResult::done_with(format!("Background task #{}", task_id.0))
                     }
                     Err(e) => CommandResult::failed(e),
                 }
             }
         };
         self.registry.put_command(def);
-        // 同步命令立即到终态；异步/后台命令在任务完成事件中推进
+        // Sync commands reach their final state at once; async/background commands advance on
+        // the task's finished event
         match (&result, &execution) {
             (CommandResult::Done { note }, Some(CommandExecution::Sync)) => {
                 self.note_invocation(seq, InvocationStatus::Succeeded, note.clone());
@@ -768,13 +794,14 @@ impl AppRuntime {
                 self.note_invocation(seq, InvocationStatus::Failed, Some(error.clone()));
             }
             (CommandResult::Failed { error }, _) => {
-                // 异步/后台提交失败（启动器返回 Err）直接终态
+                // A failed async/background submission (the starter returned Err) is final
+                // right away
                 self.note_invocation(seq, InvocationStatus::Failed, Some(error.clone()));
             }
             _ => {}
         }
         if let CommandResult::Failed { error } = &result {
-            self.host.log.error(format!("命令 {id} 失败：{error}"));
+            self.host.log.error(format!("Command {id} failed: {error}"));
         }
         result
     }
@@ -804,11 +831,12 @@ impl AppRuntime {
         }
     }
 
-    // ---- 布局持久化（design.md §6.5） ----
+    // ---- Layout persistence (design.md §6.5) ----
 
-    /// 保存布局；`ui` 为 GUI 前端私有物理布局数据，`dock` 为停靠区物理布局
-    /// （前端 `DockArea::dump` 的序列化结果）。返回是否写入：与上次加载或
-    /// 保存的布局相同时不重写（Web 端定期调用）。
+    /// Save the layout; `ui` is the GUI frontend's private physical layout data, `dock` the
+    /// dock area's physical layout (the frontend's serialized `DockArea::dump`). Returns
+    /// whether it was written: a layout equal to the last one loaded or saved is not rewritten
+    /// (the web calls this periodically).
     pub fn save_layout(
         &mut self,
         ui: serde_json::Value,
@@ -828,8 +856,9 @@ impl AppRuntime {
         written.map(|()| true)
     }
 
-    /// 尝试加载布局：应用核心部分（面板/标签/模式），返回前端私有部分供适配器恢复。
-    /// 未注册的面板/视图被跳过并记录诊断（验收 #9）。
+    /// Try to load the layout: apply the core part (panels/tabs/mode) and return the frontend's
+    /// private part for the adapter to restore. Unregistered panels/views are skipped with a
+    /// diagnostic (acceptance #9).
     pub fn load_layout(&mut self) -> Option<RestoredLayout> {
         let text = String::from_utf8(self.state.read(&self.layout_key)?).ok()?;
         let file: api::LayoutFile = match serde_json::from_str(&text) {
@@ -837,7 +866,7 @@ impl AppRuntime {
             Err(e) => {
                 self.host
                     .log
-                    .warn(format!("布局文件解析失败，使用默认布局: {e}"));
+                    .warn(format!("Failed to parse the layout file; using the default: {e}"));
                 return None;
             }
         };
@@ -847,7 +876,7 @@ impl AppRuntime {
         }
         self.saved_layout = Some(text);
         self.snapshot = self.make_snapshot();
-        self.host.log.info("已恢复上次的工作区布局");
+        self.host.log.info("Restored the last workspace layout");
         Some(RestoredLayout {
             ui: file.ui,
             dock: file.dock,
@@ -855,11 +884,11 @@ impl AppRuntime {
     }
 }
 
-/// [`AppRuntime::load_layout`] 恢复出的前端私有布局部分。
+/// The frontend's private layout part restored by [`AppRuntime::load_layout`].
 pub struct RestoredLayout {
-    /// GUI 前端私有物理布局（历史字段；前端自行解释）。
+    /// The GUI frontend's private physical layout (a legacy field; the frontend interprets it).
     pub ui: Option<serde_json::Value>,
-    /// 停靠区物理布局（gpui 前端交给 `DockArea::load`）。
+    /// The dock area's physical layout (the gpui frontend hands it to `DockArea::load`).
     pub dock: Option<serde_json::Value>,
 }
 
@@ -892,17 +921,17 @@ impl api::AppServices for AppRuntime {
         let index = self.host.ws.active_tab;
         match self.host.ws.close_tab(index) {
             Some(_) => {
-                self.host.log.info(format!("已关闭中央标签 #{}", index + 1));
+                self.host.log.info(format!("Closed center tab #{}", index + 1));
                 self.snapshot = self.make_snapshot();
                 Ok(())
             }
-            None => Err("没有可关闭的中央标签".to_string()),
+            None => Err("No center tab to close".to_string()),
         }
     }
 
     fn set_work_mode(&mut self, mode: &str) -> Result<(), String> {
         self.host.ws.set_work_mode(mode.to_string());
-        self.host.log.info(format!("切换工作模式 → {mode}"));
+        self.host.log.info(format!("Switched work mode → {mode}"));
         self.snapshot = self.make_snapshot();
         Ok(())
     }
@@ -910,8 +939,8 @@ impl api::AppServices for AppRuntime {
     fn toggle_panel(&mut self, panel_id: &str) -> Result<(), String> {
         let now_visible = self.host.ws.toggle_panel(&PanelId::new(panel_id))?;
         self.host.log.info(format!(
-            "面板 `{panel_id}` {}",
-            if now_visible { "已显示" } else { "已隐藏" }
+            "Panel `{panel_id}` {}",
+            if now_visible { "shown" } else { "hidden" }
         ));
         Ok(())
     }
@@ -947,12 +976,12 @@ impl api::AppServices for AppRuntime {
 }
 
 impl AppRuntime {
-    /// 运行时禁用插件（阶段 5，§16.2/§18）：移除它的全部贡献——命令、视图
-    /// 类型、面板、文档类型、Ribbon 组与 Tab，更新插件注册镜像。不可恢复
-    /// （如需重载请重启应用）。
+    /// Disable a plugin at runtime (phase 5, §16.2/§18): removes all its contributions —
+    /// commands, view types, panels, document types, ribbon groups and tabs — and updates the
+    /// plugin registry mirror. Irreversible (restart the app to reload it).
     pub fn disable_plugin(&mut self, plugin_id: &str) -> Result<Vec<String>, String> {
         if !self.registry.plugins_loaded.iter().any(|x| x == plugin_id) {
-            return Err(format!("插件未装载: {plugin_id}"));
+            return Err(format!("Plugin not loaded: {plugin_id}"));
         }
         let removed = self.registry.remove_from_source(plugin_id);
         self.host.ws.remove_commands(&removed, plugin_id);
@@ -966,10 +995,10 @@ impl AppRuntime {
             .find(|p| p.id == plugin_id && p.state == "Loaded")
         {
             entry.state = "Disabled";
-            entry.detail = Some("运行时禁用".to_string());
+            entry.detail = Some("Disabled at runtime".to_string());
         }
         self.host.log.warn(format!(
-            "插件 {plugin_id} 已禁用，移除 {} 条命令",
+            "Plugin {plugin_id} disabled, {} commands removed",
             removed.len()
         ));
         Ok(removed)
@@ -978,9 +1007,10 @@ impl AppRuntime {
 
 impl Drop for AppRuntime {
     fn drop(&mut self) {
-        // 通知异步执行器工作线程退出
+        // Tell the async executor's worker threads to exit
         self.shutdown.store(true, Ordering::Relaxed);
-        // 会话干净退出标记（阶段 5：崩溃恢复），下次启动由 `restore_session` 检查。
+        // The session's clean-exit marker (phase 5: crash recovery), checked by
+        // `restore_session` at the next startup.
         if AUTOSAVE {
             let _ = self.state.write(CLEAN_EXIT, b"ok");
         }
@@ -988,18 +1018,20 @@ impl Drop for AppRuntime {
     }
 }
 
-// ---- 产品装配 ----
+// ---- Product assembly ----
 
-/// 插件装载阶段：装配期由 builder 调用，向注册表贡献命令/工具栏/服务。
-/// 失败通过 `Registry::error`/`plugins_rejected` 记录，不中断装配。
+/// A plugin loading stage: called by the builder during assembly, contributes commands/toolbars/
+/// services to the registry. Failures are recorded through `Registry::error`/`plugins_rejected`
+/// and do not abort assembly.
 pub type PluginStage = Box<dyn FnOnce(&mut Registry) + Send>;
 
-/// 产品装配器（design.md §13）：选择 Workbench 模块、默认工作模式与初始布局。
+/// The product assembler (design.md §13): picks the Workbench modules, the default work mode
+/// and the initial layout.
 pub struct WorkbenchAppBuilder {
     product_id: String,
     product_name: String,
-    /// 产品身份与品牌（product.toml）。提供时覆盖 product_id/product_name，
-    /// 并作为窗口标题、ribbon logo、About 对话框的数据源。
+    /// Product identity and branding (product.toml). When given it overrides
+    /// product_id/product_name and feeds the window title, ribbon logo and About dialog.
     profile: Option<api::ProductProfile>,
     workbenches: Vec<Box<dyn Workbench>>,
     plugin_stages: Vec<PluginStage>,
@@ -1011,23 +1043,27 @@ pub struct WorkbenchAppBuilder {
     /// A document file to open at startup (the file-association entry
     /// point); applied after the default document would be created.
     open_file_on_start: Option<PathBuf>,
-    /// 默认文档类型 ID（多文档类型时由产品指定）。
+    /// The default document type ID (named by the product when there are several types).
     default_doc_type: Option<String>,
     smoke_seconds: Option<f32>,
-    /// 产品资源源（SVG 图标等）；None 时只有平台标准资源。
+    /// The product's asset source (SVG icons, …); None means platform standard assets only.
     assets: Option<std::sync::Arc<dyn api::AssetSource>>,
-    /// GUI 后端标签（诊断面板/日志用；产品按构建选定填写）。
+    /// The GUI backend label (for the diagnostics panel/logs; the product fills it in per
+    /// build).
     backend_label: String,
-    /// 产品声明的额外 GPU 设备需求（不透明传递；前端解释具体类型）。
+    /// Extra GPU device requirements the product declares (passed through opaquely; the
+    /// frontend interprets the concrete type).
     gpu_requirements: Option<Box<dyn std::any::Any>>,
-    /// Ribbon 折叠能力开关（ribbon-bar.md §4.5）；默认 false。
+    /// The ribbon collapse feature switch (ribbon-bar.md §4.5); false by default.
     ribbon_collapse_enabled: bool,
-    /// UI 主题名（"dark"/"light"）；写入 settings 默认值，用户设置优先。
+    /// The UI theme name ("dark"/"light"); written as the settings default, user settings win.
     theme: String,
-    /// 产品的模块解析器：给定插件声明的模块 ID，返回要装配的 Workbench。
+    /// The product's module resolver: given the module IDs a plugin declares, returns the
+    /// Workbenches to assemble.
     ///
-    /// 插件是运行期单位——它启用产品已编译的模块，而不是携带代码。产品提供
-    /// 这张 `模块 ID -> Workbench` 表，平台在插件装载之后调用它。
+    /// A plugin is a runtime unit — it enables modules the product already compiled rather than
+    /// carrying code. The product supplies this `module ID -> Workbench` table, and the
+    /// platform calls it after loading plugins.
     module_loader: Option<ModuleLoader>,
     /// Injected account capability (Phase 3); None = no login surface.
     account: Option<Arc<dyn api::AccountService>>,
@@ -1036,10 +1072,12 @@ pub struct WorkbenchAppBuilder {
     storage: api::Storage,
 }
 
-/// 产品的模块解析器：给定插件 ID 与它本次要装配的模块 ID，返回 Workbench。
+/// The product's module resolver: given a plugin ID and the module IDs it assembles this time,
+/// returns the Workbenches.
 ///
-/// 按插件逐个调用，这样平台能用 [`api::Registry::with_source`] 给该插件的
-/// 全部贡献盖上来源，运行期禁用才能精确移除。
+/// Called once per plugin, so the platform can stamp all of that plugin's contributions with
+/// their source through [`api::Registry::with_source`], and disabling it at runtime removes
+/// exactly those.
 pub type ModuleLoader = Box<dyn Fn(&str, &[String]) -> Vec<Box<dyn Workbench>> + Send>;
 
 impl WorkbenchAppBuilder {
@@ -1057,8 +1095,8 @@ impl WorkbenchAppBuilder {
             profile: None,
             workbenches: Vec::new(),
             plugin_stages: Vec::new(),
-            default_mode: "常规".to_string(),
-            work_modes: vec!["常规".to_string()],
+            default_mode: "General".to_string(),
+            work_modes: vec!["General".to_string()],
             layout_path: None,
             open_on_start: Vec::new(),
             create_default_document: false,
@@ -1091,14 +1129,15 @@ impl WorkbenchAppBuilder {
         self
     }
 
-    /// 设置产品的模块解析器（插件启用的 Workbench 模块由它装配）。
+    /// Set the product's module resolver (it assembles the Workbench modules plugins enable).
     pub fn with_module_loader(mut self, loader: ModuleLoader) -> Self {
         self.module_loader = Some(loader);
         self
     }
 
-    /// 设置产品身份与品牌（`product.toml` 加载结果，见 [`crate::product`]）。
-    /// profile 的 id/name 覆盖 [`WorkbenchAppBuilder::new`] 的对应参数。
+    /// Set the product identity and branding (the loaded `product.toml`, see
+    /// [`crate::product`]). The profile's id/name override the matching
+    /// [`WorkbenchAppBuilder::new`] arguments.
     pub fn with_profile(mut self, profile: api::ProductProfile) -> Self {
         self.product_id = profile.id.clone();
         self.product_name = profile.name.clone();
@@ -1114,8 +1153,9 @@ impl WorkbenchAppBuilder {
         self
     }
 
-    /// 设置产品资源源（SVG 图标等静态资源）。查询顺序：产品源 → 平台标准源
-    /// （[`crate::assets::standard_assets`]），产品可用同名路径覆盖标准图标。
+    /// Set the product's asset source (SVG icons and other static assets). Lookup order:
+    /// product source → platform standard source ([`crate::assets::standard_assets`]); the
+    /// product can override a standard icon by using the same path.
     pub fn with_assets(
         mut self,
         source: impl api::AssetSource + 'static,
@@ -1124,7 +1164,8 @@ impl WorkbenchAppBuilder {
         self
     }
 
-    /// 生效的资源源：产品源优先，平台标准源兜底。
+    /// The effective asset source: the product source first, the platform standard source as
+    /// the fallback.
     pub fn asset_source(&self) -> std::sync::Arc<dyn api::AssetSource> {
         let mut sources: Vec<std::sync::Arc<dyn api::AssetSource>> = Vec::new();
         if let Some(a) = &self.assets {
@@ -1134,22 +1175,23 @@ impl WorkbenchAppBuilder {
         std::sync::Arc::new(api::ChainedAssets::new(sources))
     }
 
-    /// 声明产品额外需要的 GPU 设备需求（features / limits），在前端创建设备前
-    /// 落位。类型由 GUI 前端解释（workbench-ui 期望
-    /// `workbench_ui::gpu_view::GpuRequirements`），本层只透传 `Box<dyn Any>`
-    /// （GUI 无关契约不变）。典型用途：产品自己的渲染器需要高于平台基线的
-    /// 限制（如计算着色器的 storage buffer 数）。
+    /// Declare extra GPU device requirements the product needs (features / limits), in place
+    /// before the frontend creates the device. The GUI frontend interprets the type
+    /// (workbench-ui expects `workbench_ui::gpu_view::GpuRequirements`); this layer only passes
+    /// a `Box<dyn Any>` through (the GUI-independent contract stays). Typical use: the
+    /// product's own renderer needs limits above the platform baseline (such as the compute
+    /// shader storage buffer count).
     pub fn with_gpu_requirements(mut self, requirements: Box<dyn std::any::Any>) -> Self {
         self.gpu_requirements = Some(requirements);
         self
     }
 
-    /// 取出 GPU 设备需求（`build()` 之前的装配步骤消费）。
+    /// Take the GPU device requirements (consumed by an assembly step before `build()`).
     pub fn take_gpu_requirements(&mut self) -> Option<Box<dyn std::any::Any>> {
         self.gpu_requirements.take()
     }
 
-    /// 标记 GUI 后端（诊断面板/自动化查询用）。
+    /// Label the GUI backend (for the diagnostics panel/automated queries).
     pub fn with_backend_label(mut self, label: impl Into<String>) -> Self {
         self.backend_label = label.into();
         self
@@ -1162,8 +1204,8 @@ impl WorkbenchAppBuilder {
         self
     }
 
-    /// UI 主题（`"dark"` / `"light"`）。作为 settings `ui.theme` 的默认值——
-    /// 用户已保存的设置优先。
+    /// The UI theme (`"dark"` / `"light"`). Used as the default of the `ui.theme` setting —
+    /// the user's saved setting wins.
     pub fn with_theme(mut self, name: impl Into<String>) -> Self {
         self.theme = name.into();
         self
@@ -1174,13 +1216,13 @@ impl WorkbenchAppBuilder {
         self
     }
 
-    /// 追加一个插件装载阶段（如 `workbench_rhai::plugin_stage(dirs)`）。
+    /// Append a plugin loading stage (such as `workbench_rhai::plugin_stage(dirs)`).
     pub fn with_plugin_stage(mut self, stage: PluginStage) -> Self {
         self.plugin_stages.push(stage);
         self
     }
 
-    /// 工作模式列表与默认模式。
+    /// The work modes and the default mode.
     pub fn with_modes(mut self, modes: &[&str], default: &str) -> Self {
         self.work_modes = modes.iter().map(|s| s.to_string()).collect();
         self.default_mode = default.to_string();
@@ -1196,13 +1238,13 @@ impl WorkbenchAppBuilder {
         self
     }
 
-    /// 启动时打开的中央视图（视图类型 ID，是否绑定文档）。
+    /// A center view opened at startup (view type ID, whether it binds the document).
     pub fn open_on_start(mut self, view_type: &str, bind_document: bool) -> Self {
         self.open_on_start.push((view_type.to_string(), bind_document));
         self
     }
 
-    /// 启动时创建一个默认文档（首个注册的文档类型）。
+    /// Create a default document at startup (of the first registered document type).
     pub fn create_default_document(mut self, on: bool) -> Self {
         self.create_default_document = on;
         self
@@ -1217,15 +1259,16 @@ impl WorkbenchAppBuilder {
         self
     }
 
-    /// 指定默认文档类型（产品注册了多个文档类型时用）。
+    /// Name the default document type (for products that register several document types).
     ///
-    /// 未指定时回落到第一个注册的文档类型。
+    /// Without one, the first registered document type is used.
     pub fn with_default_document_type(mut self, type_id: impl Into<String>) -> Self {
         self.default_doc_type = Some(type_id.into());
         self
     }
 
-    /// 冒烟模式：窗口打开 `seconds` 秒后自动退出（自动化验证用）。
+    /// Smoke mode: exit automatically `seconds` seconds after the window opens (for automated
+    /// verification).
     pub fn smoke(mut self, seconds: f32) -> Self {
         self.smoke_seconds = Some(seconds);
         self
@@ -1235,7 +1278,7 @@ impl WorkbenchAppBuilder {
         self.smoke_seconds
     }
 
-    /// 装配产品。Workbench 初始化失败被捕获隔离（验收 #19）。
+    /// Assemble the product. Workbench init failures are caught and isolated (acceptance #19).
     pub fn build(mut self) -> Result<AppRuntime, String> {
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -1252,12 +1295,13 @@ impl WorkbenchAppBuilder {
                     .downcast_ref::<String>()
                     .cloned()
                     .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "未知 panic".to_string());
-                registry.error(format!("Workbench `{}` 初始化失败: {msg}", wb.id()));
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                registry.error(format!("Workbench `{}` failed to initialize: {msg}", wb.id()));
             }
         }
 
-        // 插件装载阶段（Rhai 脚本插件等）：与 Workbench 同样的隔离策略（验收 #19）
+        // Plugin loading stages (Rhai script plugins, …): the same isolation as Workbenches
+        // (acceptance #19)
         for stage in self.plugin_stages {
             let result = catch_unwind(AssertUnwindSafe(|| stage(&mut registry)));
             if let Err(panic) = result {
@@ -1265,14 +1309,14 @@ impl WorkbenchAppBuilder {
                     .downcast_ref::<String>()
                     .cloned()
                     .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "未知 panic".to_string());
-                registry.error(format!("插件装载阶段失败: {msg}"));
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                registry.error(format!("Plugin loading stage failed: {msg}"));
             }
         }
 
-        // 插件启用的 Workbench 模块：插件声明的是 ID，产品用模块解析器把它
-        // 们变成真正的 Workbench。放在平台命令之前，让“窗口”组能收到这些
-        // 模块注册的面板。
+        // Workbench modules enabled by plugins: a plugin declares IDs, and the product's
+        // module resolver turns them into real Workbenches. This runs before the platform
+        // commands so the "View" group receives the panels these modules register.
         if let Some(loader) = self.module_loader.take() {
             let mut loaded: Vec<String> = Vec::new();
             for (plugin_id, modules) in registry.plugin_modules.clone() {
@@ -1297,15 +1341,16 @@ impl WorkbenchAppBuilder {
                                 .downcast_ref::<String>()
                                 .cloned()
                                 .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                                .unwrap_or_else(|| "未知 panic".to_string());
-                            reg.error(format!("插件模块初始化失败: {msg}"));
+                                .unwrap_or_else(|| "unknown panic".to_string());
+                            reg.error(format!("Plugin module failed to initialize: {msg}"));
                         }
                     }
                 });
             }
         }
 
-        // 平台命令（含每个面板的显示/隐藏命令与“窗口”工具栏组）
+        // Platform commands (including each panel's show/hide command and the "View" toolbar
+        // group)
         let panel_ids: Vec<(String, String)> = registry
             .panels
             .iter()
@@ -1313,7 +1358,7 @@ impl WorkbenchAppBuilder {
             .collect();
         platform_cmds::register(&mut registry, &panel_ids);
 
-        // 注册表 → 运行时
+        // Registry → runtime
         for def in std::mem::take(&mut registry.doc_types) {
             if let Err(e) = host.docs.register_type(def) {
                 host.log.error(e);
@@ -1329,51 +1374,53 @@ impl WorkbenchAppBuilder {
                 host.log.error(e);
             }
         }
-        // Ribbon Tab（显式）先行注册；遗留工具栏组落入默认 Tab「主页」
+        // Explicit ribbon tabs register first; legacy toolbar groups land in the default tab
+        // "Home"
         for tab in std::mem::take(&mut registry.ribbon) {
             host.ws.add_ribbon_tab(tab);
         }
         for group in std::mem::take(&mut registry.toolbar) {
             host.ws.add_toolbar_group(group);
         }
-        // QAT 快速访问（产品静态集，ribbon-bar.md §4.1）
+        // The quick access toolbar (a static product set, ribbon-bar.md §4.1)
         host.ws.qat = std::mem::take(&mut registry.qat);
-        // Ribbon 折叠能力开关（产品经 builder 声明，ribbon-bar.md §4.5）
+        // The ribbon collapse feature switch (declared by the product through the builder,
+        // ribbon-bar.md §4.5)
         host.ws.ribbon_collapse_enabled = self.ribbon_collapse_enabled;
         for (ty, value) in registry.take_services() {
             host.insert_raw(ty, value);
         }
-        // Workbench 建议的工作模式
+        // Work modes suggested by the Workbenches
         if !registry.work_modes.is_empty() {
             host.ws
                 .set_work_modes(registry.work_modes.clone(), &registry.default_mode);
         }
-        // 产品指定的默认文档类型（多文档类型时用）
+        // The default document type the product names (when there are several types)
         if let Some(id) = self.default_doc_type.clone() {
             host.ws.default_document_type = Some(id);
         }
         for err in &registry.errors {
-            host.log.error(format!("[装配] {err}"));
+            host.log.error(format!("[Assembly] {err}"));
         }
         for note in &registry.notes {
-            host.log.info(format!("[装配] {note}"));
+            host.log.info(format!("[Assembly] {note}"));
         }
         for plugin in &registry.plugins_loaded {
-            host.log.info(format!("[插件] 已装载 {plugin}"));
+            host.log.info(format!("[Plugins] Loaded {plugin}"));
         }
         for (id, reason) in &registry.plugins_rejected {
-            host.log.error(format!("[插件] 拒绝加载 {id}：{reason}"));
+            host.log.error(format!("[Plugins] Rejected {id}: {reason}"));
         }
 
-        // 状态存储：布局 + 设置 + 自动保存（阶段 5）
+        // State store: layout + settings + autosaves (phase 5)
         let (state, layout_key) =
             crate::state::open(&self.product_id, self.layout_path.as_deref());
         let (settings, settings_err) = api::Settings::load(state.clone(), SETTINGS);
         host.settings = settings;
         if let Some(e) = settings_err {
-            host.log.warn(format!("[设置] {e}"));
+            host.log.warn(format!("[Settings] {e}"));
         }
-        // UI 主题默认值：builder 声明，用户已保存的设置优先。
+        // The UI theme default: declared by the builder, the user's saved setting wins.
         if host.settings.get("ui.theme").is_none() {
             let _ = host
                 .settings
@@ -1416,7 +1463,8 @@ impl WorkbenchAppBuilder {
         host.account = self.account;
         host.storage = self.storage;
 
-        // 插件注册镜像（诊断/管理面板用）；tier 为清单声明的 license 要求。
+        // The plugin registry mirror (for the diagnostics/management panels); tier is the
+        // license requirement the manifest declares.
         for id in &registry.plugins_loaded {
             let tier = registry
                 .plugin_tiers
@@ -1439,7 +1487,7 @@ impl WorkbenchAppBuilder {
             });
         }
 
-        // 共享异步执行器（Async 命令的运行载体）
+        // The shared async executor (what Async commands run on)
         let shutdown = Arc::new(AtomicBool::new(false));
         let executor = AsyncExecutor::new(2, shutdown.clone());
         let (io_done_tx, io_done_rx) = std::sync::mpsc::channel();
@@ -1475,12 +1523,13 @@ impl WorkbenchAppBuilder {
         };
         runtime.snapshot = runtime.make_snapshot();
 
-        // 崩溃恢复：上次会话无 clean 标记 → 恢复自动保存文档（阶段 5）。
+        // Crash recovery: the last session left no clean marker → recover the autosaved
+        // documents (phase 5).
         if AUTOSAVE {
             runtime.restore_session();
         }
 
-        // 默认文档
+        // Default document
         if self.create_default_document {
             // The product names its default type when it has more than one;
             // otherwise the only registered type is used.
@@ -1501,23 +1550,25 @@ impl WorkbenchAppBuilder {
                 let id = runtime
                     .host
                     .docs
-                    .create(&t, "未命名")
-                    .map_err(|e| format!("创建默认文档失败: {e}"))?;
+                    .create(&t, "Untitled")
+                    .map_err(|e| format!("Failed to create the default document: {e}"))?;
                 runtime.host.docs.set_active(Some(id));
             }
         }
 
-        // 启动时打开文件（文件关联入口；失败只记日志，不阻断启动）。
+        // Open a file at startup (the file-association entry point; a failure is only logged,
+        // it does not block startup).
         if let Some(path) = self.open_file_on_start.clone() {
             let mut ctx = api::CommandCtx::new(&mut runtime);
             crate::platform_cmds::open_document(&mut ctx, api::Location::local(path));
         }
 
-        // 初始视图（布局文件已存在时由适配器负责恢复布局，不再叠加初始视图）
+        // Initial views (when a layout file exists the adapter restores the layout, and no
+        // initial views are added on top)
         if runtime.state.read(&runtime.layout_key).is_none() {
             for (vt, bind) in &self.open_on_start {
                 if let Err(e) = api::AppServices::open_view(&mut runtime, vt, *bind) {
-                    runtime.host.log.warn(format!("打开初始视图 {vt} 失败: {e}"));
+                    runtime.host.log.warn(format!("Failed to open initial view {vt}: {e}"));
                 }
             }
         }
@@ -1533,7 +1584,7 @@ mod tests {
         WorkbenchAppBuilder::new("test.dialog", "Dialog test")
             .with_layout_path(std::env::temp_dir().join("workbench-rs-dialog-test/layout.json"))
             .build()
-            .expect("装配失败")
+            .expect("assembly failed")
     }
 
     fn request(
@@ -1550,7 +1601,7 @@ mod tests {
     /// action on the UI thread with the picked path. The blocking OS modal
     /// loop itself never runs on the UI thread.
     #[test]
-    fn 对话框请求_由帧节拍排水并在主线程执行动作() {
+    fn dialog_request_is_drained_by_frame_tick_and_runs_action_on_main_thread() {
         let mut app = runtime();
         let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<api::Location>>();
@@ -1560,7 +1611,7 @@ mod tests {
         })));
         app.dialog_result_rx = Some(rx);
 
-        assert!(app.frame_tick(0.0), "取到结果应报告需要重绘");
+        assert!(app.frame_tick(0.0), "taking a result should report a redraw is needed");
         assert_eq!(
             done_rx.try_recv().unwrap(),
             Some(api::Location::local("C:/tmp/part.rcad"))
@@ -1572,7 +1623,7 @@ mod tests {
     /// A cancelled dialog (user closed the picker) still runs the action with
     /// `None`, so the module can log the cancellation.
     #[test]
-    fn 对话框取消_动作收到空值() {
+    fn dialog_cancel_action_receives_none() {
         let mut app = runtime();
         let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<api::Location>>();
@@ -1589,7 +1640,7 @@ mod tests {
     /// A picker thread that dies without sending is treated as a cancellation
     /// (the action still runs, with `None`).
     #[test]
-    fn 对话框线程死亡_按取消处理() {
+    fn dialog_thread_death_is_treated_as_cancel() {
         let mut app = runtime();
         let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<api::Location>>();
@@ -1606,7 +1657,7 @@ mod tests {
     /// Only one dialog may be in flight: a second request while one is pending
     /// is ignored (and must not replace the pending request or its channel).
     #[test]
-    fn 在途对话框期间_新请求被忽略() {
+    fn new_request_is_ignored_while_dialog_in_flight() {
         let mut app = runtime();
         app.dialog_in_flight = Some(FileDialogRequest {
             extensions: vec![],
@@ -1616,11 +1667,11 @@ mod tests {
 
         app.request_dialog(request(Box::new(|_, _| {})));
 
-        let pending = app.dialog_in_flight.as_ref().expect("在途请求应保留");
-        assert!(pending.extensions.is_empty(), "在途请求被替换了");
+        let pending = app.dialog_in_flight.as_ref().expect("the in-flight request is kept");
+        assert!(pending.extensions.is_empty(), "the in-flight request was replaced");
         assert!(
             app.dialog_result_rx.is_none(),
-            "被忽略的请求不应安装结果通道"
+            "an ignored request must not install a result channel"
         );
     }
 }

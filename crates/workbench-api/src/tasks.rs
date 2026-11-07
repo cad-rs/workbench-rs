@@ -1,8 +1,9 @@
-//! 后台任务模型（design.md §10.2/§10.3/§10.4）。
+//! The background task model (design.md §10.2/§10.3/§10.4).
 //!
-//! 任务在线程池线程执行，通过事件通道回报进度；取消为协作式；
-//! 终态为 Succeeded / Failed / Cancelled。任务不得直接触碰 UI 或文档内部状态，
-//! 结果通过 [`DocCommit`]（带文档版本校验）交回宿主提交。
+//! Tasks run on thread-pool threads and report progress through an event channel; cancellation
+//! is cooperative; the terminal states are Succeeded / Failed / Cancelled. A task must not touch
+//! the UI or a document's internal state directly; its result is handed back to the host for
+//! commit through a [`DocCommit`] (with a document revision check).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,11 +24,11 @@ pub enum TaskStatus {
 impl TaskStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
-            TaskStatus::Pending => "等待中",
-            TaskStatus::Running => "运行中",
-            TaskStatus::Succeeded => "已完成",
-            TaskStatus::Failed => "失败",
-            TaskStatus::Cancelled => "已取消",
+            TaskStatus::Pending => "Pending",
+            TaskStatus::Running => "Running",
+            TaskStatus::Succeeded => "Done",
+            TaskStatus::Failed => "Failed",
+            TaskStatus::Cancelled => "Cancelled",
         }
     }
     pub fn is_terminal(&self) -> bool {
@@ -35,7 +36,8 @@ impl TaskStatus {
     }
 }
 
-/// 任务运行载体：后台独占线程，或平台共享异步执行器（阶段 2）。
+/// What a task runs on: a dedicated background thread, or the platform's shared async executor
+/// (phase 2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskKind {
     Thread,
@@ -45,28 +47,28 @@ pub enum TaskKind {
 impl TaskKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            TaskKind::Thread => "线程",
-            TaskKind::Async => "异步",
+            TaskKind::Thread => "Thread",
+            TaskKind::Async => "Async",
         }
     }
 }
 
-/// 单个任务的展示信息。
+/// Display information for one task.
 #[derive(Clone, Debug)]
 pub struct TaskInfo {
     pub id: TaskId,
     pub title: String,
     pub status: TaskStatus,
     pub kind: TaskKind,
-    /// 确定进度 0.0..=1.0；None 表示不确定进度。
+    /// Determinate progress 0.0..=1.0; None means indeterminate progress.
     pub progress: Option<f32>,
     pub stage: Option<String>,
     pub cancellable: bool,
-    /// 终态补充信息（错误说明或完成备注）。
+    /// Extra information about the terminal state (an error description or a completion note).
     pub detail: Option<String>,
 }
 
-/// 任务失败原因。
+/// Why a task failed.
 #[derive(Debug, Clone)]
 pub enum TaskFailure {
     Cancelled,
@@ -76,7 +78,7 @@ pub enum TaskFailure {
 impl TaskFailure {
     pub fn message(&self) -> String {
         match self {
-            TaskFailure::Cancelled => "任务已取消".to_string(),
+            TaskFailure::Cancelled => "Task cancelled".to_string(),
             TaskFailure::Error(e) => e.clone(),
         }
     }
@@ -88,18 +90,20 @@ impl From<String> for TaskFailure {
     }
 }
 
-/// 后台任务向宿主提交的文档变更：须通过文档版本校验后由宿主在事务边界提交。
+/// A document change a background task submits to the host: it must pass the document revision
+/// check, and the host commits it at a transaction boundary.
 pub struct DocCommit {
     pub doc_id: DocumentId,
-    /// 提交者基于的文档版本；宿主校验 `revision == expect_revision`，不匹配则拒绝。
+    /// The document revision the submitter based it on; the host checks
+    /// `revision == expect_revision` and rejects it on a mismatch.
     pub expect_revision: u64,
     pub label: String,
-    /// 该变更是否可撤销（写入撤销历史）。
+    /// Whether the change can be undone (is written to the undo history).
     pub undoable: bool,
     pub content: Box<dyn DocumentContent>,
 }
 
-/// 任务终态载荷。
+/// The payload of a task's terminal state.
 pub enum TaskOutcome {
     Succeeded {
         note: Option<String>,
@@ -111,7 +115,7 @@ pub enum TaskOutcome {
     Cancelled,
 }
 
-/// 任务事件（任务线程 → UI 线程）。
+/// A task event (task thread → UI thread).
 pub enum TaskEvent {
     Progress {
         id: TaskId,
@@ -128,7 +132,7 @@ pub enum TaskEvent {
     },
 }
 
-/// 任务线程内的进度/取消句柄（可克隆）。
+/// The progress/cancellation handle inside a task thread (cloneable).
 #[derive(Clone)]
 pub struct ProgressHandle {
     id: TaskId,
@@ -156,7 +160,8 @@ impl ProgressHandle {
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
-    /// 协作式取消检查点：已取消时返回 Err，任务应尽快退出。
+    /// Cooperative cancellation checkpoint: returns Err once cancelled, and the task should exit
+    /// as soon as possible.
     pub fn check_cancelled(&self) -> Result<(), TaskFailure> {
         if self.is_cancelled() {
             Err(TaskFailure::Cancelled)
@@ -166,7 +171,7 @@ impl ProgressHandle {
     }
 }
 
-/// 任务执行上下文（任务线程持有）。
+/// The task execution context (held by the task thread).
 pub struct TaskCtx {
     handle: ProgressHandle,
     input: Box<dyn std::any::Any + Send>,
@@ -176,11 +181,13 @@ impl TaskCtx {
     pub fn new(handle: ProgressHandle, input: Box<dyn std::any::Any + Send>) -> Self {
         Self { handle, input }
     }
-    /// 进度/取消句柄克隆（供脚本绑定包装，如 Rhai 插件的 task 对象）。
+    /// A clone of the progress/cancellation handle (for script bindings to wrap, such as the
+    /// task object of Rhai plugins).
     pub fn progress_handle(&self) -> ProgressHandle {
         self.handle.clone()
     }
-    /// 取命令在 UI 线程预先收集的输入数据（由任务定义者约定类型）。
+    /// The input data the command collected beforehand on the UI thread (its type is agreed by
+    /// whoever defines the task).
     pub fn input<T: 'static>(&self) -> Option<&T> {
         self.input.downcast_ref::<T>()
     }
@@ -204,10 +211,10 @@ impl TaskCtx {
     }
 }
 
-/// 后台任务体：在任务线程执行，返回可选的文档提交。
+/// A background task body: runs on the task thread and returns an optional document commit.
 pub type TaskJob = Box<dyn FnOnce(&mut TaskCtx) -> Result<Option<DocCommit>, TaskFailure> + Send>;
 
-/// Background 命令在 UI 线程收集输入后产生的任务规格。
+/// The task spec a Background command produces after collecting its input on the UI thread.
 pub struct TaskSpec {
     pub title: String,
     pub cancellable: bool,
@@ -215,7 +222,8 @@ pub struct TaskSpec {
     pub job: TaskJob,
 }
 
-/// 任务管理器：UI 线程所有。事件经通道由宿主 `frame_tick` 泵出。
+/// The task manager: owned by the UI thread. Events are pumped out of the channel by the host's
+/// `frame_tick`.
 pub struct TaskManager {
     next_id: u64,
     tx: mpsc::Sender<TaskEvent>,
@@ -223,7 +231,8 @@ pub struct TaskManager {
     cancel_flags: BTreeMap<u64, Arc<AtomicBool>>,
 }
 
-/// 任务会话：核心创建任务后持有的句柄（ID + 进度/取消句柄）。
+/// A task session: the handle the core holds after creating a task (ID + progress/cancellation
+/// handle).
 pub struct TaskSession {
     pub id: TaskId,
     pub handle: ProgressHandle,
@@ -239,8 +248,8 @@ impl TaskManager {
         }
     }
 
-    /// 登记一个新任务（Running）并返回会话；任务体由调用方驱动
-    /// （后台线程或异步执行器），完成后须发送 `TaskEvent::Finished`。
+    /// Register a new task (Running) and return its session; the caller drives the task body (a
+    /// background thread or the async executor) and must send `TaskEvent::Finished` when done.
     pub fn begin(&mut self, title: &str, cancellable: bool, kind: TaskKind) -> TaskSession {
         let id = TaskId(self.next_id);
         self.next_id += 1;
@@ -269,7 +278,8 @@ impl TaskManager {
         }
     }
 
-    /// 任务事件通道发送端（供执行器在任务完成时发送终态事件）。
+    /// The sender of the task event channel (for the executor to send the terminal event when a
+    /// task finishes).
     pub fn event_sender(&self) -> mpsc::Sender<TaskEvent> {
         self.tx.clone()
     }
@@ -277,12 +287,15 @@ impl TaskManager {
     pub fn spawn(&mut self, spec: TaskSpec) -> TaskId {
         #[cfg(target_arch = "wasm32")]
         {
-            // Web 构建：无线程支持，后台任务直接以失败终态返回（可用 Async 命令替代）。
+            // Web build: no thread support, so a background task ends straight away as failed
+            // (use an Async command instead).
             let session = self.begin(&spec.title, spec.cancellable, TaskKind::Thread);
             let _ = self.tx.send(TaskEvent::Finished {
                 id: session.id,
                 outcome: TaskOutcome::Failed {
-                    error: "Web 构建不支持后台线程任务（请改用异步命令）".to_string(),
+                    error: "The web build does not support background thread tasks \
+                            (use an async command instead)"
+                        .to_string(),
                 },
             });
             return session.id;
@@ -308,19 +321,20 @@ impl TaskManager {
                     });
                 })
                 .map(|_| ())
-                .map_err(|e| format!("任务线程创建失败: {e}"))
+                .map_err(|e| format!("Failed to create the task thread: {e}"))
                 .ok();
             session.id
         }
     }
 
-    /// 请求协作式取消。
+    /// Request cooperative cancellation.
     pub fn request_cancel(&mut self, id: TaskId) {
         if let Some(flag) = self.cancel_flags.get(&id.0) {
             flag.store(true, Ordering::Relaxed);
             if let Some(info) = self.tasks.get_mut(&id.0) {
                 if !info.status.is_terminal() {
-                    info.stage = Some("等待任务响应取消…".to_string());
+                    info.stage =
+                        Some("Waiting for the task to respond to cancellation…".to_string());
                 }
             }
         }
@@ -334,7 +348,8 @@ impl TaskManager {
         self.tasks.values()
     }
 
-    /// 应用一个来自事件通道的事件，更新任务状态（借用；事件本身由宿主继续处理）。
+    /// Apply an event from the event channel to update the task state (borrowed; the host keeps
+    /// handling the event itself).
     pub fn apply_event(&mut self, ev: &TaskEvent) {
         match ev {
             TaskEvent::Progress { id, progress, stage } => {
@@ -363,7 +378,7 @@ impl TaskManager {
                         }
                         TaskOutcome::Cancelled => {
                             info.status = TaskStatus::Cancelled;
-                            info.detail = Some("用户取消了任务".to_string());
+                            info.detail = Some("The user cancelled the task".to_string());
                         }
                     }
                 }
@@ -371,7 +386,7 @@ impl TaskManager {
         }
     }
 
-    /// 状态栏摘要：运行中任务数与最近一个任务。
+    /// Status bar summary: the number of running tasks and the most recent task.
     pub fn summary(&self) -> (usize, Option<&TaskInfo>) {
         let running = self
             .tasks
@@ -382,10 +397,11 @@ impl TaskManager {
     }
 }
 
-/// 事件接收端（供核心在 UI 线程泵出）。包一层 Mutex 以便 ServiceHost 保持 Send。
+/// The event receiver (for the core to pump on the UI thread). Wrapped in a Mutex so ServiceHost
+/// stays Send.
 pub type TaskEventRx = Arc<Mutex<mpsc::Receiver<TaskEvent>>>;
 
-/// 创建任务事件通道。
+/// Create the task event channel.
 pub fn task_channel() -> (mpsc::Sender<TaskEvent>, TaskEventRx) {
     let (tx, rx) = mpsc::channel();
     (tx, Arc::new(Mutex::new(rx)))

@@ -1,13 +1,15 @@
-//! workbench-render 渲染核心测试（headless——无窗口跑 GPU 管线；无可用
-//! 适配器的环境静默跳过）。渲染核心的设备由宿主递入（生产契约）：测试
-//! 自建本地设备，`render_readback` 回读位图断言像素。
+//! workbench-render render core tests (headless: the GPU pipelines run without a window;
+//! environments with no usable adapter skip silently). The host passes in the render core's
+//! device (the production contract): the tests build a local device and assert on the pixels of
+//! the bitmap `render_readback` reads back.
 
 use workbench_render::{
     CamOffset, LineVertexGpu, OrthoCamera, RenderScene, RenderVertex, Renderer,
     cam_offset_for_test, reset_cam_offset,
 };
 
-/// 自建本地 headless 设备 + 渲染器（等价生产壳递共享设备的契约）。
+/// Builds a local headless device + renderer (equivalent to the production contract where the
+/// shell passes in the shared device).
 fn headless_renderer() -> Option<Renderer> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -31,7 +33,7 @@ fn headless_renderer() -> Option<Renderer> {
 }
 
 fn cam() -> OrthoCamera {
-    // 俯视（相机在 +z 上方）：正对 x-y 平面的被测几何。
+    // Top-down (camera above, on +z): facing the geometry under test in the x-y plane.
     OrthoCamera {
         yaw_deg: 0.0,
         pitch_deg: 90.0,
@@ -40,11 +42,12 @@ fn cam() -> OrthoCamera {
     }
 }
 
-/// 红色三角形占满视口中心：中心像素红色、角落背景色；尺寸/padding 去除。
+/// A red triangle fills the viewport center: the center pixel is red, the corners background;
+/// size checked, padding removed.
 #[test]
 fn renders_triangle_headless() {
     let Some(mut r) = headless_renderer() else {
-        eprintln!("skip: 无可用 wgpu 适配器");
+        eprintln!("skip: no usable wgpu adapter");
         return;
     };
     let red = [1.0, 0.0, 0.0, 1.0];
@@ -54,7 +57,7 @@ fn renders_triangle_headless() {
         color: red,
     };
     let scene = RenderScene {
-        // 中等三角形（NDC ±0.42）：中心在内、四角在外。
+        // Medium triangle (NDC ±0.42): the center inside, the four corners outside.
         tris: vec![v(-0.5, -0.5), v(0.5, -0.5), v(0.0, 0.5)],
         tris_alpha: vec![],
         sort_alpha: false,
@@ -67,19 +70,21 @@ fn renders_triangle_headless() {
     let (w, h) = (64u32, 64u32);
     let bytes = r.render_readback(&scene, w, h).expect("render");
     assert_eq!(bytes.len(), (w * h * 4) as usize, "no row padding");
-    // readback 是 BGRA（纹理 Bgra8Unorm，与 gpui RenderImage 对齐）。
+    // readback is BGRA (texture Bgra8Unorm, matching gpui's RenderImage).
     let px = |x: u32, y: u32| {
         let i = ((y * w + x) * 4) as usize;
         (bytes[i + 2], bytes[i + 1], bytes[i]) // (R, G, B)
     };
     let (r_, g, b) = px(32, 32);
-    // 头灯明暗：法线正对相机 → shade ≈ 1.0，红色近满。
+    // Headlight shading: the normal faces the camera → shade ≈ 1.0, red nearly full.
     assert!(r_ > 150, "center red, got {r_} {g} {b}");
     assert!(g < 60 && b < 60, "center not green/blue");
-    // 角落在三角形外（顶点 (0,2) 只到屏幕上缘中部）→ 背景。
+    // The corner is outside the triangle (vertex (0,2) only reaches the middle of the top edge) →
+    // background.
     let (br, bg, bb) = px(2, 2);
     assert!(br < 30 && bg < 30 && bb < 30, "corner bg, got {br} {bg} {bb}");
-    // MSAA 4x：斜边必有半覆盖像素（红与背景的混合）——抗锯齿生效。
+    // MSAA 4x: the slanted edges must have partly covered pixels (red blended with the
+    // background), so anti-aliasing is in effect.
     let mixed = (0..(w * h) as usize)
         .filter(|&i| {
             let r = bytes[i * 4 + 2];
@@ -89,13 +94,14 @@ fn renders_triangle_headless() {
     assert!(mixed > 0, "MSAA blends edge pixels, got {mixed} mixed");
 }
 
-/// 线段管线：pitch=90 俯视下 x 轴线段 → 屏幕竖线（right=+y → x_screen 恒
-/// 中列；线长 ±1.5 超出半高 1.2 → 贯穿全屏）——列 32 各行绿、列 2 无绿。
-/// 1.5px 展开四边形跨列 31/32 各 75% 覆盖（MSAA 解析后 g≈191）。
+/// Line pipeline: under the pitch=90 top-down view an x-axis segment → a vertical screen line
+/// (right=+y → x_screen stays on the middle column; the line length ±1.5 exceeds the half-height
+/// 1.2 → it spans the whole screen): column 32 is green on every row, column 2 has no green.
+/// The 1.5px expanded quad covers columns 31/32 at 75% each (g≈191 after the MSAA resolve).
 #[test]
 fn renders_line_headless() {
     let Some(mut r) = headless_renderer() else {
-        eprintln!("skip: 无可用 wgpu 适配器");
+        eprintln!("skip: no usable wgpu adapter");
         return;
     };
     let lv = |x: f32| LineVertexGpu {
@@ -114,25 +120,26 @@ fn renders_line_headless() {
     };
     let (w, h) = (64u32, 64u32);
     let bytes = r.render_readback(&scene, w, h).expect("render");
-    // 列 c 的绿像素数（竖线判定）。
+    // Number of green pixels in column c (the vertical line check).
     let green_in_column = |c: usize| -> usize {
         (0..h as usize)
             .filter(|&y| bytes[(y * w as usize + c) * 4 + 1] > 100)
             .count()
     };
-    // 竖线在视口正中（NDC x=0 恰在像素 31/32 边界，1.5px 宽跨两列各
-    // 75%）；旁列零。
+    // The vertical line is at the viewport center (NDC x=0 falls exactly on the pixel 31/32
+    // boundary, so 1.5px wide spans both columns at 75% each); the side columns are zero.
     let n_mid = green_in_column(31) + green_in_column(32);
     assert!(n_mid > 30, "center column has the line, got {n_mid}");
     assert_eq!(green_in_column(2), 0, "side column stays background");
 }
 
-/// 屏幕空间线宽：8px 线段四边形在 64px 与 128px 视口下均保持 8 列物理
-/// 厚度（px 语义而非 NDC 拉伸——分辨率加倍厚度不变）。
+/// Screen-space line width: an 8px line quad keeps a physical thickness of 8 columns in both the
+/// 64px and the 128px viewport (px semantics rather than NDC stretching: doubling the resolution
+/// leaves the thickness unchanged).
 #[test]
 fn line_screen_space_width_headless() {
     let Some(mut r) = headless_renderer() else {
-        eprintln!("skip: 无可用 wgpu 适配器");
+        eprintln!("skip: no usable wgpu adapter");
         return;
     };
     let scene = |width: f32| RenderScene {
@@ -148,7 +155,7 @@ fn line_screen_space_width_headless() {
         bg: [0.0, 0.0, 0.0, 1.0],
         line_width_px: width,
     };
-    // 64px：NDC x=0 在像素 31/32 边界，8px 宽 → 列 28..35 覆盖。
+    // 64px: NDC x=0 is on the pixel 31/32 boundary, 8px wide → columns 28..35 covered.
     let bytes = r.render_readback(&scene(8.0), 64, 64).expect("render 64");
     let col64 = |bytes: &[u8], x: usize| {
         (0..64usize)
@@ -159,7 +166,7 @@ fn line_screen_space_width_headless() {
         assert!(col64(&bytes, c) > 50, "64px: col {c} inside thick line");
     }
     assert_eq!(col64(&bytes, 24), 0, "64px: outside band background");
-    // 128px：中心在 63/64 边界，仍 8 物理像素 → 列 60..67。
+    // 128px: the center is on the 63/64 boundary, still 8 physical pixels → columns 60..67.
     let bytes = r.render_readback(&scene(8.0), 128, 128).expect("render 128");
     let col128 = |x: usize| {
         (0..128usize)
@@ -172,16 +179,17 @@ fn line_screen_space_width_headless() {
     assert_eq!(col128(50), 0, "128px: outside band background");
 }
 
-/// 线段深度正确性：四边形角点深度按段参数线性插值——不透明墙遮挡墙后
-/// 部分；斜穿深度分界的线段「墙后隐、墙前显」（角点插值错则分界错位）。
+/// Line depth correctness: quad corner depths are interpolated linearly by the segment parameter.
+/// An opaque wall hides what is behind it; a line slanting across the depth boundary is "hidden
+/// behind the wall, shown in front of it" (wrong corner interpolation misplaces the boundary).
 #[test]
 fn line_depth_occlusion_headless() {
     let Some(mut r) = headless_renderer() else {
-        eprintln!("skip: 无可用 wgpu 适配器");
+        eprintln!("skip: no usable wgpu adapter");
         return;
     };
-    // 「前」视（yaw 0 pitch 0）：视线沿 -x，屏幕右 = +y，深度 = 世界 x
-    // （越大越近相机）。
+    // "Front" view (yaw 0 pitch 0): looking along -x, screen right = +y, depth = world x
+    // (larger is closer to the camera).
     let cam = OrthoCamera {
         yaw_deg: 0.0,
         pitch_deg: 0.0,
@@ -193,7 +201,7 @@ fn line_depth_occlusion_headless() {
         normal: [1.0, 0.0, 0.0],
         color: [1.0, 0.0, 0.0, 1.0],
     };
-    // 覆盖全视口的红墙（±3 覆盖 NDC ±1.2），位于给定深度 x。
+    // A red wall covering the whole viewport (±3 covers NDC ±1.2), at the given depth x.
     let wall = |x: f32| vec![rv(x, -3.0, -3.0), rv(x, 3.0, -3.0), rv(x, 0.0, 3.0)];
     let lv = |x: f32, y: f32| LineVertexGpu {
         pos: [x, y, 0.0],
@@ -204,7 +212,8 @@ fn line_depth_occlusion_headless() {
             .filter(|&i| bytes[i * 4 + 1] > 100)
             .count()
     };
-    // 场景 A：线整体在墙后（x=-0.5 恒 < 0）→ 全帧无绿。
+    // Scene A: the line is entirely behind the wall (x=-0.5, always < 0) → no green in the whole
+    // frame.
     let behind = RenderScene {
         tris_alpha: vec![],
         sort_alpha: false,
@@ -217,9 +226,11 @@ fn line_depth_occlusion_headless() {
     };
     let bytes = r.render_readback(&behind, 64, 64).expect("render behind");
     assert_eq!(greens(&bytes), 0, "line fully behind the wall is occluded");
-    // 场景 B：线斜穿深度（t=0 端 x=-1 在墙后、t=1 端 x=+1 在墙前），
-    // 墙 x=0.3 → 深度分界在段参数 0.65（列 ≈44）；其右可见、其左被墙
-    // 挡住。若角点深度未按 t 插值（整段取端点深度），分界会错到全隐。
+    // Scene B: the line slants through depth (the t=0 end at x=-1 behind the wall, the t=1 end at
+    // x=+1 in front), wall at x=0.3 → the depth boundary is at segment parameter 0.65 (column
+    // ≈44); right of it is visible, left of it hidden by the wall. If the corner depths weren't
+    // interpolated by t (the whole segment taking an endpoint's depth), the boundary would slip
+    // to fully hidden.
     let crossing = RenderScene {
         tris_alpha: vec![],
         sort_alpha: false,
@@ -238,11 +249,12 @@ fn line_depth_occlusion_headless() {
     };
     assert_eq!(col(10), 0, "behind-wall part occluded");
     assert!(col(52) > 0, "in-front part visible through wall zone");
-    // 墙未覆盖的右缘（列 61+，NDC x > 0.833）线也可见。
+    // The line is also visible at the right edge, which the wall doesn't cover (column 61+,
+    // NDC x > 0.833).
     assert!(col(62) > 0, "beyond wall edge visible");
 }
 
-/// 交互相机偏移：轨道累加（度/像素）、缩放乘子 clamp、重置。
+/// Interactive camera offset: orbit accumulation (degrees/pixel), zoom multiplier clamp, reset.
 #[test]
 fn cam_offset_semantics() {
     let mut c = CamOffset::default();
@@ -257,10 +269,10 @@ fn cam_offset_semantics() {
     c.zoom_by(8.0);
     c.zoom_by(8.0); // 0.15 × 64 = 9.6 → clamp 6.0
     assert!((c.zoom - 6.0).abs() < 1e-12, "zoom ceiling");
-    // 重置语义（视角预设按钮）。
+    // Reset semantics (the view preset buttons).
     reset_cam_offset();
     assert_eq!(cam_offset_for_test(), CamOffset::default());
-    // 平移累计与 clamp（±4000px 防迷失）。
+    // Pan accumulation and clamp (±4000px so the view is never lost).
     let mut c = CamOffset::default();
     c.pan_by(100.0, -200.0);
     assert_eq!(c.pan, [100.0, -200.0]);
@@ -268,22 +280,24 @@ fn cam_offset_semantics() {
     assert_eq!(c.pan, [4000.0, -4000.0], "pan clamps");
 }
 
-/// 适配器诊断信息可取得（无 GPU 环境为 None，不 panic）。
+/// Adapter diagnostics are available (None without a GPU, no panic).
 #[test]
 fn adapter_info_does_not_panic() {
     let _ = workbench_render::adapter_info();
 }
 
-/// 透明桶质心排序（round-206 P1，`sort_alpha` 声明式开关）：①开关关 =
-/// P0 语义——数组序 = 混合序，近面先声明时被远面主导（组内 artifact
-/// 实测编码：中心 b=128 ≈ 近绿 g=64 两倍，theory (64,64,128)）；②开关
-/// 开 = 质心 far-to-near 重排，近面后画主导（(63,128,64)）；③声明序互
-/// 换后逐字节一致——排序消灭声明序语义（凸双三角排序正确性强断言）。
-/// 前视（yaw 0 pitch 0）：深度 = 世界 x，越大越近相机。
+/// Transparent-bucket centroid sort (round-206 P1, the declarative `sort_alpha` switch): ① switch
+/// off = P0 semantics, array order = blend order, so a near face declared first is dominated by
+/// the far face (encoding the measured in-group artifact: center b=128 ≈ twice the near green
+/// g=64, theory (64,64,128)); ② switch on = centroid far-to-near reorder, the near face drawn
+/// later dominates ((63,128,64)); ③ swapping the declaration order gives byte-identical output:
+/// sorting removes declaration-order semantics (a strong correctness assertion for sorting two
+/// convex triangles).
+/// Front view (yaw 0 pitch 0): depth = world x, larger is closer to the camera.
 #[test]
 fn alpha_centroid_sort_headless() {
     let Some(mut r) = headless_renderer() else {
-        eprintln!("skip: 无可用 wgpu 适配器");
+        eprintln!("skip: no usable wgpu adapter");
         return;
     };
     let cam = OrthoCamera {
@@ -308,8 +322,8 @@ fn alpha_centroid_sort_headless() {
         let i = ((32 * 64 + 32) * 4) as usize;
         (bytes[i + 2], bytes[i + 1], bytes[i])
     };
-    // 近绿（x=0.5）先声明、远蓝（x=0.25）后声明 vs 互换。红墙 x=0 在两
-    // 支透明面之后（只读深不剔除墙前混合）。
+    // Near green (x=0.5) declared first, far blue (x=0.25) second, vs swapped. The red wall at x=0
+    // is behind both transparent faces (read-only depth doesn't cull the blending in front of it).
     let near_first = [tq(0.5, GREEN05), tq(0.25, BLUE05)].concat();
     let far_first = [tq(0.25, BLUE05), tq(0.5, GREEN05)].concat();
     let base = |tris_alpha: Vec<RenderVertex>, sort_alpha: bool| RenderScene {
@@ -322,7 +336,7 @@ fn alpha_centroid_sort_headless() {
         bg: [0.0, 0.0, 0.0, 1.0],
         line_width_px: 1.0,
     };
-    // ① 开关关：远蓝主导（P0 组内 artifact 的框架级语义编码）。
+    // ① Switch off: far blue dominates (the framework-level encoding of the P0 in-group artifact).
     let bytes_a = r
         .render_readback(&base(near_first.clone(), false), 64, 64)
         .expect("render off");
@@ -331,7 +345,8 @@ fn alpha_centroid_sort_headless() {
         ab > 100 && ab > ag,
         "off: later-declared far blue dominates: {ar} {ag} {ab}"
     );
-    // ② 开关开（同一声明序）：重排后近绿后画主导。
+    // ② Switch on (same declaration order): after the reorder, near green is drawn later and
+    // dominates.
     let bytes_b = r
         .render_readback(&base(near_first.clone(), true), 64, 64)
         .expect("render on");
@@ -340,16 +355,16 @@ fn alpha_centroid_sort_headless() {
         bg > 100 && bg > bb,
         "on: near green dominates after sort: {br} {bg} {bb}"
     );
-    // ③ 声明序互换 + 排序开：输出逐字节一致（最终顶点序相同）。
+    // ③ Swapped declaration order + sort on: byte-identical output (the same final vertex order).
     let bytes_c = r
         .render_readback(&base(far_first, true), 64, 64)
         .expect("render on swapped");
     assert_eq!(bytes_b, bytes_c, "sorted output independent of declaration order");
 }
 
-/// 质心排序纯逻辑（无 GPU，无适配器环境也跑）：距离降序重排、等距
-/// stable（保声明序）、开关关/单三角返回 None。「前」视相机眼点在
-/// center + (3r, 0, 0)。
+/// Pure logic of the centroid sort (no GPU; runs without an adapter too): reorders by descending
+/// distance, stable for equal distances (keeps declaration order), returns None with the switch
+/// off / for a single triangle. The "front" view camera's eye is at center + (3r, 0, 0).
 #[test]
 fn alpha_centroid_sort_helper_pure() {
     let v = |x: f32, tag: f32| RenderVertex {
@@ -365,11 +380,12 @@ fn alpha_centroid_sort_helper_pure() {
     };
     let mut scene = RenderScene {
         tris: vec![],
-        // 质心 x = 1 / 3 / 2 → 眼点 (3,0,0)，距离升序 = x 降序 → 远的先画。
+        // Centroids x = 1 / 3 / 2 → eye at (3,0,0), ascending distance = descending x → farthest
+        // drawn first.
         tris_alpha: vec![
-            v(1.0, 0.1), v(1.0, 0.1), v(1.0, 0.1), // t0: 最远
-            v(3.0, 0.3), v(3.0, 0.3), v(3.0, 0.3), // t1: 最近
-            v(2.0, 0.2), v(2.0, 0.2), v(2.0, 0.2), // t2: 中间
+            v(1.0, 0.1), v(1.0, 0.1), v(1.0, 0.1), // t0: farthest
+            v(3.0, 0.3), v(3.0, 0.3), v(3.0, 0.3), // t1: nearest
+            v(2.0, 0.2), v(2.0, 0.2), v(2.0, 0.2), // t2: middle
         ],
         sort_alpha: true,
         volume: None,
@@ -382,14 +398,15 @@ fn alpha_centroid_sort_helper_pure() {
     assert_eq!(sorted[0].pos[0], 1.0, "farthest first");
     assert_eq!(sorted[3].pos[0], 2.0, "middle second");
     assert_eq!(sorted[6].pos[0], 3.0, "nearest last");
-    // 等距 stable：同 x 全组 → 声明序保持（tag 0.1..0.6 原序）。
+    // Stable for equal distances: the whole group at the same x → declaration order kept (tags
+    // 0.1..0.6 in their original order).
     scene.tris_alpha = (0..6).map(|k| v(1.0, 0.1 + k as f32 * 0.1)).collect();
     let sorted = scene.alpha_sorted().unwrap();
     for (k, vtx) in sorted.iter().enumerate() {
         let expect = 0.1 + k as f32 * 0.1;
         assert!((vtx.color[0] - expect).abs() < 1e-6, "stable order at {k}");
     }
-    // 开关关 → None；单三角 → None（无可排序的顺序问题）。
+    // Switch off → None; a single triangle → None (nothing to order).
     scene.sort_alpha = false;
     assert!(scene.alpha_sorted().is_none());
     scene.sort_alpha = true;
@@ -398,14 +415,15 @@ fn alpha_centroid_sort_helper_pure() {
 }
 
 
-/// 透明桶（round-205 P0）：ALPHA_BLENDING + depth write OFF——①墙前透
-/// 明面正常混合（0.5 绿 over 红墙 → r≈g）；②墙后透明面被只读深剔除
-/// （像素保持墙色）；③同屏两支透明面按声明序混合（后声明者主导重叠
-/// 区）。前视（yaw 0 pitch 0）：深度 = 世界 x，越大越近相机。
+/// Transparent bucket (round-205 P0): ALPHA_BLENDING + depth write OFF. ① A transparent face in
+/// front of the wall blends normally (0.5 green over the red wall → r≈g); ② a transparent face
+/// behind the wall is culled by read-only depth (the pixel keeps the wall color); ③ two
+/// transparent faces on screen blend in declaration order (the later-declared one dominates the
+/// overlap). Front view (yaw 0 pitch 0): depth = world x, larger is closer to the camera.
 #[test]
 fn transparent_tris_blend_order_and_depth() {
     let Some(mut r) = headless_renderer() else {
-        eprintln!("skip: 无可用 wgpu 适配器");
+        eprintln!("skip: no usable wgpu adapter");
         return;
     };
     let cam = OrthoCamera {
@@ -422,17 +440,18 @@ fn transparent_tris_blend_order_and_depth() {
         normal: [1.0, 0.0, 0.0],
         color: c,
     };
-    // 红墙覆盖全视口（±3 覆盖 NDC ±1.2）；透明面覆盖视口中心区。
+    // The red wall covers the whole viewport (±3 covers NDC ±1.2); the transparent faces cover the
+    // viewport center.
     let wall = |x: f32| vec![rv(x, -3.0, -3.0, RED), rv(x, 3.0, -3.0, RED), rv(x, 0.0, 3.0, RED)];
     let tq = |x: f32, c: [f32; 4]| {
         vec![rv(x, -0.5, -0.5, c), rv(x, 0.5, -0.5, c), rv(x, 0.0, 0.5, c)]
     };
-    // BGRA 中心像素 → (r, g, b)。
+    // BGRA center pixel → (r, g, b).
     let px = |bytes: &[u8]| {
         let i = ((32 * 64 + 32) * 4) as usize;
         (bytes[i + 2], bytes[i + 1], bytes[i])
     };
-    // ① 墙 x=0 + 墙前 x=0.5 绿 0.5 → 中心 = 0.5 绿 + 0.5 红 = (127,127,0)。
+    // ① Wall at x=0 + green 0.5 in front at x=0.5 → center = 0.5 green + 0.5 red = (127,127,0).
     let s1 = RenderScene {
         tris: wall(0.0),
         tris_alpha: tq(0.5, GREEN05),
@@ -449,7 +468,8 @@ fn transparent_tris_blend_order_and_depth() {
         (pr as i32 - 127).abs() <= 25 && (pg as i32 - 127).abs() <= 25 && pb < 40,
         "0.5 green over red wall: {pr} {pg} {pb}"
     );
-    // ② 墙 x=0 + 墙后 x=-0.5 蓝 0.5 → 只读深剔除，中心保持墙红。
+    // ② Wall at x=0 + blue 0.5 behind at x=-0.5 → culled by read-only depth, the center stays
+    // wall red.
     let s2 = RenderScene {
         tris: wall(0.0),
         tris_alpha: tq(-0.5, BLUE05),
@@ -463,9 +483,9 @@ fn transparent_tris_blend_order_and_depth() {
     let bytes = r.render_readback(&s2, 64, 64).expect("render behind");
     let (pr, pg, pb) = px(&bytes);
     assert!(pr > 200 && pg < 40 && pb < 40, "behind-wall culled: {pr} {pg} {pb}");
-    // ③ 声明序：绿 0.5（x=0.5）先、蓝 0.5（x=0.25）后 → 中心 =
-    // 0.5 蓝 + 0.5(0.5 绿 + 0.5 红) = (63,63,127)，蓝主导（深度写关，
-    // 混合序 = 数组序；两支都在墙前，均通过只读深）。
+    // ③ Declaration order: green 0.5 (x=0.5) first, blue 0.5 (x=0.25) second → center =
+    // 0.5 blue + 0.5(0.5 green + 0.5 red) = (63,63,127), blue dominates (depth writes off,
+    // blend order = array order; both are in front of the wall and pass read-only depth).
     let s3 = RenderScene {
         tris: wall(0.0),
         tris_alpha: [tq(0.5, GREEN05), tq(0.25, BLUE05)].concat(),
@@ -484,9 +504,9 @@ fn transparent_tris_blend_order_and_depth() {
     );
 }
 
-// ---- 体渲染（round-211 P2 MVP，诉求书 §8 断言 ①②③） ----
+// ---- Volume rendering (round-211 P2 MVP, ask doc §8 assertions ①②③) ----
 
-/// 均匀体 VolumeSlice 构造（dims 8³，LUT 可配）。
+/// Builds a uniform VolumeSlice (dims 8³, configurable LUT).
 fn uniform_volume(value: f32, lut: Vec<[u8; 4]>) -> workbench_render::VolumeSlice {
     workbench_render::VolumeSlice {
         data: std::sync::Arc::from(vec![value; 8 * 8 * 8]),
@@ -499,16 +519,17 @@ fn uniform_volume(value: f32, lut: Vec<[u8; 4]>) -> workbench_render::VolumeSlic
     }
 }
 
-/// 中心射线积分（诉求书 §8 ①）：均匀体 0.5 加常数不透明度 LUT（8/255）
-/// 与 64 步，中心像素解析值 acc_a = 1-(1-8/255)^64 ≈ 0.8696；premult
-/// 输出 over 黑底 ≈ LUT 色 × acc_a（±2/255），四角射线不穿 AABB 保持背景。
+/// Center ray integration (ask doc §8 ①): a uniform 0.5 volume with a constant-opacity LUT
+/// (8/255) and 64 steps; the center pixel's analytic value is acc_a = 1-(1-8/255)^64 ≈ 0.8696;
+/// the premultiplied output over black ≈ LUT color × acc_a (±2/255), and the corner rays miss the
+/// AABB and keep the background.
 #[test]
 fn volume_center_ray_integration_headless() {
     let Some(mut r) = headless_renderer() else {
-        eprintln!("skip: 无可用 wgpu 适配器");
+        eprintln!("skip: no usable wgpu adapter");
         return;
     };
-    // LUT 全档绿色 a=8/255（常数不透明度 MVP）。
+    // LUT: green at every level, a=8/255 (constant-opacity MVP).
     let lut = vec![[0u8, 255u8, 0u8, 8u8]; 256];
     let scene = RenderScene {
         tris: vec![],
@@ -525,7 +546,7 @@ fn volume_center_ray_integration_headless() {
         let i = ((y * 64 + x) * 4) as usize;
         (bytes[i + 2], bytes[i + 1], bytes[i])
     };
-    // 解析：a = 8/255，acc_a = 1-(1-a)^64，out.g = 255·acc_a（黑底）。
+    // Analytic: a = 8/255, acc_a = 1-(1-a)^64, out.g = 255·acc_a (over black).
     let a = 8.0f32 / 255.0;
     let acc_a = 1.0 - (1.0 - a).powi(64);
     let expect_g = (255.0 * acc_a).round() as i32;
@@ -534,23 +555,25 @@ fn volume_center_ray_integration_headless() {
         (cg as i32 - expect_g).abs() <= 2 && cr <= 2 && cb <= 2,
         "center ray integral: got ({cr},{cg},{cb}) expect (0,{expect_g},0)"
     );
-    // 四角射线不穿 AABB → 背景。
+    // The corner rays miss the AABB → background.
     let (br, bg_, bb) = px(2, 2);
     assert!(br < 4 && bg_ < 4 && bb < 4, "corner stays bg: ({br},{bg_},{bb})");
 }
 
-/// 撞不透明墙截断（诉求书 §8 ②，归一化步长语义）：steps 均分
-/// [t_entry, t_wall]（§4.2）——截断不减少步数而是把采样集中到墙前段。
-/// 用「前半 0 / 后半 1」场 + 双色 LUT（0 → 绿、1 → 蓝）：截断时采样全
-/// 落前半绿区（b≈0）；不截断则后半蓝区混入（b 显著）。红墙透底
-/// （r = (1-acc_a)·255）。
+/// Cutoff at an opaque wall (ask doc §8 ②, normalized step semantics): the steps divide
+/// [t_entry, t_wall] evenly (§4.2), so the cutoff doesn't reduce the step count but concentrates
+/// the samples in front of the wall. With a "front half 0 / back half 1" field + a two-color LUT
+/// (0 → green, 1 → blue): with the cutoff every sample lands in the front green half (b≈0);
+/// without it the back blue half mixes in (significant b). The red wall shows through
+/// (r = (1-acc_a)·255).
 #[test]
 fn volume_wall_truncation_headless() {
     let Some(mut r) = headless_renderer() else {
-        eprintln!("skip: 无可用 wgpu 适配器");
+        eprintln!("skip: no usable wgpu adapter");
         return;
     };
-    // LUT[0] = 绿 a=8；LUT[255] = 蓝 a=8；中间档透明黑（界面带不产雾）。
+    // LUT[0] = green a=8; LUT[255] = blue a=8; the levels in between are transparent black (the
+    // interface band produces no fog).
     let mut lut = vec![[0u8, 0u8, 0u8, 0u8]; 256];
     lut[0] = [0u8, 255u8, 0u8, 8u8];
     lut[255] = [0u8, 0u8, 255u8, 8u8];
@@ -559,15 +582,17 @@ fn volume_wall_truncation_headless() {
         normal: [1.0, 0.0, 0.0],
         color: [1.0, 0.0, 0.0, 1.0],
     };
-    // 前视相机（深度轴 = 世界 x）：墙 x=0 横切体 [-0.3,0.3] 中部——
-    // 俯视 cam() 下该墙侧对相机（面法线 ⊥ 视线），不触发撞墙。
+    // Front-view camera (depth axis = world x): the wall at x=0 cuts across the middle of the
+    // volume [-0.3,0.3]; under the top-down cam() this wall would be edge-on to the camera (face
+    // normal ⊥ view ray) and wouldn't trigger the wall hit.
     let cam = OrthoCamera {
         yaw_deg: 0.0,
         pitch_deg: 0.0,
         center: [0.0, 0.0, 0.0],
         radius: 1.0,
     };
-    // 场：格心 x < 0（后半，远侧）值 1.0（蓝）；x ≥ 0（前半，近侧）0.0（绿）。
+    // Field: cell centers with x < 0 (back half, far side) are 1.0 (blue); x ≥ 0 (front half,
+    // near side) 0.0 (green).
     let mut data = vec![0f32; 8 * 8 * 8];
     for k in 0..8u32 {
         for j in 0..8u32 {
@@ -600,24 +625,25 @@ fn volume_wall_truncation_headless() {
     let bytes = r.render_readback(&scene, 64, 64).expect("render wall+vol");
     let i = ((32 * 64 + 32) * 4) as usize;
     let (cr, cg, cb) = (bytes[i + 2], bytes[i + 1], bytes[i]);
-    // 截断：采样全落绿区（前半）→ 透底红 + 绿雾、零蓝。r/g 按
-    // acc_a ∈ [全 64 样, 少 7 样]（界面带线性滤波过渡档透明）放宽。
+    // Cutoff: every sample lands in the green zone (front half) → red showing through + green fog,
+    // zero blue. r/g are relaxed for acc_a ∈ [all 64 samples, 7 samples fewer] (linear filtering
+    // in the interface band makes the transition levels transparent).
     assert!(
         (30..=60).contains(&cr) && cg > 195 && cb <= 6,
         "wall truncation: got ({cr},{cg},{cb}) expect (30..60,>195,<=6)"
     );
 }
 
-/// LUT 端点（诉求书 §8 ③）：值 1.0 均匀体 → 采样 LUT[255]——归一化
-/// 贯通的端到端证据（rgb 端点色 × ①同款 acc_a）。
+/// LUT endpoint (ask doc §8 ③): a uniform 1.0 volume → samples LUT[255]; end-to-end evidence that
+/// normalization carries through (the rgb endpoint color × the same acc_a as in ①).
 #[test]
 fn volume_lut_endpoint_headless() {
     let Some(mut r) = headless_renderer() else {
-        eprintln!("skip: 无可用 wgpu 适配器");
+        eprintln!("skip: no usable wgpu adapter");
         return;
     };
     let mut lut = vec![[0u8, 0u8, 0u8, 8u8]; 256];
-    lut[255] = [255u8, 0u8, 0u8, 8u8]; // 端点红（其余黑——采样仅触 1.0）
+    lut[255] = [255u8, 0u8, 0u8, 8u8]; // endpoint red (the rest black: sampling only hits 1.0)
     let scene = RenderScene {
         tris: vec![],
         tris_alpha: vec![],

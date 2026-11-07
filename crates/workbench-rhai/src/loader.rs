@@ -1,4 +1,5 @@
-//! 插件发现与装载：目录扫描 → 清单校验 → 脚本 `register()` → Registry 落盘。
+//! Plugin discovery and loading: directory scan → manifest validation → script `register()`
+//! → committed to the Registry.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -9,7 +10,8 @@ use workbench_api::{CommandDef, Registry};
 use crate::host::{build_load_engine, call_sync_callback, run_background_callback, RhaiProgram, SharedCollected};
 use crate::manifest::{parse as parse_manifest, split_entry_point, PluginManifest};
 
-/// 扫描插件目录（每个一级子目录含 `plugin.toml` 即为插件，按名排序）。
+/// Scan the plugin directories (every first-level subdirectory holding a `plugin.toml` is a
+/// plugin; sorted by name).
 pub fn discover(dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     for dir in dirs {
@@ -27,7 +29,8 @@ pub fn discover(dirs: &[PathBuf]) -> Vec<PathBuf> {
     candidates
 }
 
-/// 装载单个插件：失败通过 `registry` 记录拒绝原因，不中断其它插件。
+/// Load one plugin: a failure is recorded in `registry` as a rejection reason and does not
+/// stop the other plugins.
 fn load_one(registry: &mut Registry, dir: &Path) {
     let dir_name = dir
         .file_name()
@@ -36,7 +39,7 @@ fn load_one(registry: &mut Registry, dir: &Path) {
     let Ok(text) = std::fs::read_to_string(dir.join("plugin.toml")) else {
         registry
             .plugins_rejected
-            .push((dir_name, "plugin.toml 不可读".to_string()));
+            .push((dir_name, "plugin.toml is not readable".to_string()));
         return;
     };
     let manifest: PluginManifest = match parse_manifest(&text) {
@@ -50,7 +53,7 @@ fn load_one(registry: &mut Registry, dir: &Path) {
     if registry.plugins_loaded.contains(&plugin_id) {
         registry.plugins_rejected.push((
             dir_name,
-            format!("插件 ID 重复（已被 {plugin_id} 占用）"),
+            format!("duplicate plugin ID ({plugin_id} is already taken)"),
         ));
         return;
     }
@@ -60,7 +63,7 @@ fn load_one(registry: &mut Registry, dir: &Path) {
     let Ok(source) = std::fs::read_to_string(&entry_path) else {
         registry
             .plugins_rejected
-            .push((plugin_id, format!("入口脚本不可读: {}", entry_path.display())));
+            .push((plugin_id, format!("entry script is not readable: {}", entry_path.display())));
         return;
     };
 
@@ -71,22 +74,23 @@ fn load_one(registry: &mut Registry, dir: &Path) {
         Err(e) => {
             registry
                 .plugins_rejected
-                .push((plugin_id, format!("脚本编译失败: {e}")));
+                .push((plugin_id, format!("script failed to compile: {e}")));
             return;
         }
     };
-    let _ = ast; // 编译期校验；命令回调在调用线程现场重建 Engine
+    let _ = ast; // Compile-time check; command callbacks rebuild the Engine on the calling thread
 
-    // 执行入口函数（缺省 `register`），脚本经宿主全局函数完成注册。
+    // Run the entry function (default `register`); the script registers through the host's
+    // global functions.
     let mut scope = rhai::Scope::new();
     if let Err(e) = engine.call_fn::<()>(&mut scope, &ast, &entry_fn, ()) {
         registry
             .plugins_rejected
-            .push((plugin_id, format!("入口 `{entry_fn}` 执行失败: {e}")));
+            .push((plugin_id, format!("entry `{entry_fn}` failed: {e}")));
         return;
     }
 
-    // 落盘：命令 + 工具栏 + 脚本面板 + 提示
+    // Commit: commands + toolbar + script panels + notes
     let program: RhaiProgram = Arc::new(source);
     let mut collected = collected.lock().unwrap_or_else(|p| p.into_inner());
     for cmd in collected.commands.drain(..) {
@@ -103,7 +107,8 @@ fn load_one(registry: &mut Registry, dir: &Path) {
             Some(l) => api::ToolbarItem::labeled(command, l),
             None => api::ToolbarItem::command(command),
         };
-        // 受控贡献：向既有组追加，或创建插件自有组（§7.3）
+        // Controlled contribution: append to an existing group, or create the plugin's own
+        // group (§7.3)
         if let Some(existing) = registry.toolbar.iter_mut().find(|g| g.id == group_id) {
             existing.items.push(item);
         } else {
@@ -130,7 +135,7 @@ fn load_one(registry: &mut Registry, dir: &Path) {
             300.0,
             order,
             || -> Box<dyn api::ViewInstance> {
-                unreachable!("脚本面板不创建实例（内容由前端按 script 挂载）")
+                unreachable!("script panel creates no instance (content is mounted by the frontend from script)")
             },
         )
         .script(script.to_string_lossy().to_string());
@@ -204,8 +209,9 @@ fn build_background_command(
     })
 }
 
-/// 插件装载阶段：装配期由 builder 调用，向 Registry 贡献命令/工具栏/面板。
-/// 失败通过 `Registry` 记录，不中断装配（与其它 PluginStage 相同的隔离策略）。
+/// The plugin loading stage: called by the builder at assembly time, contributes commands /
+/// toolbar items / panels to the Registry. Failures are recorded in the `Registry` and do not
+/// stop assembly (the same isolation policy as any other PluginStage).
 pub fn plugin_stage(dirs: Vec<PathBuf>) -> workbench_core::PluginStage {
     Box::new(move |registry: &mut Registry| {
         for dir in discover(&dirs) {

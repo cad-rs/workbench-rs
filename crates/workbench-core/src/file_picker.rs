@@ -7,7 +7,7 @@
 use workbench_api as api;
 use api::{CommandArgs, CommandCtx, CommandDef, CommandResult, Registry};
 
-/// The command the picker's "新建文件夹" prompt commits (`value`: the name).
+/// The command the picker's "New Folder" prompt commits (`value`: the name).
 pub const NEW_FOLDER: &str = "app.file_picker.new_folder";
 
 /// List the folder the open picker shows, into the picker.
@@ -52,18 +52,18 @@ pub fn target(ctx: &mut CommandCtx, name: &str) -> Option<api::Location> {
 pub(crate) fn register(registry: &mut Registry) {
     registry.register_command(CommandDef::sync(
         NEW_FOLDER,
-        "新建文件夹",
+        "New Folder",
         |ctx: &mut CommandCtx, args: &CommandArgs| {
             let name = args.get("value").unwrap_or_default().trim().to_string();
             if name.is_empty() || name.contains(['/', '\\']) {
-                return CommandResult::failed("文件夹名称不能为空，也不能含有 / 或 \\");
+                return CommandResult::failed("A folder name can't be empty or contain / or \\");
             }
             let host = ctx.host();
             let Some(dir) = host.ws.file_picker.as_ref().map(|picker| picker.dir()) else {
-                return CommandResult::failed("没有打开的文件选择器");
+                return CommandResult::failed("No file picker is open");
             };
             let Some(provider) = host.storage.get(&dir.provider) else {
-                return CommandResult::failed(format!("没有 `{}` 存储", dir.provider));
+                return CommandResult::failed(format!("No `{}` storage", dir.provider));
             };
             let key = provider.child_key(&dir.key, &name);
             let folder = api::Location::new(dir.provider, key);

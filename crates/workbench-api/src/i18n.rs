@@ -1,11 +1,14 @@
-//! i18n: locale tables and the translation lookup (Phase 2).
+//! i18n: locale tables and the translation lookup.
 //!
 //! Products and plugins contribute `(locale, key, text)` entries at assembly
 //! time (Registry::register_locales); the platform merges them into one
 //! [`Localizer`] on the ServiceHost. Display sites call `host.tr(key)`:
 //! the current locale comes from the `ui.locale` setting, resolution falls
-//! back `zh-CN -> zh -> en -> the key itself`, so an untranslated key
+//! back `de-AT -> de -> en -> the key itself`, so an untranslated key
 //! degrades to its literal text instead of breaking the UI.
+//!
+//! The platform ships English only; the tables are for products and plugins
+//! that add other languages.
 
 use std::collections::HashMap;
 
@@ -13,11 +16,10 @@ use std::collections::HashMap;
 ///
 /// Convention (Qt tr() style): the source-language string is the key. The
 /// [`Localizer::source_locale`] therefore needs no table — its keys *are*
-/// the display text — and never falls back to `en` (that would translate the
-/// source language against its own table).
+/// the display text — and never falls back to `en`.
 pub struct Localizer {
     tables: HashMap<String, HashMap<String, String>>,
-    /// Locale whose strings double as keys (`zh-CN` for this platform).
+    /// Locale whose strings double as keys (`en` for this platform).
     source_locale: String,
 }
 
@@ -31,7 +33,7 @@ impl Localizer {
     pub fn new() -> Self {
         Self {
             tables: HashMap::new(),
-            source_locale: "zh-CN".to_string(),
+            source_locale: "en".to_string(),
         }
     }
 
@@ -54,7 +56,7 @@ impl Localizer {
     }
 
     /// Translate `key` for `locale` with fallback: exact locale -> base
-    /// language (`zh-CN` -> `zh`) -> `en` (unless the locale IS the source
+    /// language (`de-AT` -> `de`) -> `en` (unless the locale IS the source
     /// locale) -> None (the caller renders the key itself).
     pub fn translate(&self, locale: &str, key: &str) -> Option<&str> {
         if let Some(text) = self.tables.get(locale).and_then(|t| t.get(key)) {
@@ -67,8 +69,7 @@ impl Localizer {
                 }
             }
         }
-        // The source locale renders keys verbatim; falling through to `en`
-        // here would translate the source language against its own table.
+        // The source locale renders keys verbatim.
         if locale == self.source_locale {
             return None;
         }
@@ -99,42 +100,40 @@ mod tests {
 
     fn loc() -> Localizer {
         let mut l = Localizer::new();
-        l.add_table("zh-CN", vec![("greeting".into(), "你好".into())]);
-        l.add_table("en", vec![("greeting".into(), "Hello".into())]);
+        l.add_table("de", vec![("greeting".into(), "Hallo".into())]);
+        l.add_table("fr", vec![("greeting".into(), "Bonjour".into())]);
         l
     }
 
     #[test]
     fn exact_locale_wins() {
-        assert_eq!(loc().translate("zh-CN", "greeting"), Some("你好"));
-        assert_eq!(loc().translate("en", "greeting"), Some("Hello"));
+        assert_eq!(loc().translate("de", "greeting"), Some("Hallo"));
+        assert_eq!(loc().translate("fr", "greeting"), Some("Bonjour"));
     }
 
     #[test]
     fn base_language_fallback() {
-        let mut l = Localizer::new();
-        l.add_table("zh", vec![("k".into(), "中文".into())]);
-        assert_eq!(l.translate("zh-TW", "k"), Some("中文"), "zh-TW -> zh");
+        assert_eq!(loc().translate("de-AT", "greeting"), Some("Hallo"), "de-AT -> de");
     }
 
     #[test]
     fn english_fallback_then_none() {
         let mut l = Localizer::new();
+        l.set_source_locale("de");
         l.add_table("en", vec![("k".into(), "EN".into())]);
         assert_eq!(l.translate("fr", "k"), Some("EN"), "unknown locale -> en");
         assert_eq!(l.translate("fr", "missing"), None);
     }
 
     #[test]
-    fn source_locale_never_falls_back_to_english() {
+    fn source_locale_renders_keys_verbatim() {
         let mut l = Localizer::new();
-        l.add_table("en", vec![("撤销".into(), "Undo".into())]);
-        // The source locale (zh-CN) renders keys verbatim: no en fallback.
-        assert_eq!(l.translate("zh-CN", "撤销"), None, "source key stays verbatim");
-        assert_eq!(l.translate("en", "撤销"), Some("Undo"));
-        // An explicit zh-CN override still wins when a table exists.
-        l.add_table("zh-CN", vec![("撤销".into(), "撤回".into())]);
-        assert_eq!(l.translate("zh-CN", "撤销"), Some("撤回"));
+        l.add_table("de", vec![("Undo".into(), "Rückgängig".into())]);
+        assert_eq!(l.translate("en", "Undo"), None, "source key stays verbatim");
+        assert_eq!(l.translate("de", "Undo"), Some("Rückgängig"));
+        // An explicit table for the source locale still wins.
+        l.add_table("en", vec![("Undo".into(), "Revert".into())]);
+        assert_eq!(l.translate("en", "Undo"), Some("Revert"));
     }
 
     #[test]
@@ -142,13 +141,13 @@ mod tests {
         let l = loc();
         assert!(l.has("greeting"));
         assert!(!l.has("nope"));
-        assert_eq!(l.locales(), vec!["en", "zh-CN"]);
+        assert_eq!(l.locales(), vec!["de", "fr"]);
     }
 
     #[test]
     fn later_registration_wins() {
         let mut l = loc();
-        l.add_table("en", vec![("greeting".into(), "Hi".into())]);
-        assert_eq!(l.translate("en", "greeting"), Some("Hi"));
+        l.add_table("de", vec![("greeting".into(), "Servus".into())]);
+        assert_eq!(l.translate("de", "greeting"), Some("Servus"));
     }
 }

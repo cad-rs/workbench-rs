@@ -1,11 +1,12 @@
-//! 平台共享异步执行器（design.md §10.1“异步执行器”一档）。
+//! The platform's shared async executor (the "async executor" tier of design.md §10.1).
 //!
-//! 桌面：基于 `async-executor` 的小型固定线程池：异步命令的 future 在池上轮转，
-//! 避免为每个轻量异步命令独占线程（那是 `TaskKind::Thread` 后台任务的职责）。
-//! 应用关闭时通过 shutdown 标志让工作线程退出。
+//! Desktop: a small fixed thread pool built on `async-executor`; async command futures are
+//! polled on the pool, so no lightweight async command holds a thread of its own (that is
+//! what `TaskKind::Thread` background tasks are for). On app shutdown a shutdown flag makes
+//! the worker threads exit.
 //!
-//! Web（wasm32）：无线程可用，future 直接交给 `wasm-bindgen-futures`
-//! （主线程事件循环驱动；async 命令体内不得做阻塞计算）。
+//! Web (wasm32): no threads are available, so futures go straight to `wasm-bindgen-futures`
+//! (driven by the main-thread event loop; async command bodies must not do blocking work).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -24,7 +25,7 @@ pub struct AsyncExecutor {
 }
 
 impl AsyncExecutor {
-    /// 创建执行器并启动工作线程（Web 构建不创建线程）。
+    /// Create the executor and start its worker threads (the web build creates no threads).
     pub fn new(threads: usize, shutdown: Arc<AtomicBool>) -> Self {
         #[cfg(target_arch = "wasm32")]
         {
@@ -42,7 +43,8 @@ impl AsyncExecutor {
                 let _ = std::thread::Builder::new()
                     .name(format!("wb-async-{i}"))
                     .spawn(move || {
-                        // 驱动执行器直到 shutdown 置位；期间持续轮转已提交的任务。
+                        // Drive the executor until shutdown is set, polling the submitted
+                        // tasks meanwhile.
                         futures_lite::future::block_on(ex.run(async move {
                             loop {
                                 if flag.load(Ordering::Relaxed) {
@@ -60,7 +62,7 @@ impl AsyncExecutor {
         }
     }
 
-    /// 提交一个 fire-and-forget 异步任务（完成后自行发送终态事件）。
+    /// Submit a fire-and-forget async task (it sends its own final-state event when done).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn spawn_detached<F>(&self, future: F)
     where
@@ -69,8 +71,8 @@ impl AsyncExecutor {
         self.inner.spawn(future).detach();
     }
 
-    /// 提交一个 fire-and-forget 异步任务。Web 端只有页面主线程，future
-    /// 无需 `Send`（存储操作等待的 JS promise 不是 `Send`）。
+    /// Submit a fire-and-forget async task. The web has only the page's main thread, so the
+    /// future need not be `Send` (the JS promises storage operations await are not `Send`).
     #[cfg(target_arch = "wasm32")]
     pub fn spawn_detached<F>(&self, future: F)
     where

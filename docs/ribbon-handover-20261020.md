@@ -1,105 +1,122 @@
-# RibbonBar 交接（2026-10-20）——M1+M2 已交付，M3 剩余待推进
+# RibbonBar handover (2026-10-20): M1+M2 delivered, M3 remaining
 
-> 面向下一 session：读完本文即可直接开工，无需回溯本轮对话。
-> 规格文档：`docs/ribbon-bar.md`（外观/交互/架构的单一事实来源，随代码同步维护）。
+> For the next session: after reading this you can start work directly, with no need to go back
+> through this round's conversation.
+> Spec: `docs/ribbon-bar.md` (the single source of truth for appearance/interaction/architecture,
+> maintained alongside the code).
 
-## 1. 当前状态（已提交，未推送）
+## 1. Current state (committed, not pushed)
 
-workbench-rs master（自 4321188 起 6 个提交）：
+workbench-rs master (6 commits since 4321188):
 
-| Commit | 内容 |
+| Commit | Content |
 |--------|------|
-| `8e7b3b3` | feat(api)：workbench-api/core 数据模型扩展（RibbonItemKind/ItemSize/contexts/qat/LayoutFile 字段、is_checked/combo_state 查询、CommandArgs.value、AssetSource.paths()、非阻塞文件对话框 request_dialog/frame_tick 排水） |
-| `acc5f9b` | feat(ui)：`crates/ribbon` 纯组件 crate + workbench-ui 集成（ribbon_bridge）+ wb-example 演示 + 图标链/a11y 修复 |
-| `8da3ceb` | docs：ribbon-bar.md（485 行规格） |
-| `75763a4` | fix(ui)：折叠功能默认禁用（collapse_enabled，默认 false） |
-| `a60bf56` | docs：本文档（交接） |
-| `df58174` | refactor(ui)：条目点击分派统一（ItemChrome）+ 分隔线高度/规范修正 |
+| `8e7b3b3` | feat(api): workbench-api/core data model extensions (RibbonItemKind/ItemSize/contexts/qat/LayoutFile fields, is_checked/combo_state queries, CommandArgs.value, AssetSource.paths(), non-blocking file dialogs with request_dialog/frame_tick draining) |
+| `acc5f9b` | feat(ui): `crates/ribbon` pure component crate + workbench-ui integration (ribbon_bridge) + wb-example demo + icon chain/a11y fixes |
+| `8da3ceb` | docs: ribbon-bar.md (485-line spec) |
+| `75763a4` | fix(ui): collapsing disabled by default (collapse_enabled, default false) |
+| `a60bf56` | docs: this document (handover) |
+| `df58174` | refactor(ui): unified item click dispatch (ItemChrome) + separator height/spec fixes |
 
-父仓库 rcad-pro（feat/acceptance-suites 分支）：`63f4f3c57`（creator QAT 注册）、
-`b2703eb22`（submodule 指针 8da3ceb → 后续提交后需再推进）。
+Parent repo rcad-pro (branch feat/acceptance-suites): `63f4f3c57` (creator QAT registration),
+`b2703eb22` (submodule pointer 8da3ceb; it has to be advanced again after the later commits).
 
-**基线**：ribbon 4 测试、workbench-ui 23+3（assets_probe）全绿、workbench-core 19+3、
-selfcheck 15 PASS/0 FAIL、`cargo tree -p ribbon` 无 workbench 依赖（上游贡献前提）。
+**Baseline**: ribbon 4 tests, workbench-ui 23+3 (assets_probe) all green, workbench-core 19+3,
+selfcheck 15 PASS/0 FAIL, `cargo tree -p ribbon` has no workbench dependency (a prerequisite for
+contributing upstream).
 
-## 2. 架构速览（改动前必读）
+## 2. Architecture at a glance (read before changing anything)
 
 ```text
-workbench-ui/ribbon_bridge.rs   ← 唯一 workbench 耦合点：每帧 WorkspaceState →
-│                                ribbon::RibbonModel；事件 → execute_command
-├─ crates/ribbon/（纯 gpui+gpui-component，编译级隔离，未来贡献上游）
-│   ├─ model.rs   RibbonModel/RibbonEvent/视图模型类型（bridge 逐字段映射）
-│   ├─ state.rs   RibbonState：set_model 每帧替换快照；瞬态=滚动偏移+单例弹层
-│   ├─ tabs.rs    30px Tab 条：Logo(默认 None)→QAT→分隔线→Tabs→折叠钮(默认隐藏)
-│   ├─ panel.rs   86px→110px 面板区：render_large_column / render_row_item /
-│   │            render_combo + ItemChrome 统一点击分派
-│   ├─ popup.rs   弹层构建/锚定/单例管理；track_trigger(on_prepaint 记录矩形)
-│   ├─ layout.rs  列布局纯逻辑（3 槽堆叠/Large 独占列）+ 单测
-│   └─ tokens.rs  颜色/尺寸 token（深色一套）
+workbench-ui/ribbon_bridge.rs   ← the only workbench coupling point: every frame
+│                                 WorkspaceState → ribbon::RibbonModel; events → execute_command
+├─ crates/ribbon/ (pure gpui+gpui-component, isolated at compile level, to be contributed upstream)
+│   ├─ model.rs   RibbonModel/RibbonEvent/view-model types (the bridge maps them field by field)
+│   ├─ state.rs   RibbonState: set_model replaces the snapshot every frame;
+│   │             transient state = scroll offset + singleton popup
+│   ├─ tabs.rs    30px tab strip: Logo (default None)→QAT→separator→Tabs→collapse button (hidden by default)
+│   ├─ panel.rs   86px→110px panel area: render_large_column / render_row_item /
+│   │             render_combo + ItemChrome unified click dispatch
+│   ├─ popup.rs   popup building/anchoring/singleton management; track_trigger (records the rect in on_prepaint)
+│   ├─ layout.rs  pure column-layout logic (3-slot stacking / Large owns a column) + unit tests
+│   └─ tokens.rs  color/size tokens (one dark set)
 ```
 
-**核心机制（不要破坏的不变量）**：
+**Core mechanisms (invariants not to break)**:
 
-1. **统一点击分派**：每个条目按钮只有一个 `on_click`（`ItemChrome::attach_click`），
-   按 `ClickEvent` 位置分派——Split 的 6 点条矩形内→菜单，Menu→整钮菜单，
-   其余→默认命令。chevron 元素**纯视觉**（只挂 `track_trigger` 记录矩形），
-   **绝不嵌套独立 on_click**（gpui 外层先派发，内层 stop_propagation 不可靠）。
-2. **布局一致性**：所有 Large 按钮 86px = 图标区 48 + 两行标签 26 + chevron 预留条 12
-   （无 chevron 的按钮该条留空）——有无 chevron 零布局差异（用户验收的硬约束）。
-3. **Small 列固定 3 等分槽位**：86/3 ≈ 28.67px/槽，不足 3 项下部留空，无 2 等分。
-4. **折叠默认禁用**：`RibbonModel.collapse_enabled`（默认 false）门控一切折叠入口
-   （折叠钮渲染、Tab 双击、事件）；bridge 恒传 false。
-5. **资源链**：gpui-ce 的 AssetRegistry 是**枚举制**——`list("")` 没报出的路径永远
-   解析失败（SVG 静默不画）。WbAssets::list 必须并集 产品源+平台标准源+组件源，
-   并去重（assets_probe.rs 回归测试锁死此行为）。
-6. **元素 id**：`panel-item-{组id}/{序号}/{命令}`——同命令可出现在多个条目
-   （Split 与 Menu 绑同一命令），id 不唯一会触发 a11y 重复节点 panic（dev 构建）。
+1. **Unified click dispatch**: every item button has exactly one `on_click`
+   (`ItemChrome::attach_click`), dispatched by the `ClickEvent` position: inside the Split's 6 pt
+   strip rect → menu, Menu → whole-button menu, everything else → default command. The chevron
+   element is **purely visual** (it only hooks `track_trigger` to record its rect) and **never
+   nests its own on_click** (gpui dispatches to the outer element first; stop_propagation on the
+   inner one is unreliable).
+2. **Layout consistency**: every Large button is 86px = icon area 48 + two-line label 26 + chevron
+   reserved strip 12 (buttons without a chevron leave that strip empty), so having a chevron or not
+   makes zero layout difference (a hard constraint from user acceptance).
+3. **A Small column has 3 fixed equal slots**: 86/3 ≈ 28.67px per slot; with fewer than 3 items the
+   bottom stays empty; there is no 2-way split.
+4. **Collapsing is disabled by default**: `RibbonModel.collapse_enabled` (default false) gates every
+   collapse entry point (rendering the collapse button, double-clicking a tab, events); the bridge
+   always passes false.
+5. **Asset chain**: gpui-ce's AssetRegistry is **enumeration-based**: a path that `list("")` does not
+   report never resolves (the SVG silently does not draw). WbAssets::list must take the union of the
+   product source + the platform standard source + the component source and deduplicate it (the
+   assets_probe.rs regression test locks this behavior in).
+6. **Element ids**: `panel-item-{group_id}/{index}/{command}`. The same command can appear in several
+   items (a Split and a Menu bound to the same command), and non-unique ids trigger an a11y
+   duplicate-node panic (dev builds).
 
-## 3. 已踩过的坑（勿重复）
+## 3. Pitfalls already hit (don't repeat them)
 
-1. **多实例残留**：`( ... &)` 后台启动 + taskkill 时序不齐时，旧实例会残留，
-   新旧并存时点击落在旧窗口 = "改了没生效"的假象。**每次验证前：
-   `taskkill //F //IM creator.exe` 后确认 `tasklist` 计数为 1**；构建后若 exe 被
-   占用会静默失败，需重跑 build 确认 Finished。
-2. **CUA 自动化点击**：raster↔逻辑坐标映射跨 DPI 层不稳定，16×14 级小目标盲点
-   不可靠（探针标定过也会漂）。小目标验证用探针打印矩形 + 人工点击，
-   或临时放大命中区。
-3. **关闭窗口时的 invalid-handle ERROR 噪声**（gpui_windows dispatcher）：
-   用户确认是正常关窗伴随现象，布局保存在此之前已完成，无害；同族还有一次
-   启动期崩溃（0xcfffffff）未复现，低优先级挂账。
-4. gpui-component 的 `Button` 未实现 gpui 的 `StatefulInteractiveElement`，
-   on_click 泛型助手需按类型拆分（历史教训，`with_menu_click_div` 已随统一
-   分派删除）。
+1. **Leftover instances**: when launching in the background with `( ... &)` and the taskkill timing
+   is off, an old instance lingers; with old and new running side by side, clicks land on the old
+   window, which looks like "the change had no effect". **Before every verification:
+   `taskkill //F //IM creator.exe`, then confirm the `tasklist` count is 1**; if the exe is locked
+   after a build, the build fails silently, so rerun the build and confirm Finished.
+2. **CUA automated clicks**: the raster↔logical coordinate mapping is unstable across DPI layers, and
+   blind clicks on small targets around 16×14 are unreliable (they drift even after probe
+   calibration). To verify small targets, print the rects with a probe and click manually, or
+   temporarily enlarge the hit area.
+3. **invalid-handle ERROR noise when closing the window** (gpui_windows dispatcher): the user
+   confirmed this is a normal side effect of closing the window; the layout has already been saved
+   by then, so it is harmless. A related startup crash (0xcfffffff) happened once and has not been
+   reproduced; parked as low priority.
+4. gpui-component's `Button` does not implement gpui's `StatefulInteractiveElement`, so generic
+   on_click helpers had to be split by type (a historical lesson; `with_menu_click_div` was removed
+   along with the unified dispatch).
 
-## 4. M3 剩余（下一轮直接开工）
+## 4. M3 remaining (start directly next round)
 
-| # | 任务 | 落点 | 备注 |
+| # | Task | Where | Notes |
 |---|------|------|------|
-| 1 | 滚动动画 | panel.rs `scroll_arrow` 内 TODO：`scroll_by_page` 瞬跳 → 150ms ease-out（gpui 动画或分帧插值，注意与 `scroll_offset` 瞬态的交互） | 用户已验收功能，只差动画 |
-| 2 | 折叠态持久化 | `LayoutFile.ribbon_collapsed` 字段**已存在未接线**；bridge 的 `collapsed` 是运行时值（RibbonHost `Rc<Cell<bool>>`）→ 保存时写入 layout、启动时读回 | M3 主项 |
-| 3 | Ctrl+F1 切换折叠 | 未实现（规格 §4.5 有）；仅在 `collapse_enabled=true` 时生效 | 依赖 4 |
-| 4 | 折叠能力开启路径 | `collapse_enabled` 目前 bridge 恒传 false；产品开启 = builder/设置项 → bridge | 依赖 4 |
-| 5 | 折叠态临时浮层 | 规格 §4.1（折叠态点 Tab 弹全宽浮层），未实现 | 开启折叠后才有意义 |
+| 1 | Scroll animation | TODO in panel.rs `scroll_arrow`: `scroll_by_page` jumps instantly → 150ms ease-out (gpui animation or per-frame interpolation; mind the interaction with the transient `scroll_offset`) | The user has accepted the feature; only the animation is missing |
+| 2 | Persist the collapsed state | The `LayoutFile.ribbon_collapsed` field **exists but is not wired up**; the bridge's `collapsed` is a runtime value (RibbonHost `Rc<Cell<bool>>`) → write it into the layout on save, read it back on startup | Main M3 item |
+| 3 | Ctrl+F1 toggles collapse | Not implemented (in spec §4.5); only effective when `collapse_enabled=true` | Depends on 4 |
+| 4 | Path to enabling collapse | The bridge currently always passes `collapse_enabled` as false; for a product to enable it = builder/setting → bridge | Depends on 4 |
+| 5 | Temporary overlay while collapsed | Spec §4.1 (clicking a tab while collapsed opens a full-width overlay), not implemented | Only meaningful once collapsing is enabled |
 
-M4（上下文 Tab 琥珀色 + 焦点导航细化）、M5（收编策略 B）更远，规格见 ribbon-bar.md。
+M4 (amber contextual tabs + finer focus navigation) and M5 (fold strategy B) are further out; see
+ribbon-bar.md for their spec.
 
-## 5. 验证命令（每轮必跑）
+## 5. Verification commands (run every round)
 
 ```bash
-# workbench-rs 下：
+# In workbench-rs:
 cargo test -p ribbon -p workbench-ui -p workbench-core --offline
 cargo run -p creator --bin creator -- --selfcheck   # 15 PASS / 0 FAIL
-# 视觉：启动单实例（先 taskkill 确认无残留）：
+# Visual check: start a single instance (taskkill first and confirm nothing is left over):
 cargo build -p creator --bin creator --offline && ./target/debug/creator.exe
 ```
 
-回归红线：`the_shell_snapshot_covers_every_region`、6 个 bridge 投影测试、
-assets_probe 3 项、`cargo tree -p ribbon -e normal` 无 workbench 节点。
+Regression red lines: `the_shell_snapshot_covers_every_region`, the 6 bridge projection tests,
+the 3 assets_probe tests, and no workbench node in `cargo tree -p ribbon -e normal`.
 
-## 6. 已知未解（挂账）
+## 6. Known open issues (parked)
 
-- gpui 平台间歇崩溃：一次启动期（0xcfffffff，未复现）+ 关窗期 invalid-handle
-  噪声（用户确认无害）。若再遇活体崩溃：`RUST_BACKTRACE=full` + 立即抓日志。
-- 诊断面板显示 ~100-180ms/帧（debug 构建 + 3D 视口），未查是否 Ribbon 引入
-  （大概率是视口/调试构建本身）。
-- Tab 条自身滚动、KeyTips、上下文 Tab 琥珀色：规格标注低优先级/二期。
+- Intermittent gpui platform crashes: one at startup (0xcfffffff, not reproduced) + invalid-handle
+  noise on window close (the user confirmed it is harmless). If a live crash happens again:
+  `RUST_BACKTRACE=full` + grab the logs immediately.
+- The Diagnostics panel shows ~100-180ms/frame (debug build + 3D viewport); not yet checked whether
+  the Ribbon introduced it (most likely it is the viewport/debug build itself).
+- Scrolling of the tab strip itself, KeyTips, amber contextual tabs: the spec marks these as low
+  priority / phase 2.

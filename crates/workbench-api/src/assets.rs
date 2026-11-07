@@ -1,33 +1,37 @@
-//! GUI 无关的资源加载契约（SVG 图标等静态资源）。
+//! A GUI-independent asset loading contract (SVG icons and other static assets).
 //!
-//! Workbench/插件在 UI 元素上声明资源路径（如 `"icons/save.svg"`），
-//! 产品通过 [`crate::WorkbenchAppBuilder::with_assets`]
-//! （workbench-core）提供[`AssetSource`]；前端负责按路径取字节并渲染。
-//! 路径只是稳定键，不保证对应真实文件——最常见的形态是 `include_bytes!`
-//! 内嵌到二进制里的静态表。
+//! Workbenches/plugins declare asset paths on UI elements (such as `"icons/save.svg"`), the
+//! product supplies an [`AssetSource`] through [`crate::WorkbenchAppBuilder::with_assets`]
+//! (workbench-core), and the frontend fetches the bytes by path and renders them. A path is only
+//! a stable key and need not correspond to a real file — the most common form is a static table
+//! embedded in the binary with `include_bytes!`.
 
 use std::borrow::Cow;
 use std::sync::Arc;
 
-/// 静态资源源：按路径加载资源字节。
+/// A static asset source: loads asset bytes by path.
 ///
-/// 返回 `None` 表示该源没有此资源（调用方会继续向下查找或回退到无图标的
-/// 展示）；加载失败也应返回 `None` 而不是让 UI 中断。
+/// Returning `None` means this source does not have the asset (the caller keeps looking further
+/// down or falls back to showing no icon); a load failure should also return `None` rather than
+/// break the UI.
 pub trait AssetSource: Send + Sync {
     fn load(&self, path: &str) -> Option<Cow<'static, [u8]>>;
 
-    /// 枚举本源持有的全部资源路径（GUI 前端向 gpui `AssetRegistry`
-    /// 登记路径用；registry 只解析登记过的路径）。默认空——纯按需查询的
-    /// 源无法枚举自身，应改用可枚举形态（如 [`StaticAssets`]）。
+    /// Enumerate every asset path this source holds (used by the GUI frontend to register paths
+    /// with gpui's `AssetRegistry`; the registry only resolves registered paths). Empty by
+    /// default — a purely on-demand source cannot enumerate itself and should switch to an
+    /// enumerable form (such as [`StaticAssets`]).
     fn paths(&self) -> Vec<String> {
         Vec::new()
     }
 }
 
-/// 链式资源源：按顺序查找，第一个命中者生效（后面的源提供回退）。
+/// A chained asset source: looks up in order, and the first hit wins (later sources are
+/// fallbacks).
 ///
-/// 典型用法：`ChainedAssets::new(vec![产品源, 平台标准源])`——产品可以用
-/// 同名路径覆盖平台标准图标，也可以只补充自己的图标。
+/// Typical use: `ChainedAssets::new(vec![product_source, platform_standard_source])` — the
+/// product can override the platform's standard icons with the same paths, or just add icons of
+/// its own.
 pub struct ChainedAssets {
     sources: Vec<Arc<dyn AssetSource>>,
 }
@@ -48,7 +52,8 @@ impl AssetSource for ChainedAssets {
     }
 }
 
-/// 便捷构造：用静态 `(路径, 字节)` 表创建资源源（配合 `include_bytes!`）。
+/// Convenience constructor: build an asset source from a static `(path, bytes)` table (use with
+/// `include_bytes!`).
 #[derive(Clone, Copy)]
 pub struct StaticAssets {
     entries: &'static [(&'static str, &'static [u8])],

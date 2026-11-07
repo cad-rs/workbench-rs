@@ -1,28 +1,30 @@
-//! 插件脚本的 Host API v1：脚本通过宿主注入的全局函数完成注册。
+//! Host API v1 for plugin scripts: scripts register through global functions injected by the
+//! host.
 //!
 //! ```rhai
 //! // plugin.rhai
 //! fn register() {
-//!     register_command("rhai.hello", "插件问候", "hello");
-//!     add_toolbar_item("plugin.rhai", "rhai.hello", "问候");
+//!     register_command("rhai.hello", "Plugin Hello", "hello");
+//!     add_toolbar_item("plugin.rhai", "rhai.hello", "Hello");
 //! }
-//! fn hello(args) { "来自 Rhai 的问候" }   // 返回字符串作为备注；返回 () 表示无备注
+//! fn hello(args) { "Hello from Rhai" }   // a returned string is the note; () means no note
 //! ```
 //!
-//! 线程模型：rhai 默认（非 `sync`）的 Engine/AST 不是 Send（gpui-rhai 也
-//! 依赖这一点），因此命令回调不持有 Engine——只持有脚本源码（`Arc<String>`
-//! 是 Send），调用时在当前线程现场构建 Engine 并编译。脚本都很小，
-//! 构建成本在毫秒级。
+//! Threading model: rhai's default (non-`sync`) Engine/AST is not Send (gpui-rhai relies on
+//! that too), so command callbacks hold no Engine — only the script source (`Arc<String>` is
+//! Send) — and build and compile an Engine on the current thread when called. The scripts are
+//! all small; building costs milliseconds.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use workbench_api::{CommandArgs, CommandResult, ProgressHandle};
 
-/// 脚本取消哨兵：后台回调抛出含此标记的错误时映射为协作式取消。
+/// Script cancellation sentinel: a background callback that throws an error carrying this
+/// marker is mapped to a cooperative cancellation.
 pub const CANCEL_SENTINEL: &str = "__wb_cancelled__";
 
-/// 脚本在 `register()` 里声明的一条命令。
+/// One command a script declared in `register()`.
 pub struct CollectedCommand {
     pub id: String,
     pub title: String,
@@ -30,30 +32,32 @@ pub struct CollectedCommand {
     pub background: bool,
 }
 
-/// `register()` 期间的受控收集结果（返回装载方后统一落盘 Registry）。
+/// What `register()` collected under control (handed back to the loader, which commits it to
+/// the Registry in one go).
 #[derive(Default)]
 pub struct Collected {
     pub commands: Vec<CollectedCommand>,
     pub toolbar: Vec<(String, String, Option<String>)>,
-    /// (面板 id, 标题, 脚本绝对路径, 停靠区字符串)
+    /// (panel id, title, absolute script path, dock area string)
     pub panels: Vec<(String, String, std::path::PathBuf, String)>,
-    /// (视图 id, 标题, 脚本绝对路径)
+    /// (view id, title, absolute script path)
     pub views: Vec<(String, String, std::path::PathBuf)>,
     pub notes: Vec<String>,
 }
 
-/// 共享收集桶（脚本全局函数写，装载线程读）。
+/// Shared collection bucket (written by the script's global functions, read by the loading
+/// thread).
 pub type SharedCollected = Arc<Mutex<Collected>>;
 
-/// 命令回调引用的脚本源码（Send，可跨线程进入任务闭包）。
+/// The script source a command callback refers to (Send, so it can cross into a task closure).
 pub type RhaiProgram = Arc<String>;
 
-/// 装载期 Engine：注入 `register()` 需要的宿主全局函数。
-/// 仅在装载线程使用，随装载结束丢弃。
+/// The load-time Engine: injects the host global functions `register()` needs.
+/// Used only on the loading thread and dropped when loading ends.
 pub fn build_load_engine(plugin_dir: std::path::PathBuf, collected: SharedCollected) -> rhai::Engine {
     let mut engine = rhai::Engine::new();
 
-    // register_command(id, title, callback) — 同步命令（UI 线程执行）
+    // register_command(id, title, callback) — sync command (runs on the UI thread)
     {
         let collected = collected.clone();
         engine.register_fn("register_command", move |id: &str, title: &str, callback: &str| {
@@ -69,7 +73,7 @@ pub fn build_load_engine(plugin_dir: std::path::PathBuf, collected: SharedCollec
                 });
         });
     }
-    // register_background_command(id, title, callback) — 后台线程任务
+    // register_background_command(id, title, callback) — background thread task
     {
         let collected = collected.clone();
         engine.register_fn(
@@ -113,7 +117,7 @@ pub fn build_load_engine(plugin_dir: std::path::PathBuf, collected: SharedCollec
                 .push((group.into(), command.into(), None));
         });
     }
-    // register_panel(id, title, script, area) — 脚本 UI 面板（gpui-rhai 渲染）
+    // register_panel(id, title, script, area) — script UI panel (rendered by gpui-rhai)
     {
         let collected = collected.clone();
         let dir = plugin_dir.clone();
@@ -122,7 +126,7 @@ pub fn build_load_engine(plugin_dir: std::path::PathBuf, collected: SharedCollec
             move |id: &str, title: &str, script: &str, area: &str| {
                 let area = area.trim().to_ascii_lowercase();
                 if !matches!(area.as_str(), "left" | "right" | "bottom" | "top") {
-                    return; // 未知停靠区：静默忽略
+                    return; // Unknown dock area: silently ignored
                 }
                 let mut c = collected.lock().unwrap_or_else(|p| p.into_inner());
                 c.panels.push((id.into(), title.into(), dir.join(script), area));
@@ -156,14 +160,15 @@ pub fn build_load_engine(plugin_dir: std::path::PathBuf, collected: SharedCollec
     engine
 }
 
-/// 后台任务句柄的 Rhai 包装（`fn progress_job(task, args)` 的 `task` 参数）。
+/// The Rhai wrapper of a background task handle (the `task` parameter of
+/// `fn progress_job(task, args)`).
 #[derive(Clone)]
 struct RhaiTask {
     handle: ProgressHandle,
 }
 
-/// 回调执行 Engine：注册后台回调需要的 `task` 对象方法。
-/// 每次调用现场构建（不跨线程持有）。
+/// The callback execution Engine: registers the `task` object methods background callbacks
+/// need. Built fresh for every call (never held across threads).
 fn build_exec_engine() -> rhai::Engine {
     let mut engine = rhai::Engine::new();
 
@@ -186,12 +191,13 @@ fn build_exec_engine() -> rhai::Engine {
     engine.register_fn("is_cancelled", |task: &mut RhaiTask| {
         task.handle.is_cancelled()
     });
-    // 协作式取消检查点：已取消时抛出哨兵错误，任务循环据此退出。
+    // Cooperative cancellation checkpoint: throws the sentinel error once cancelled, and the
+    // task loop exits on it.
     engine.register_fn(
         "check_cancelled",
         |task: &mut RhaiTask| -> Result<(), Box<rhai::EvalAltResult>> {
             if task.handle.is_cancelled() {
-                Err(format!("{CANCEL_SENTINEL}: 已请求取消").into())
+                Err(format!("{CANCEL_SENTINEL}: cancellation requested").into())
             } else {
                 Ok(())
             }
@@ -200,7 +206,8 @@ fn build_exec_engine() -> rhai::Engine {
     engine
 }
 
-/// `CommandArgs` → Rhai Map（字符串键值；复杂类型由命令脚本自行约定）。
+/// `CommandArgs` → Rhai Map (string keys and values; complex types are up to the command
+/// script's own conventions).
 pub fn args_to_map(args: &CommandArgs) -> rhai::Map {
     let mut map = rhai::Map::new();
     for (k, v) in &args.values {
@@ -209,7 +216,7 @@ pub fn args_to_map(args: &CommandArgs) -> rhai::Map {
     map
 }
 
-/// 调用同步回调：脚本返回字符串作为备注，返回 `()` 表示无备注。
+/// Call a sync callback: a string returned by the script is the note; `()` means no note.
 pub fn call_sync_callback(
     program: &RhaiProgram,
     callback: &str,
@@ -235,11 +242,11 @@ pub fn call_sync_callback(
                 }
             }
         }
-        Err(e) => CommandResult::failed(format!("脚本回调 `{callback}` 失败: {e}")),
+        Err(e) => CommandResult::failed(format!("script callback `{callback}` failed: {e}")),
     }
 }
 
-/// 后台回调执行体（任务线程）。返回 `None` 表示不提交文档变更。
+/// The background callback body (task thread). Returning `None` commits no document change.
 pub fn run_background_callback(
     program: &RhaiProgram,
     callback: &str,
@@ -262,14 +269,14 @@ pub fn run_background_callback(
                 Err(workbench_api::TaskFailure::Cancelled)
             } else {
                 Err(workbench_api::TaskFailure::Error(format!(
-                    "脚本任务 `{callback}` 失败: {e}"
+                    "script task `{callback}` failed: {e}"
                 )))
             }
         }
     }
 }
 
-/// 供测试/工具使用的空参数表。
+/// An empty argument map for tests and tools.
 pub fn empty_map() -> rhai::Map {
     BTreeMap::new()
 }

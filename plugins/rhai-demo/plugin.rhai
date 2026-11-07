@@ -3,44 +3,46 @@
 // host-injected global functions.
 
 fn register() {
-    // 同步命令：UI 线程执行，返回字符串作为备注（返回 () 表示无备注）
-    register_command("rhai.hello", "Rhai 问候", "hello");
-    add_toolbar_item("plugin.rhai", "rhai.hello", "问候");
+    // Sync command: runs on the UI thread; a returned string is the note (() means no note)
+    register_command("rhai.hello", "Rhai Hello", "hello");
+    add_toolbar_item("plugin.rhai", "rhai.hello", "Hello");
 
-    // 后台命令：任务线程执行，`task` 对象提供进度/日志/协作式取消
-    register_background_command("rhai.progress", "Rhai 后台任务", "progress_job");
-    add_toolbar_item("plugin.rhai", "rhai.progress", "后台任务");
+    // Background command: runs on a task thread; the `task` object provides progress / logging
+    // / cooperative cancellation
+    register_background_command("rhai.progress", "Rhai Background Task", "progress_job");
+    add_toolbar_item("plugin.rhai", "rhai.progress", "Background tasks");
 
-    // 脚本 UI 面板：内容完全由 ui/main.rhai 的 UiNode 树定义
-    register_panel("rhai.panel", "Rhai 演示", "ui/main.rhai", "right");
+    // Script UI panel: its content is defined entirely by the UiNode tree in ui/main.rhai
+    register_panel("rhai.panel", "Rhai Demo", "ui/main.rhai", "right");
 
-    // 脚本中央视图：同一套机制，挂在中央标签上而不是 dock 面板上
-    register_view("rhai.view", "Rhai 视图", "ui/view.rhai");
+    // Script central view: the same mechanism, mounted in a central tab instead of a dock panel
+    register_view("rhai.view", "Rhai View", "ui/view.rhai");
 
-    log_info("Rhai demo 插件已注册（命令 ×2、工具栏组、脚本面板 ×1、脚本视图 ×1）");
+    log_info("Rhai demo plugin registered (2 commands, a toolbar group, 1 script panel, 1 script view)");
 }
 
-// 同步回调：args 为命令参数表（字符串键值），返回备注字符串
+// Sync callback: args is the command argument map (string keys and values); returns the note
 fn hello(args) {
     let name = args.name;
     if name == "" {
-        "来自 Rhai 脚本的问候"
+        "Hello from the Rhai script"
     } else {
-        `来自 Rhai 脚本的问候（{name}）`
+        `Hello from the Rhai script ({name})`
     }
 }
 
-// 后台回调：task.report/set_stage/log 驱动状态栏；task.check_cancelled()
-// 在已取消时抛出宿主识别的取消哨兵（任务随即以 Cancelled 终态收尾）
+// Background callback: task.report/set_stage/log drive the status bar; task.check_cancelled()
+// throws the host-recognised cancellation sentinel once cancelled (the task then settles in
+// the Cancelled terminal state)
 fn progress_job(task, args) {
     let steps = 20;
     for i in 0..steps {
         task.check_cancelled();
-        task.report(i.to_float() / steps.to_float(), `处理批次 {i + 1}/{steps}`);
+        task.report(i.to_float() / steps.to_float(), `Processing batch {i + 1}/{steps}`);
         if i == 10 {
-            task.log("已完成一半（Rhai 后台任务）");
+            task.log("Halfway done (Rhai background task)");
         }
     }
-    task.set_stage("收尾");
+    task.set_stage("Finishing");
     task.report_progress(1.0);
 }

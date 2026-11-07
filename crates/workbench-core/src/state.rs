@@ -68,7 +68,7 @@ mod desktop {
                 let _ = std::fs::create_dir_all(dir);
             }
             std::fs::write(&path, bytes)
-                .map_err(|e| format!("写入 {} 失败: {e}", path.display()))
+                .map_err(|e| format!("Failed to write {}: {e}", path.display()))
         }
 
         fn remove(&self, key: &str) {
@@ -119,12 +119,12 @@ mod web {
 
         fn write(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
             let text = std::str::from_utf8(bytes)
-                .map_err(|_| format!("写入 {key} 失败: 浏览器存储只能保存文本"))?;
-            let storage =
-                storage().ok_or_else(|| format!("写入 {key} 失败: 浏览器存储不可用"))?;
+                .map_err(|_| format!("Failed to write {key}: browser storage holds text only"))?;
+            let storage = storage()
+                .ok_or_else(|| format!("Failed to write {key}: browser storage is unavailable"))?;
             storage
                 .set_item(&format!("{}{key}", self.prefix), text)
-                .map_err(|e| format!("写入 {key} 失败: {e:?}"))
+                .map_err(|e| format!("Failed to write {key}: {e:?}"))
         }
 
         fn remove(&self, key: &str) {

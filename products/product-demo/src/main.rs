@@ -5,9 +5,9 @@
 use workbench_api as wb;
 use workbench_core::cli::{Cli, CliMode};
 
-/// product-demo 的装配 workbench：示例模块 + GPU 视图演示。
-/// GPU 视图类型由 workbench-ui 的 `gpu_view` 模块提供（Workbench 模块层
-/// 不接触 GUI，故视图注册在此追加，而不是放进 wb-example）。
+/// product-demo's assembly workbench: the example module + the GPU view demo.
+/// The GPU view types come from workbench-ui's `gpu_view` module (the Workbench module layer
+/// does not touch the GUI, so the views are registered here rather than in wb-example).
 struct DemoWorkbench;
 
 impl wb::Workbench for DemoWorkbench {
@@ -38,7 +38,8 @@ fn main() {
     .create_default_document(true)
     .open_on_start("example.welcome", false)
     .open_on_start("example.canvas", true)
-    // GPU 视口演示（gpui-wgpu 参考实现移植）：排在欢迎页与画布之后
+    // GPU viewport demo (ported from the gpui-wgpu reference implementation): opened after
+    // the welcome page and the canvas
     .open_on_start("example.gpu3d", false)
     .open_on_start("example.gpu_top", false);
     let builder = cli.apply(builder);
