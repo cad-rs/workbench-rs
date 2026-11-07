@@ -51,22 +51,32 @@ impl Location {
 
     /// The file name without its extension.
     pub fn file_stem(&self) -> &str {
-        self.split_name().0
+        split_file_name(self.file_name()).0
     }
 
     /// The file name's extension, without the dot.
     pub fn extension(&self) -> Option<&str> {
-        self.split_name().1
+        split_file_name(self.file_name()).1
     }
+}
 
-    /// Like `Path`: a leading dot starts a name, not an extension.
-    fn split_name(&self) -> (&str, Option<&str>) {
-        let name = self.file_name();
-        match name.rfind('.') {
-            Some(dot) if dot > 0 => (&name[..dot], Some(&name[dot + 1..])),
-            _ => (name, None),
-        }
+/// A file name's stem and extension (without the dot). Like `Path`, a
+/// leading dot starts a name, not an extension.
+pub fn split_file_name(name: &str) -> (&str, Option<&str>) {
+    match name.rfind('.') {
+        Some(dot) if dot > 0 => (&name[..dot], Some(&name[dot + 1..])),
+        _ => (name, None),
     }
+}
+
+/// One item of a folder listing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// The provider's key for it.
+    pub key: String,
+    /// What the user sees.
+    pub name: String,
+    pub is_dir: bool,
 }
 
 impl fmt::Display for Location {
@@ -91,10 +101,40 @@ pub type StorageFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>>>>;
 /// One place files can live. Errors are user-readable messages; the platform
 /// adds which file they are about.
 pub trait StorageProvider: Send + Sync {
+    /// What the file picker calls this place.
+    fn label(&self) -> &str;
+    /// Whether files here are picked with the OS's own dialog (the local file
+    /// system) rather than the in-app picker, which browses with
+    /// [`Self::list`].
+    fn native_picker(&self) -> bool {
+        false
+    }
     /// The whole content of the file at `key`.
     fn read(&self, key: &str) -> StorageFuture<Vec<u8>>;
     /// Create the file at `key`, or replace its content, with `bytes`.
     fn write(&self, key: &str, bytes: Vec<u8>) -> StorageFuture<()>;
+    /// The folders and files in the folder `dir` (the root is `""`).
+    fn list(&self, dir: &str) -> StorageFuture<Vec<Entry>> {
+        let _ = dir;
+        unsupported("浏览")
+    }
+    /// Create the folder `key`.
+    fn create_dir(&self, key: &str) -> StorageFuture<()> {
+        let _ = key;
+        unsupported("新建文件夹")
+    }
+    /// The key of `name` in the folder `dir`: paths by default.
+    fn child_key(&self, dir: &str, name: &str) -> String {
+        if dir.is_empty() {
+            name.to_string()
+        } else {
+            format!("{dir}/{name}")
+        }
+    }
+}
+
+fn unsupported<T: Send + 'static>(what: &str) -> StorageFuture<T> {
+    Box::pin(std::future::ready(Err(format!("这里不支持{what}"))))
 }
 
 /// The product's storage providers, by id.
@@ -107,6 +147,39 @@ impl Storage {
     /// Register `provider` under `id`, replacing any provider already there.
     pub fn register(&mut self, id: impl Into<String>, provider: Arc<dyn StorageProvider>) {
         self.providers.insert(id.into(), provider);
+    }
+
+    /// The provider registered under `id`.
+    pub fn get(&self, id: &str) -> Option<&Arc<dyn StorageProvider>> {
+        self.providers.get(id)
+    }
+
+    /// The places the in-app picker offers, as (id, label): every provider
+    /// without a native dialog.
+    pub fn in_app_sources(&self) -> Vec<(String, String)> {
+        self.providers
+            .iter()
+            .filter(|(_, provider)| !provider.native_picker())
+            .map(|(id, provider)| (id.clone(), provider.label().to_string()))
+            .collect()
+    }
+
+    /// List the folder at `location`.
+    pub fn list(&self, location: &Location) -> StorageFuture<Vec<Entry>> {
+        let what = format!("读取文件夹 {location}");
+        match self.providers.get(&location.provider) {
+            Some(provider) => with_context(provider.list(&location.key), what),
+            None => missing(location, what),
+        }
+    }
+
+    /// Create the folder at `location`.
+    pub fn create_dir(&self, location: &Location) -> StorageFuture<()> {
+        let what = format!("新建文件夹 {location}");
+        match self.providers.get(&location.provider) {
+            Some(provider) => with_context(provider.create_dir(&location.key), what),
+            None => missing(location, what),
+        }
     }
 
     /// Read the file at `location`.

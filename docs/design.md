@@ -714,11 +714,18 @@ documents it must later save back:
   encodes and decodes: opening is `type_for` → read → `open_bytes`, saving is
   `begin_save` → write → `finish_save` (one save per document in flight; a
   document edited during its write stays dirty).
-- **File pickers** choose a `Location`. The local file system uses the
-  native dialog; OPFS and cloud stores use an in-app file browser built on the
-  providers' listing API. The browser's own picker and downloads only serve
-  "import local file" / "export to local file" commands: they yield one-off
-  bytes, not a location that can be saved back.
+- **File pickers** choose a `Location`. A provider says whether it uses the
+  native dialog (`StorageProvider::native_picker`: the local file system) or
+  the in-app picker, which browses with `list` / `create_dir`. When any
+  in-app provider is registered, open/save dialogs use the in-app picker over
+  all of them. Its state is `FilePicker` in `ws.file_picker`; core lists
+  folders into it (`workbench_core::file_picker`), the frontend only draws it
+  and reports moves, and `AppRuntime::finish_pick` closes it. The browser's
+  own chooser and downloads only serve the import / export commands: they
+  yield one-off bytes, not a location that can be saved back.
+- I/O off the UI thread goes through one primitive, `AppServices::spawn_io`;
+  `CommandCtx::read_file` / `write_file` / `list_dir` / `create_dir` build on
+  it.
 - **App state** (settings, layout, autosaves, the clean-exit marker) is not
   user files and needs no picker: a small synchronous key-value store
   (`workbench_api::StateStore`), files in the config directory on the desktop
@@ -728,9 +735,11 @@ documents it must later save back:
   closed tab.
 
 Status: providers, `Location`, the async open/save path, the local file
-system provider and the app-state store are in place. Next: the in-app picker
-with an OPFS provider and import/export, then cloud providers with
-version-checked writes.
+system and OPFS providers, the app-state store, the in-app picker and
+import/export are in place. Next: cloud providers with version-checked writes
+(and, on the desktop, a way from the in-app picker to the native dialog once
+a cloud provider sits next to the local file system); rename and delete in
+the picker.
 
 ### 12.2 Transactions and undo/redo
 

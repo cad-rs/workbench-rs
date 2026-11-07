@@ -12,6 +12,8 @@ pub const NEW_DOCUMENT: &str = "app.new_document";
 pub const OPEN_DOCUMENT: &str = "app.open_document";
 pub const SAVE_DOCUMENT: &str = "app.save_document";
 pub const SAVE_DOCUMENT_AS: &str = "app.save_document_as";
+pub const IMPORT_DOCUMENT: &str = "app.import_document";
+pub const EXPORT_DOCUMENT: &str = "app.export_document";
 pub const UNDO: &str = "app.undo";
 pub const REDO: &str = "app.redo";
 pub const CLOSE_ACTIVE_VIEW: &str = "app.close_active_view";
@@ -37,6 +39,9 @@ fn register_builtin_locales(registry: &mut Registry) {
             ("打开文档…", "Open Document…"),
             ("保存文档", "Save Document"),
             ("另存为…", "Save As…"),
+            ("导入…", "Import…"),
+            ("导出…", "Export…"),
+            ("新建文件夹", "New Folder"),
             ("撤销", "Undo"),
             ("重做", "Redo"),
             ("关闭当前标签", "Close Tab"),
@@ -301,6 +306,26 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
         .enabled_when(|snap| snap.active_document.is_some()),
     );
 
+    // 导入 / 导出：与用户设备之间传一份副本（Web 端是浏览器的文件选择与下载）
+    registry.register_command(CommandDef::sync(
+        IMPORT_DOCUMENT,
+        "导入…",
+        |ctx: &mut CommandCtx, _args: &CommandArgs| {
+            request_import(ctx);
+            CommandResult::done()
+        },
+    ));
+    registry.register_command(
+        CommandDef::sync(EXPORT_DOCUMENT, "导出…", |ctx: &mut CommandCtx, _args: &CommandArgs| {
+            let Some(doc_id) = ctx.active_document() else {
+                return CommandResult::failed("没有活动文档");
+            };
+            request_export(ctx, doc_id)
+        })
+        .enabled_when(|snap| snap.active_document.is_some()),
+    );
+    crate::file_picker::register(registry);
+
     // 撤销 / 重做
     registry.register_command(
         CommandDef::sync(UNDO, "撤销", |ctx: &mut CommandCtx, _args: &CommandArgs| {
@@ -500,7 +525,7 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
 /// the UI thread, then the document is decoded, made active and shown in its
 /// preferred view. Failures go to the log.
 pub fn open_document(ctx: &mut CommandCtx, location: api::Location) {
-    let type_id = match ctx.host().docs.type_for(&location) {
+    let type_id = match ctx.host().docs.type_for(location.file_name()) {
         Ok(type_id) => type_id,
         Err(e) => {
             ctx.host().log.error(e);
@@ -513,21 +538,37 @@ pub fn open_document(ctx: &mut CommandCtx, location: api::Location) {
             let title = location.file_stem();
             ctx.host().docs.open_bytes(&type_id, title, Some(location.clone()), &bytes)
         });
-        let doc_id = match opened {
-            Ok(id) => id,
-            Err(e) => {
-                ctx.host().log.error(e);
-                return;
-            }
-        };
-        ctx.host().docs.set_active(Some(doc_id));
-        ctx.host().log.info(format!("已打开 {location}"));
-        if let Some(vt) = preferred_view_of(&mut ctx, doc_id) {
-            if let Err(e) = ctx.open_view(vt.as_str(), true) {
-                ctx.host().log.warn(format!("打开视图失败: {e}"));
-            }
-        }
+        show_opened(&mut ctx, opened, format!("已打开 {location}"));
     }));
+}
+
+/// Add the document in `bytes` from a file called `name` that it does not
+/// stay tied to (an import): its first save asks where to put it.
+fn import_document(ctx: &mut CommandCtx, name: &str, bytes: &[u8]) {
+    let opened = ctx.host().docs.type_for(name).and_then(|type_id| {
+        let title = api::storage::split_file_name(name).0;
+        ctx.host().docs.open_bytes(&type_id, title, None, bytes)
+    });
+    show_opened(ctx, opened, format!("已导入 {name}"));
+}
+
+/// Make a just-opened document active and show it in its preferred view; a
+/// failure goes to the log.
+fn show_opened(ctx: &mut CommandCtx, opened: Result<api::DocumentId, String>, done: String) {
+    let doc_id = match opened {
+        Ok(id) => id,
+        Err(e) => {
+            ctx.host().log.error(e);
+            return;
+        }
+    };
+    ctx.host().docs.set_active(Some(doc_id));
+    ctx.host().log.info(done);
+    if let Some(vt) = preferred_view_of(ctx, doc_id) {
+        if let Err(e) = ctx.open_view(vt.as_str(), true) {
+            ctx.host().log.warn(format!("打开视图失败: {e}"));
+        }
+    }
 }
 
 /// Save a document to `target`, or to its own file when None. It is encoded
@@ -566,30 +607,28 @@ fn request_open_dialog(ctx: &mut CommandCtx) {
     }));
 }
 
+/// A document's file name (its title, with its type's extension unless the
+/// title has one) and its type's extensions.
+fn file_name_of(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> Option<(String, Vec<String>)> {
+    let host = ctx.host();
+    let doc = host.docs.get(doc_id)?;
+    let exts = host
+        .docs
+        .type_of(&doc.type_id)
+        .map(|t| t.extensions.clone())
+        .unwrap_or_default();
+    let name = if doc.title.contains('.') {
+        doc.title.clone()
+    } else {
+        format!("{}.{}", doc.title, exts.first().map(|s| s.as_str()).unwrap_or("dat"))
+    };
+    Some((name, exts))
+}
+
 /// 请平台在后台线程弹出“另存为”对话框，选中后于 UI 线程落盘。
 fn request_save_as_dialog(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResult {
-    let (default_name, exts) = {
-        let host = ctx.host();
-        match host.docs.get(doc_id) {
-            Some(doc) => {
-                let exts = host
-                    .docs
-                    .type_of(&doc.type_id)
-                    .map(|t| t.extensions.clone())
-                    .unwrap_or_default();
-                let default_name = if doc.title.contains('.') {
-                    doc.title.clone()
-                } else {
-                    format!(
-                        "{}.{}",
-                        doc.title,
-                        exts.first().map(|s| s.as_str()).unwrap_or("dat")
-                    )
-                };
-                (default_name, exts)
-            }
-            None => return CommandResult::failed("文档不存在"),
-        }
+    let Some((default_name, exts)) = file_name_of(ctx, doc_id) else {
+        return CommandResult::failed("文档不存在");
     };
     ctx.request_file_dialog(exts, Some(default_name), Box::new(move |ctx, picked| {
         let Some(location) = picked else {
@@ -601,6 +640,78 @@ fn request_save_as_dialog(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> Comm
         }
     }));
     CommandResult::done_with("已弹出文件对话框")
+}
+
+/// Import: bring in a copy of a file from the user's device (the browser's
+/// file chooser on the web, the file dialog on the desktop). The document is
+/// not tied to the file.
+fn request_import(ctx: &mut CommandCtx) {
+    let exts = all_extensions(ctx);
+    #[cfg(target_arch = "wasm32")]
+    ctx.spawn_io(Box::pin(async move {
+        let picked = crate::web_files::pick(&exts).await;
+        Box::new(move |app: &mut dyn api::AppServices| {
+            let mut ctx = CommandCtx::new(app);
+            match picked {
+                Ok((name, bytes)) => import_document(&mut ctx, &name, &bytes),
+                Err(e) => ctx.host().log.info(e),
+            }
+        }) as api::UiThen
+    }));
+    #[cfg(not(target_arch = "wasm32"))]
+    ctx.request_file_dialog(exts, None, Box::new(|app, picked| {
+        let Some(location) = picked else {
+            return;
+        };
+        CommandCtx::new(app).read_file(location.clone(), Box::new(move |app, bytes| {
+            let mut ctx = CommandCtx::new(app);
+            match bytes {
+                Ok(bytes) => import_document(&mut ctx, location.file_name(), &bytes),
+                Err(e) => ctx.host().log.error(e),
+            }
+        }));
+    }));
+}
+
+/// Export: hand a copy of a document to the user's device (a download on the
+/// web, the file dialog on the desktop). The document stays where it is.
+fn request_export(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResult {
+    let Some((name, exts)) = file_name_of(ctx, doc_id) else {
+        return CommandResult::failed("文档不存在");
+    };
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = exts;
+        let exported = ctx
+            .host()
+            .docs
+            .encode(doc_id)
+            .and_then(|bytes| crate::web_files::download(&name, &bytes));
+        match exported {
+            Ok(()) => CommandResult::done_with(format!("已导出 {name}")),
+            Err(e) => CommandResult::failed(e),
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        ctx.request_file_dialog(exts, Some(name), Box::new(move |app, picked| {
+            let Some(location) = picked else {
+                return;
+            };
+            let mut ctx = CommandCtx::new(app);
+            let bytes = match ctx.host().docs.encode(doc_id) {
+                Ok(bytes) => bytes,
+                Err(e) => return ctx.host().log.error(e),
+            };
+            ctx.write_file(location.clone(), bytes, Box::new(move |app, written| {
+                match written {
+                    Ok(()) => app.host().log.info(format!("已导出到 {location}")),
+                    Err(e) => app.host().log.error(e),
+                }
+            }));
+        }));
+        CommandResult::done_with("已弹出文件对话框")
+    }
 }
 
 #[cfg(test)]

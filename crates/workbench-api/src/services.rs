@@ -42,8 +42,8 @@ pub struct PluginEntry {
 /// 平台服务聚合。UI 线程所有。
 pub struct ServiceHost {
     pub docs: DocumentService,
-    /// Where user files live; reach it through [`AppServices::read_file`] /
-    /// [`AppServices::write_file`], which run the I/O off the UI thread.
+    /// Where user files live; reach it through [`crate::CommandCtx::read_file`]
+    /// and its siblings, which run the I/O off the UI thread.
     pub storage: Storage,
     pub tasks: TaskManager,
     pub ws: WorkspaceState,
@@ -297,14 +297,22 @@ pub trait AppServices {
         default_name: Option<String>,
         action: Box<dyn FnOnce(&mut dyn AppServices, Option<Location>)>,
     );
-    /// Read the file at `location` through its storage provider. The read
-    /// runs off the UI thread; `then` runs on the UI thread on a later frame
-    /// tick, with the bytes or a user-readable error.
-    fn read_file(&mut self, location: Location, then: FileThen<Vec<u8>>);
-    /// Write `bytes` to the file at `location`; like [`Self::read_file`].
-    fn write_file(&mut self, location: Location, bytes: Vec<u8>, then: FileThen<()>);
+    /// Run `io` off the UI thread (file and network I/O, waiting on the
+    /// browser); what it resolves to runs on the UI thread on a later frame
+    /// tick. [`crate::CommandCtx::read_file`] and its siblings build on this.
+    fn spawn_io(&mut self, io: IoTask);
 }
 
-/// What to do on the UI thread once a file operation has finished. It is
-/// `Send` because the operation's future carries it.
+/// What to do on the UI thread once some I/O has finished.
+pub type UiThen = Box<dyn FnOnce(&mut dyn AppServices) + Send>;
+
+/// I/O for [`AppServices::spawn_io`]. It is `Send` on the desktop, where it
+/// runs on the platform's executor threads; on the web it runs on the page's
+/// only thread, and the JS promises it awaits are not `Send`.
+#[cfg(not(target_arch = "wasm32"))]
+pub type IoTask = std::pin::Pin<Box<dyn std::future::Future<Output = UiThen> + Send>>;
+#[cfg(target_arch = "wasm32")]
+pub type IoTask = std::pin::Pin<Box<dyn std::future::Future<Output = UiThen>>>;
+
+/// What to do on the UI thread with a file operation's result.
 pub type FileThen<T> = Box<dyn FnOnce(&mut dyn AppServices, Result<T, String>) + Send>;

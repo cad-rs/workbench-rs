@@ -422,12 +422,21 @@ impl DocumentService {
     // `AppServices::read_file`). Opening is `type_for` → read → `open_bytes`;
     // saving is `begin_save` → write → `finish_save`.
 
-    /// The document type registered for `location`'s extension.
-    pub fn type_for(&self, location: &Location) -> Result<DocumentTypeId, String> {
-        let ext = location.extension().unwrap_or_default();
+    /// The document type registered for the extension of `file_name`.
+    pub fn type_for(&self, file_name: &str) -> Result<DocumentTypeId, String> {
+        let ext = crate::storage::split_file_name(file_name).1.unwrap_or_default();
         self.find_type_by_extension(ext)
             .map(|def| def.id.clone())
             .ok_or_else(|| format!("没有登记 .{ext} 扩展名的文档类型"))
+    }
+
+    /// A document's content as its type's file format.
+    pub fn encode(&self, id: DocumentId) -> Result<Vec<u8>, String> {
+        let doc = self.get(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
+        let def = self
+            .type_of(&doc.type_id)
+            .ok_or_else(|| format!("未注册的文档类型: {}", doc.type_id))?;
+        (def.serialize)(doc.content.as_ref())
     }
 
     /// Decode `bytes` as a document of `type_id` and add it, clean.
@@ -464,14 +473,12 @@ impl DocumentService {
         let location = target
             .or_else(|| doc.location.clone())
             .ok_or_else(|| format!("文档「{}」尚未关联文件，请使用另存为", doc.title))?;
-        let def = self
-            .type_of(&doc.type_id)
-            .ok_or_else(|| format!("未注册的文档类型: {}", doc.type_id))?;
-        let bytes = (def.serialize)(doc.content.as_ref())?;
+        let revision = doc.revision;
+        let bytes = self.encode(id)?;
         let save = PendingSave {
             doc: id,
             location,
-            revision: doc.revision,
+            revision,
         };
         self.get_mut(id).expect("checked above").saving = true;
         Ok((save, bytes))
@@ -587,11 +594,11 @@ mod tests {
     fn opening_picks_the_type_by_extension() {
         let (mut docs, _) = service();
         let location = Location::new("mem", "b.TXT");
-        let type_id = docs.type_for(&location).unwrap();
+        let type_id = docs.type_for(location.file_name()).unwrap();
         let id = docs
             .open_bytes(&type_id, location.file_stem(), Some(location.clone()), b"x")
             .unwrap();
         assert_eq!(docs.read::<Text, _>(id, |t| t.0.clone()).as_deref(), Some("x"));
-        assert!(docs.type_for(&Location::new("mem", "c.bin")).is_err());
+        assert!(docs.type_for("c.bin").is_err());
     }
 }

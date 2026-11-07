@@ -13,12 +13,17 @@ pub mod assets;
 pub mod cli;
 pub mod dialog;
 pub mod executor;
+pub mod file_picker;
 #[cfg(not(target_arch = "wasm32"))]
 mod local_files;
+#[cfg(target_arch = "wasm32")]
+mod opfs;
 pub mod platform_cmds;
 pub mod product;
 pub mod selfcheck;
 mod state;
+#[cfg(target_arch = "wasm32")]
+mod web_files;
 
 pub use app::{AppRuntime, PluginStage, WorkbenchAppBuilder};
 pub use executor::AsyncExecutor;

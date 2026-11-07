@@ -464,6 +464,8 @@ fn register_toolbar(reg: &mut Registry) {
                         ToolbarItem::command("app.new_document").large(),
                         ToolbarItem::command("app.open_document").large(),
                         ToolbarItem::command("app.save_document").large(),
+                        ToolbarItem::command("app.import_document"),
+                        ToolbarItem::command("app.export_document"),
                     ]),
                 ToolbarGroup::new("example.edit", "编辑")
                     .from_source("wb-example")

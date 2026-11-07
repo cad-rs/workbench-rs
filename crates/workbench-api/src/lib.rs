@@ -29,6 +29,7 @@ pub mod ids;
 pub mod i18n;
 pub mod licensing;
 pub mod log;
+pub mod picker;
 pub mod product;
 pub mod registry;
 pub mod services;
@@ -68,10 +69,11 @@ pub use ids::{
 pub use log::{LogEntry, LogLevel, LogStore};
 pub use product::{I18nSection, ProductProfile, ProductToml};
 pub use registry::Registry;
-pub use services::{AppServices, FileThen, PluginEntry, RuntimeStats, ServiceHost};
+pub use services::{AppServices, FileThen, IoTask, PluginEntry, RuntimeStats, ServiceHost, UiThen};
 pub use settings::{SettingKind, SettingScope, SettingSpec, Settings};
 pub use state::StateStore;
-pub use storage::{Location, Storage, StorageFuture, StorageProvider};
+pub use picker::FilePicker;
+pub use storage::{Entry, Location, Storage, StorageFuture, StorageProvider};
 pub use tasks::{
     task_channel, DocCommit, ProgressHandle, TaskCtx, TaskEvent, TaskEventRx, TaskFailure,
     TaskInfo, TaskJob, TaskKind, TaskManager, TaskOutcome, TaskSession, TaskSpec, TaskStatus,

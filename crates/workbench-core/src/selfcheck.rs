@@ -795,13 +795,13 @@ fn shape_count(app: &AppRuntime) -> usize {
         .unwrap_or(0)
 }
 
-/// 反复 frame_tick 直到没有运行中的任务与在途文件读写（或超时）。
+/// 反复 frame_tick 直到没有运行中的任务与在途 I/O（或超时）。
 fn pump_until_idle(app: &mut AppRuntime, timeout: Duration) -> bool {
     let start = Instant::now();
     loop {
         app.frame_tick(0.016);
         let running = app.host.tasks.all().any(|t| !t.status.is_terminal())
-            || app.pending_file_ops() > 0;
+            || app.pending_io() > 0;
         if !running {
             return true;
         }

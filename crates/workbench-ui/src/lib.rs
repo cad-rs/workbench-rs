@@ -28,6 +28,7 @@ mod component_assets;
 pub(crate) mod about;
 
 /// Settings text-edit overlay (gpui-component Input hosted at root level).
+mod file_picker;
 pub(crate) mod text_edit;
 
 /// Built-in platform panels (diagnostics / plugins).
@@ -133,6 +134,10 @@ struct RootView {
     edit_input: Option<gpui::Entity<gpui_component::input::InputState>>,
     edit_subscription: Option<gpui::Subscription>,
     edit_key: Option<String>,
+    /// The in-app file picker is drawn; a save picker's file-name input and
+    /// its Enter subscription.
+    picker_mounted: bool,
+    picker_input: Option<(gpui::Entity<gpui_component::input::InputState>, gpui::Subscription)>,
 }
 
 impl RootView {
@@ -165,6 +170,8 @@ impl RootView {
             edit_input: None,
             edit_subscription: None,
             edit_key: None,
+            picker_mounted: false,
+            picker_input: None,
         }
     }
 }
@@ -593,7 +600,7 @@ impl Render for RootView {
                     // While a text edit is open the Input owns the
                     // keystrokes; hotkeys stay disabled so typing a key that
                     // is also a shortcut does not fire the shortcut.
-                    if text_edit::is_active(&core_k) {
+                    if text_edit::is_active(&core_k) || file_picker::is_open(&core_k) {
                         return;
                     }
                     let Some(code) = wb::KeyCode::from_name(&ks.key) else {
@@ -625,6 +632,21 @@ impl Render for RootView {
 
         // ---- About 对话框 overlay（app.about 命令置位时渲染） ----
         if let Some(overlay) = about::maybe_about_overlay(&core, cx) {
+            root_col = root_col.child(modal_overlay(overlay));
+        }
+
+        // ---- In-app file picker (open/save for OPFS and cloud stores):
+        // mount a save picker's file-name input when it opens, drop it when
+        // the picker closes. Drawn below the text-edit overlay, which hosts
+        // its "new folder" prompt.
+        let picker_open = file_picker::is_open(&core);
+        if picker_open != self.picker_mounted {
+            self.picker_mounted = picker_open;
+            self.picker_input = file_picker::save_name(&core)
+                .map(|seed| file_picker::create_name_input(&core, &seed, window, cx));
+        }
+        let name_input = self.picker_input.as_ref().map(|(input, _)| input.clone());
+        if let Some(overlay) = file_picker::overlay(&core, name_input.as_ref(), cx) {
             root_col = root_col.child(modal_overlay(overlay));
         }
 

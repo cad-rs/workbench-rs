@@ -828,15 +828,52 @@ fn ribbon_活动tab切换与布局持久化() {
 
 /// A storage provider in memory, standing in for OPFS / a cloud store.
 #[derive(Default)]
-struct MemoryStorage(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
+struct MemoryStorage {
+    files: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+    dirs: std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl MemoryStorage {
+    fn with_files(files: &[&str]) -> Self {
+        let storage = Self::default();
+        for key in files {
+            storage.files.lock().unwrap().insert(key.to_string(), Vec::new());
+        }
+        storage
+    }
+}
 
 impl wb::StorageProvider for MemoryStorage {
+    fn label(&self) -> &str {
+        "内存"
+    }
     fn read(&self, key: &str) -> wb::StorageFuture<Vec<u8>> {
-        let file = self.0.lock().unwrap().get(key).cloned();
+        let file = self.files.lock().unwrap().get(key).cloned();
         Box::pin(std::future::ready(file.ok_or_else(|| "没有这个文件".to_string())))
     }
     fn write(&self, key: &str, bytes: Vec<u8>) -> wb::StorageFuture<()> {
-        self.0.lock().unwrap().insert(key.to_string(), bytes);
+        self.files.lock().unwrap().insert(key.to_string(), bytes);
+        Box::pin(std::future::ready(Ok(())))
+    }
+    fn list(&self, dir: &str) -> wb::StorageFuture<Vec<wb::Entry>> {
+        let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+        let dirs = self.dirs.lock().unwrap();
+        let mut listing = std::collections::BTreeMap::new();
+        for key in self.files.lock().unwrap().keys().chain(dirs.iter()) {
+            let Some(rest) = key.strip_prefix(&prefix).filter(|rest| !rest.is_empty()) else {
+                continue;
+            };
+            let (name, is_dir) = match rest.split_once('/') {
+                Some((first, _)) => (first, true),
+                None => (rest, dirs.contains(key)),
+            };
+            let key = format!("{prefix}{name}");
+            listing.insert(name.to_string(), wb::Entry { key, name: name.to_string(), is_dir });
+        }
+        Box::pin(std::future::ready(Ok(listing.into_values().collect())))
+    }
+    fn create_dir(&self, key: &str) -> wb::StorageFuture<()> {
+        self.dirs.lock().unwrap().insert(key.to_string());
         Box::pin(std::future::ready(Ok(())))
     }
 }
@@ -844,7 +881,7 @@ impl wb::StorageProvider for MemoryStorage {
 /// 泵 frame_tick 直到在途文件读写的结果都已应用。
 fn pump_files(app: &mut AppRuntime) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while app.pending_file_ops() > 0 {
+    while app.pending_io() > 0 {
         assert!(std::time::Instant::now() < deadline, "文件读写超时");
         app.frame_tick(0.01);
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -867,7 +904,7 @@ fn 存储_经提供者保存并重新打开() {
     assert!(!matches!(started, wb::CommandResult::Failed { .. }));
     assert!(app.host.docs.get(doc).unwrap().dirty, "写入完成前仍是未保存");
     pump_files(&mut app);
-    assert!(memory.0.lock().unwrap().contains_key("projects/part.shapes"));
+    assert!(memory.files.lock().unwrap().contains_key("projects/part.shapes"));
     let saved = app.host.docs.get(doc).unwrap();
     assert_eq!(saved.title, "part");
     assert_eq!(saved.location.as_ref(), Some(&location));
@@ -927,4 +964,73 @@ fn 自动保存_崩溃后恢复且干净退出后清空() {
     assert!(c.state().keys("autosave/").is_empty());
     drop(c);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The names in the open picker's listing (folders end in `/`).
+fn listing(app: &AppRuntime) -> Vec<String> {
+    let picker = app.host.ws.file_picker.as_ref().expect("picker open");
+    let entries = picker.listing.as_ref().expect("listed").as_ref().expect("listing ok");
+    entries
+        .iter()
+        .map(|e| if e.is_dir { format!("{}/", e.name) } else { e.name.clone() })
+        .collect()
+}
+
+#[test]
+fn 存储_应用内选择器打开与另存() {
+    use workbench_core::file_picker;
+
+    let memory = std::sync::Arc::new(MemoryStorage::with_files(&[
+        "projects/part.shapes",
+        "projects/notes.txt",
+        "top.shapes",
+    ]));
+    // A provider without a native dialog: open/save use the in-app picker.
+    let mut app = builder().with_storage("mem", memory.clone()).build().expect("装配失败");
+
+    // Open: the picker lists the root, folders first, files filtered by type.
+    app.execute_command("app.open_document", &wb::CommandArgs::default());
+    pump_files(&mut app);
+    assert_eq!(listing(&app), ["projects/", "top.shapes"]);
+    let picker = app.host.ws.file_picker.as_ref().unwrap();
+    assert_eq!(picker.sources, [("mem".to_string(), "内存".to_string())]);
+    let folder = picker.listing.as_ref().unwrap().as_ref().unwrap()[0].clone();
+    file_picker::navigate(&mut wb::CommandCtx::new(&mut app), |p| p.enter(&folder));
+    pump_files(&mut app);
+    assert_eq!(listing(&app), ["part.shapes"], "notes.txt is filtered out");
+    let part = wb::Location::new("mem", "projects/part.shapes");
+    app.finish_pick(Some(part.clone()));
+    pump_files(&mut app);
+    assert!(app.host.ws.file_picker.is_none());
+    let opened = app.host.docs.active().expect("opened");
+    assert_eq!((opened.title.as_str(), opened.location.as_ref()), ("part", Some(&part)));
+
+    // Save as: a new folder through the picker's prompt command, then a
+    // typed name, completed with the type's extension.
+    app.execute_command("app.save_document_as", &wb::CommandArgs::default());
+    pump_files(&mut app);
+    let picker = app.host.ws.file_picker.as_ref().expect("save picker");
+    assert_eq!(picker.save.as_deref(), Some("part.shapes"));
+    let created = app.execute_command(
+        file_picker::NEW_FOLDER,
+        &wb::CommandArgs::new().with("value", "副本"),
+    );
+    assert!(!matches!(created, wb::CommandResult::Failed { .. }), "{created:?}");
+    pump_files(&mut app);
+    assert_eq!(listing(&app), ["projects/", "副本/", "top.shapes"]);
+    let target = file_picker::target(&mut wb::CommandCtx::new(&mut app), "copy").unwrap();
+    assert_eq!(target, wb::Location::new("mem", "copy.shapes"));
+    app.finish_pick(Some(target.clone()));
+    pump_files(&mut app);
+    assert!(memory.files.lock().unwrap().contains_key("copy.shapes"));
+    assert_eq!(app.host.docs.active().unwrap().location.as_ref(), Some(&target));
+
+    // Cancel closes the picker and runs nothing.
+    app.execute_command("app.open_document", &wb::CommandArgs::default());
+    pump_files(&mut app);
+    let docs = app.host.docs.docs().count();
+    app.finish_pick(None);
+    pump_files(&mut app);
+    assert!(app.host.ws.file_picker.is_none());
+    assert_eq!(app.host.docs.docs().count(), docs);
 }

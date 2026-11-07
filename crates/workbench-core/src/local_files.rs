@@ -9,6 +9,15 @@ use workbench_api as api;
 pub(crate) struct LocalFiles;
 
 impl api::StorageProvider for LocalFiles {
+    fn label(&self) -> &str {
+        "本地文件"
+    }
+
+    /// The OS's own open/save dialogs browse the local file system.
+    fn native_picker(&self) -> bool {
+        true
+    }
+
     fn read(&self, key: &str) -> api::StorageFuture<Vec<u8>> {
         let path = PathBuf::from(key);
         Box::pin(blocking::unblock(move || {

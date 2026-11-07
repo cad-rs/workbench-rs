@@ -54,18 +54,17 @@ pub struct AppRuntime {
     /// 命令调用历史（可查询，供日志/自动化测试/诊断，design.md §16.4）。
     invocations: VecDeque<InvocationRecord>,
     invocation_seq: u64,
-    /// 在途的原生对话框（后台线程执行，结果按帧排空）。
+    /// 在途的文件对话框：系统对话框（后台线程执行，结果按帧排空）或应用内
+    /// 选择器（`ws.file_picker`，由 [`Self::finish_pick`] 结束）。
     dialog_in_flight: Option<FileDialogRequest>,
     dialog_result_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
-    /// Finished file operations' continuations, run by `frame_tick`.
-    file_done_tx: std::sync::mpsc::Sender<FileDone>,
-    file_done_rx: std::sync::mpsc::Receiver<FileDone>,
-    /// File operations started and not yet drained.
-    file_ops: usize,
+    /// Finished I/O's continuations ([`api::AppServices::spawn_io`]), run by
+    /// `frame_tick`.
+    io_done_tx: std::sync::mpsc::Sender<api::UiThen>,
+    io_done_rx: std::sync::mpsc::Receiver<api::UiThen>,
+    /// I/O started and not yet drained.
+    io_pending: usize,
 }
-
-/// A finished file operation: its continuation, bound to the result.
-type FileDone = Box<dyn FnOnce(&mut dyn api::AppServices) + Send>;
 
 /// 需要弹原生对话框的 UI 动作。对话框在后台线程运行（阻塞式 rfd 调用
 /// 绝不能进 UI 线程：会饿死 gpui 事件循环并触发窗口内部重入借用），
@@ -193,48 +192,60 @@ impl AppRuntime {
 
     // ---- 帧驱动 ----
 
-    /// 请求弹原生文件对话框（非阻塞）：对话框在后台线程运行，选择结果
-    /// 由 [`Self::frame_tick`] 排水执行。同一时刻只允许一个在途对话框。
+    /// 请求文件对话框（非阻塞）。有应用内浏览的存储（浏览器存储、云盘）时
+    /// 打开应用内选择器（`ws.file_picker`，前端渲染，选定后调
+    /// [`Self::finish_pick`]）；否则在后台线程弹系统对话框，结果由
+    /// [`Self::frame_tick`] 排水执行。同一时刻只允许一个在途对话框。
     pub(crate) fn request_dialog(&mut self, request: FileDialogRequest) {
         if self.dialog_in_flight.is_some() {
             self.host.log.warn("已有对话框在途，忽略新的打开/保存请求");
             return;
         }
-        #[cfg(target_arch = "wasm32")]
-        self.host.log.warn("Web 版还没有文件选择器");
-        let rx = crate::dialog::spawn(request.extensions.clone(), request.default_name.clone());
+        let sources = self.host.storage.in_app_sources();
+        let picker = api::FilePicker::new(
+            request.default_name.clone(),
+            request.extensions.clone(),
+            sources,
+        );
         self.dialog_in_flight = Some(request);
+        if let Some(picker) = picker {
+            self.host.ws.file_picker = Some(picker);
+            crate::file_picker::list(&mut api::CommandCtx::new(self));
+            return;
+        }
+        let request = self.dialog_in_flight.as_ref().expect("set above");
+        #[cfg(target_arch = "wasm32")]
+        self.host.log.warn("没有可用的文件存储");
+        let rx = crate::dialog::spawn(request.extensions.clone(), request.default_name.clone());
         self.dialog_result_rx = Some(rx);
     }
 
-    /// File operations started and not yet finished (their continuations run
-    /// on a later [`Self::frame_tick`]).
-    pub fn pending_file_ops(&self) -> usize {
-        self.file_ops
+    /// Close the in-app file picker with what the user picked (None:
+    /// cancelled) and run the dialog request's action.
+    pub fn finish_pick(&mut self, picked: Option<api::Location>) {
+        self.host.ws.file_picker = None;
+        let Some(request) = self.dialog_in_flight.take() else {
+            return;
+        };
+        if picked.is_none() {
+            self.host.log.info("已取消");
+        }
+        (request.action)(self, picked);
     }
 
-    /// Run a storage operation off the UI thread; `then` gets its result on
-    /// the frame tick after it finishes.
-    fn spawn_file_op<T: Send + 'static>(
-        &mut self,
-        op: api::StorageFuture<T>,
-        then: api::FileThen<T>,
-    ) {
-        let done = self.file_done_tx.clone();
-        self.file_ops += 1;
-        self.executor.spawn_detached(async move {
-            let result = op.await;
-            let _ = done.send(Box::new(move |app: &mut dyn api::AppServices| then(app, result)));
-        });
+    /// I/O started with [`api::AppServices::spawn_io`] whose continuation
+    /// has not run yet.
+    pub fn pending_io(&self) -> usize {
+        self.io_pending
     }
 
-    /// Run the continuations of finished file operations. Returns whether
-    /// any ran (the UI needs a redraw).
-    fn drain_file_ops(&mut self) -> bool {
+    /// Run the continuations of finished I/O. Returns whether any ran (the
+    /// UI needs a redraw).
+    fn drain_io(&mut self) -> bool {
         let mut ran = false;
-        while let Ok(done) = self.file_done_rx.try_recv() {
-            self.file_ops -= 1;
-            done(self);
+        while let Ok(then) = self.io_done_rx.try_recv() {
+            self.io_pending -= 1;
+            then(self);
             ran = true;
         }
         ran
@@ -312,7 +323,7 @@ impl AppRuntime {
     /// 因此滞后）。
     pub fn frame_tick(&mut self, dt_secs: f32) -> bool {
         let mut changed = self.drain_dialog_result();
-        changed |= self.drain_file_ops();
+        changed |= self.drain_io();
         changed |= self.drain_account_login();
         changed |= self.pump_task_events();
         // 自动保存（阶段 5：§18 生产级扩展）
@@ -470,11 +481,12 @@ impl AppRuntime {
         let mut recovered = 0;
         for (meta_key, stem) in keys.iter().filter_map(|k| Some((k, k.strip_suffix(".json")?))) {
             // 同名内容条目，扩展名即文档类型的扩展名
-            let content = keys.iter().find_map(|key| {
-                let ext = key.strip_prefix(stem)?.strip_prefix('.')?;
-                (ext != "json").then_some((key, ext))
+            let content = keys.iter().find(|key| {
+                key.strip_prefix(stem)
+                    .and_then(|rest| rest.strip_prefix('.'))
+                    .is_some_and(|ext| ext != "json")
             });
-            let Some((content_key, ext)) = content else { continue };
+            let Some(content_key) = content else { continue };
             let Some(meta) = self
                 .state
                 .read(meta_key)
@@ -492,9 +504,7 @@ impl AppRuntime {
             let restored = self
                 .host
                 .docs
-                .find_type_by_extension(ext)
-                .map(|def| def.id.clone())
-                .ok_or_else(|| format!("没有登记 .{ext} 扩展名的文档类型"))
+                .type_for(content_key)
                 .and_then(|type_id| {
                     let bytes = self.state.read(content_key).ok_or("内容已不在")?;
                     self.host.docs.open_bytes(&type_id, &title, None, &bytes)
@@ -927,14 +937,12 @@ impl api::AppServices for AppRuntime {
         });
     }
 
-    fn read_file(&mut self, location: api::Location, then: api::FileThen<Vec<u8>>) {
-        let read = self.host.storage.read(&location);
-        self.spawn_file_op(read, then);
-    }
-
-    fn write_file(&mut self, location: api::Location, bytes: Vec<u8>, then: api::FileThen<()>) {
-        let write = self.host.storage.write(&location, bytes);
-        self.spawn_file_op(write, then);
+    fn spawn_io(&mut self, io: api::IoTask) {
+        let done = self.io_done_tx.clone();
+        self.io_pending += 1;
+        self.executor.spawn_detached(async move {
+            let _ = done.send(io.await);
+        });
     }
 }
 
@@ -1036,10 +1044,13 @@ pub type ModuleLoader = Box<dyn Fn(&str, &[String]) -> Vec<Box<dyn Workbench>> +
 
 impl WorkbenchAppBuilder {
     pub fn new(product_id: impl Into<String>, product_name: impl Into<String>) -> Self {
-        #[allow(unused_mut)]
+        // Where user files live by default: the local file system on the
+        // desktop, the browser's private file system (OPFS) on the web.
         let mut storage = api::Storage::default();
         #[cfg(not(target_arch = "wasm32"))]
         storage.register(api::storage::LOCAL, Arc::new(crate::local_files::LocalFiles));
+        #[cfg(target_arch = "wasm32")]
+        storage.register(crate::opfs::ID, Arc::new(crate::opfs::Opfs));
         Self {
             product_id: product_id.into(),
             product_name: product_name.into(),
@@ -1065,10 +1076,12 @@ impl WorkbenchAppBuilder {
         }
     }
 
-    /// Add a place user files can live (the browser's origin-private file
-    /// system, a cloud store, …), under `id`: documents there have
-    /// [`api::Location`]s with that provider. The desktop has the local file
-    /// system as [`api::storage::LOCAL`]; registering that id replaces it.
+    /// Add a place user files can live (a cloud store, …), under `id`:
+    /// documents there have [`api::Location`]s with that provider, and the
+    /// open/save dialogs offer it in the in-app picker. Built in: the local
+    /// file system on the desktop ([`api::storage::LOCAL`], with the OS
+    /// dialogs) and the browser's private file system on the web (`opfs`);
+    /// registering either id replaces it.
     pub fn with_storage(
         mut self,
         id: impl Into<String>,
@@ -1429,7 +1442,7 @@ impl WorkbenchAppBuilder {
         // 共享异步执行器（Async 命令的运行载体）
         let shutdown = Arc::new(AtomicBool::new(false));
         let executor = AsyncExecutor::new(2, shutdown.clone());
-        let (file_done_tx, file_done_rx) = std::sync::mpsc::channel();
+        let (io_done_tx, io_done_rx) = std::sync::mpsc::channel();
 
         let mut runtime = AppRuntime {
             registry,
@@ -1456,9 +1469,9 @@ impl WorkbenchAppBuilder {
             invocation_seq: 0,
             dialog_in_flight: None,
             dialog_result_rx: None,
-            file_done_tx,
-            file_done_rx,
-            file_ops: 0,
+            io_done_tx,
+            io_done_rx,
+            io_pending: 0,
         };
         runtime.snapshot = runtime.make_snapshot();
 

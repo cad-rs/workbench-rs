@@ -3,8 +3,8 @@
 use std::pin::Pin;
 
 use crate::ids::{CommandId, DocumentId};
-use crate::services::{AppServices, FileThen};
-use crate::storage::Location;
+use crate::services::{AppServices, FileThen, IoTask, UiThen};
+use crate::storage::{Entry, Location, StorageFuture};
 use crate::tasks::TaskSpec;
 
 // ---- 快捷键 ----
@@ -417,13 +417,37 @@ impl<'a> CommandCtx<'a> {
     ) {
         self.app.request_file_dialog(extensions, default_name, action);
     }
-    /// Read a file off the UI thread; see [`AppServices::read_file`].
-    pub fn read_file(&mut self, location: Location, then: FileThen<Vec<u8>>) {
-        self.app.read_file(location, then);
+    /// Run I/O off the UI thread; see [`AppServices::spawn_io`].
+    pub fn spawn_io(&mut self, io: IoTask) {
+        self.app.spawn_io(io);
     }
-    /// Write a file off the UI thread; see [`AppServices::write_file`].
+    /// Read the file at `location` through its storage provider, off the UI
+    /// thread; `then` gets the bytes (or a user-readable error) on the UI
+    /// thread on a later frame tick.
+    pub fn read_file(&mut self, location: Location, then: FileThen<Vec<u8>>) {
+        let read = self.host().storage.read(&location);
+        self.then_on_ui(read, then);
+    }
+    /// Write `bytes` to the file at `location`; like [`Self::read_file`].
     pub fn write_file(&mut self, location: Location, bytes: Vec<u8>, then: FileThen<()>) {
-        self.app.write_file(location, bytes, then);
+        let write = self.host().storage.write(&location, bytes);
+        self.then_on_ui(write, then);
+    }
+    /// List the folder at `location`; like [`Self::read_file`].
+    pub fn list_dir(&mut self, location: Location, then: FileThen<Vec<Entry>>) {
+        let list = self.host().storage.list(&location);
+        self.then_on_ui(list, then);
+    }
+    /// Create the folder at `location`; like [`Self::read_file`].
+    pub fn create_dir(&mut self, location: Location, then: FileThen<()>) {
+        let create = self.host().storage.create_dir(&location);
+        self.then_on_ui(create, then);
+    }
+    fn then_on_ui<T: Send + 'static>(&mut self, op: StorageFuture<T>, then: FileThen<T>) {
+        self.app.spawn_io(Box::pin(async move {
+            let result = op.await;
+            Box::new(move |app: &mut dyn AppServices| then(app, result)) as UiThen
+        }));
     }
     /// 打开中央视图（可绑定活动文档）。
     pub fn open_view(&mut self, view_type: &str, bind_document: bool) -> Result<(), String> {

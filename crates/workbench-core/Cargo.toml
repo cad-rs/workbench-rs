@@ -28,7 +28,36 @@ blocking = { workspace = true }
 ureq = { workspace = true }
 
 # Web (wasm32): async executor drives futures on the main thread; app state
-# (settings, layout) lives in localStorage
+# (settings, layout) lives in localStorage; documents in OPFS; import/export
+# through the browser's file chooser and downloads
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = { workspace = true }
-web-sys = { workspace = true, features = ["Storage"] }
+js-sys = { workspace = true }
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true, features = [
+    # app state
+    "Storage",
+    # OPFS document storage
+    "Navigator",
+    "StorageManager",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemHandle",
+    "FileSystemHandleKind",
+    "FileSystemWritableFileStream",
+    "WritableStream",
+    "DomException",
+    # import (file chooser) / export (download)
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "HtmlAnchorElement",
+    "FileList",
+    "File",
+    "Blob",
+    "Url",
+    "EventTarget",
+] }

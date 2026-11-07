@@ -504,6 +504,9 @@ pub struct WorkspaceState {
     /// routes keystrokes into the buffer while this is Some; Enter commits
     /// via `app.settings.set`, Esc discards.
     pub text_edit: Option<TextEdit>,
+    /// The open in-app file picker (open/save for storage without an OS
+    /// dialog); the frontend renders it while Some.
+    pub file_picker: Option<crate::picker::FilePicker>,
     /// Login/session state (Phase 3 account integration); the status bar
     /// account entry renders from this.
     pub account: AccountPhase,
@@ -533,6 +536,7 @@ impl WorkspaceState {
             ribbon_collapse_enabled: false,
             about_open: false,
             text_edit: None,
+            file_picker: None,
             account: AccountPhase::default(),
             panels: Vec::new(),
             tabs: Vec::new(),
