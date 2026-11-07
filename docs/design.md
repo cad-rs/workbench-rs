@@ -699,6 +699,35 @@ data per document; autosave and crash-recovery extension points.
 Domain document schemas are defined by domain modules. The platform never
 adopts internal Rust object layouts as a long-term file format.
 
+#### Where files live
+
+User files and the UI for choosing them are separate abstractions, because
+the web build cannot use OS paths or the browser's native file picker for
+documents it must later save back:
+
+- **Storage providers** (`workbench_api::storage`) hold user files: the local
+  file system on the desktop, the origin-private file system (OPFS) on the web,
+  cloud stores on either. A document remembers a `Location` (provider id +
+  the provider's key), never an OS path. Providers are async; the platform
+  runs their futures off the UI thread and applies results on a later frame
+  tick (`AppServices::read_file` / `write_file`). `DocumentService` only
+  encodes and decodes: opening is `type_for` → read → `open_bytes`, saving is
+  `begin_save` → write → `finish_save` (one save per document in flight; a
+  document edited during its write stays dirty).
+- **File pickers** choose a `Location`. The local file system uses the
+  native dialog; OPFS and cloud stores use an in-app file browser built on the
+  providers' listing API. The browser's own picker and downloads only serve
+  "import local file" / "export to local file" commands: they yield one-off
+  bytes, not a location that can be saved back.
+- **App state** (settings, layout, autosave, the session marker) is not user
+  files and needs no picker: a key-value store, files in the config directory
+  on the desktop and OPFS on the web.
+
+Status: providers, `Location`, the async open/save path and the local file
+system provider are in place. Next: the app-state store (so the web build
+persists settings and layout), the in-app picker with an OPFS provider and
+import/export, then cloud providers with version-checked writes.
+
 ### 12.2 Transactions and undo/redo
 
 - commands commit changes with well-defined transaction boundaries;

@@ -450,12 +450,27 @@ pub fn run(app: &mut AppRuntime) -> i32 {
                 .and_then(|d| app.host.docs.type_of(&d.type_id).and_then(|t| t.extensions.first().cloned()))
                 .unwrap_or_else(|| "dat".to_string())
         ));
-        let saved = match doc_id {
-            Some(id) => app.host.docs.save_as(id, &path),
-            None => Err("无活动文档".to_string()),
-        };
-        let saved_ok = saved.is_ok() && path.exists();
-        let opened = crate::platform_cmds::open_path_runtime(app, &path).is_ok();
+        let _ = std::fs::remove_file(&path);
+        let location = api::Location::local(&path);
+        let id = doc_id.expect("checked above");
+        // Both go through the storage provider off the UI thread; pump until
+        // their results have been applied.
+        let started = crate::platform_cmds::save_document(
+            &mut api::CommandCtx::new(app),
+            id,
+            Some(location.clone()),
+        );
+        let saved_ok = !matches!(started, api::CommandResult::Failed { .. })
+            && pump_until_idle(app, Duration::from_secs(10))
+            && path.exists()
+            && app.host.docs.get(id).is_some_and(|d| d.location.as_ref() == Some(&location));
+        crate::platform_cmds::open_document(&mut api::CommandCtx::new(app), location.clone());
+        let opened = pump_until_idle(app, Duration::from_secs(10))
+            && app
+                .host
+                .docs
+                .active()
+                .is_some_and(|d| d.id != id && d.location.as_ref() == Some(&location));
         checks.push(Check::new(
             "文档: 保存 + 打开",
             saved_ok && opened,
@@ -799,12 +814,13 @@ fn shape_count(app: &AppRuntime) -> usize {
         .unwrap_or(0)
 }
 
-/// 反复 frame_tick 直到没有运行中的任务（或超时）。
+/// 反复 frame_tick 直到没有运行中的任务与在途文件读写（或超时）。
 fn pump_until_idle(app: &mut AppRuntime, timeout: Duration) -> bool {
     let start = Instant::now();
     loop {
         app.frame_tick(0.016);
-        let running = app.host.tasks.all().any(|t| !t.status.is_terminal());
+        let running = app.host.tasks.all().any(|t| !t.status.is_terminal())
+            || app.pending_file_ops() > 0;
         if !running {
             return true;
         }

@@ -43,7 +43,15 @@ pub struct AppRuntime {
     /// 在途的原生对话框（后台线程执行，结果按帧排空）。
     dialog_in_flight: Option<FileDialogRequest>,
     dialog_result_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
+    /// Finished file operations' continuations, run by `frame_tick`.
+    file_done_tx: std::sync::mpsc::Sender<FileDone>,
+    file_done_rx: std::sync::mpsc::Receiver<FileDone>,
+    /// File operations started and not yet drained.
+    file_ops: usize,
 }
+
+/// A finished file operation: its continuation, bound to the result.
+type FileDone = Box<dyn FnOnce(&mut dyn api::AppServices) + Send>;
 
 /// 需要弹原生对话框的 UI 动作。对话框在后台线程运行（阻塞式 rfd 调用
 /// 绝不能进 UI 线程：会饿死 gpui 事件循环并触发窗口内部重入借用），
@@ -55,7 +63,7 @@ pub(crate) struct FileDialogRequest {
     /// 默认文件名（保存对话框）；打开对话框为 `None`。
     pub default_name: Option<String>,
     /// 拿到选择结果后于 UI 线程执行的后续动作（`None` = 取消）。
-    pub action: Box<dyn FnOnce(&mut dyn api::AppServices, Option<PathBuf>)>,
+    pub action: Box<dyn FnOnce(&mut dyn api::AppServices, Option<api::Location>)>,
 }
 
 impl AppRuntime {
@@ -177,18 +185,44 @@ impl AppRuntime {
             self.host.log.warn("已有对话框在途，忽略新的打开/保存请求");
             return;
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        let extensions = request.extensions.clone();
-        let default_name = request.default_name.clone();
-        std::thread::spawn(move || {
-            let picked = match &default_name {
-                Some(name) => crate::dialog::pick_save_file(name, &extensions),
-                None => crate::dialog::pick_open_file(&extensions),
-            };
-            let _ = tx.send(picked);
-        });
+        #[cfg(target_arch = "wasm32")]
+        self.host.log.warn("Web 版还没有文件选择器");
+        let rx = crate::dialog::spawn(request.extensions.clone(), request.default_name.clone());
         self.dialog_in_flight = Some(request);
         self.dialog_result_rx = Some(rx);
+    }
+
+    /// File operations started and not yet finished (their continuations run
+    /// on a later [`Self::frame_tick`]).
+    pub fn pending_file_ops(&self) -> usize {
+        self.file_ops
+    }
+
+    /// Run a storage operation off the UI thread; `then` gets its result on
+    /// the frame tick after it finishes.
+    fn spawn_file_op<T: Send + 'static>(
+        &mut self,
+        op: api::StorageFuture<T>,
+        then: api::FileThen<T>,
+    ) {
+        let done = self.file_done_tx.clone();
+        self.file_ops += 1;
+        self.executor.spawn_detached(async move {
+            let result = op.await;
+            let _ = done.send(Box::new(move |app: &mut dyn api::AppServices| then(app, result)));
+        });
+    }
+
+    /// Run the continuations of finished file operations. Returns whether
+    /// any ran (the UI needs a redraw).
+    fn drain_file_ops(&mut self) -> bool {
+        let mut ran = false;
+        while let Ok(done) = self.file_done_rx.try_recv() {
+            self.file_ops -= 1;
+            done(self);
+            ran = true;
+        }
+        ran
     }
 
     /// 排空在途对话框结果并在 UI 线程执行其后续动作。
@@ -215,7 +249,7 @@ impl AppRuntime {
         if picked.is_none() {
             self.host.log.info("已取消");
         }
-        (request.action)(self, picked);
+        (request.action)(self, picked.map(api::Location::local));
         true
     }
 
@@ -257,12 +291,13 @@ impl AppRuntime {
     /// 平台节拍：泵任务事件、自动保存计时、同步活动文档/标签标题、刷新上下文快照。
     ///
     /// 返回 `true` 表示本次节拍改动了 UI 可见状态（任务事件、对话框结果、
-    /// 登录阶段、自动保存、活动文档），前端据此排一次重绘。前端在自己的定时器
-    /// 上驱动本方法，而不是在视图渲染里——gpui 只在失效时重画，渲染驱动的泵
+    /// 文件读写结果、登录阶段、自动保存、活动文档），前端据此排一次重绘。
+    /// 前端在自己的定时器上驱动本方法，而不是在视图渲染里——gpui 只在失效时重画，渲染驱动的泵
     /// 会在 UI 空闲时停转，任务结果回到通道里没人取（诊断面板的后台任务计数
     /// 因此滞后）。
     pub fn frame_tick(&mut self, dt_secs: f32) -> bool {
         let mut changed = self.drain_dialog_result();
+        changed |= self.drain_file_ops();
         changed |= self.drain_account_login();
         changed |= self.pump_task_events();
         // 自动保存（阶段 5：§18 生产级扩展）
@@ -432,14 +467,23 @@ impl AppRuntime {
                 Err(_) => None,
             };
             let Some(doc_file) = doc_file else { continue };
-            match self.host.docs.open_file(&doc_file) {
+            let title = format!(
+                "[恢复] {}",
+                meta.get("title").and_then(|t| t.as_str()).unwrap_or(&stem)
+            );
+            // The recovered document gets no file: the autosave copy is
+            // deleted below, so its first save asks where to put it.
+            let restored = self
+                .host
+                .docs
+                .type_for(&api::Location::local(&doc_file))
+                .and_then(|type_id| {
+                    let bytes = std::fs::read(&doc_file).map_err(|e| e.to_string())?;
+                    self.host.docs.open_bytes(&type_id, &title, None, &bytes)
+                });
+            match restored {
                 Ok(id) => {
-                    let title = format!(
-                        "[恢复] {}",
-                        meta.get("title").and_then(|t| t.as_str()).unwrap_or(&stem)
-                    );
                     if let Some(d) = self.host.docs.get_mut(id) {
-                        d.title = title.clone();
                         d.dirty = true; // 恢复内容必须由用户确认后保存
                     }
                     self.host.docs.set_active(Some(id));
@@ -868,13 +912,23 @@ impl api::AppServices for AppRuntime {
         &mut self,
         extensions: Vec<String>,
         default_name: Option<String>,
-        action: Box<dyn FnOnce(&mut dyn api::AppServices, Option<PathBuf>)>,
+        action: Box<dyn FnOnce(&mut dyn api::AppServices, Option<api::Location>)>,
     ) {
         self.request_dialog(FileDialogRequest {
             extensions,
             default_name,
             action,
         });
+    }
+
+    fn read_file(&mut self, location: api::Location, then: api::FileThen<Vec<u8>>) {
+        let read = self.host.storage.read(&location);
+        self.spawn_file_op(read, then);
+    }
+
+    fn write_file(&mut self, location: api::Location, bytes: Vec<u8>, then: api::FileThen<()>) {
+        let write = self.host.storage.write(&location, bytes);
+        self.spawn_file_op(write, then);
     }
 }
 
@@ -964,6 +1018,9 @@ pub struct WorkbenchAppBuilder {
     module_loader: Option<ModuleLoader>,
     /// Injected account capability (Phase 3); None = no login surface.
     account: Option<Arc<dyn api::AccountService>>,
+    /// Where user files live: the local file system on the desktop, plus
+    /// whatever the product adds.
+    storage: api::Storage,
 }
 
 /// 产品的模块解析器：给定插件 ID 与它本次要装配的模块 ID，返回 Workbench。
@@ -974,6 +1031,10 @@ pub type ModuleLoader = Box<dyn Fn(&str, &[String]) -> Vec<Box<dyn Workbench>> +
 
 impl WorkbenchAppBuilder {
     pub fn new(product_id: impl Into<String>, product_name: impl Into<String>) -> Self {
+        #[allow(unused_mut)]
+        let mut storage = api::Storage::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        storage.register(api::storage::LOCAL, Arc::new(crate::local_files::LocalFiles));
         Self {
             product_id: product_id.into(),
             product_name: product_name.into(),
@@ -995,7 +1056,21 @@ impl WorkbenchAppBuilder {
             theme: "dark".to_string(),
             module_loader: None,
             account: None,
+            storage,
         }
+    }
+
+    /// Add a place user files can live (the browser's origin-private file
+    /// system, a cloud store, …), under `id`: documents there have
+    /// [`api::Location`]s with that provider. The desktop has the local file
+    /// system as [`api::storage::LOCAL`]; registering that id replaces it.
+    pub fn with_storage(
+        mut self,
+        id: impl Into<String>,
+        provider: Arc<dyn api::StorageProvider>,
+    ) -> Self {
+        self.storage.register(id, provider);
+        self
     }
 
     /// 设置产品的模块解析器（插件启用的 Workbench 模块由它装配）。
@@ -1112,9 +1187,9 @@ impl WorkbenchAppBuilder {
     }
 
     /// Open this document file at startup (the file-association entry
-    /// point). Applied after the default-document step, so a launch with
-    /// both shows only the launched file as active. A read failure is
-    /// logged, not fatal.
+    /// point). It is read in the background and opens on an early frame
+    /// tick, after the default document, so a launch with both ends up with
+    /// the launched file active. A read failure is logged, not fatal.
     pub fn with_open_file_on_start(mut self, path: PathBuf) -> Self {
         self.open_file_on_start = Some(path);
         self
@@ -1323,6 +1398,7 @@ impl WorkbenchAppBuilder {
         // Account capability (Phase 3): injected by the product; commands and
         // the status bar render from host.account + ws.account.
         host.account = self.account;
+        host.storage = self.storage;
 
         // 插件注册镜像（诊断/管理面板用）；tier 为清单声明的 license 要求。
         for id in &registry.plugins_loaded {
@@ -1350,6 +1426,7 @@ impl WorkbenchAppBuilder {
         // 共享异步执行器（Async 命令的运行载体）
         let shutdown = Arc::new(AtomicBool::new(false));
         let executor = AsyncExecutor::new(2, shutdown.clone());
+        let (file_done_tx, file_done_rx) = std::sync::mpsc::channel();
 
         let mut runtime = AppRuntime {
             registry,
@@ -1375,6 +1452,9 @@ impl WorkbenchAppBuilder {
             invocation_seq: 0,
             dialog_in_flight: None,
             dialog_result_rx: None,
+            file_done_tx,
+            file_done_rx,
+            file_ops: 0,
         };
         runtime.snapshot = runtime.make_snapshot();
 
@@ -1421,9 +1501,8 @@ impl WorkbenchAppBuilder {
 
         // 启动时打开文件（文件关联入口；失败只记日志，不阻断启动）。
         if let Some(path) = self.open_file_on_start.clone() {
-            if let Err(e) = crate::platform_cmds::open_path_runtime(&mut runtime, &path) {
-                runtime.host.log.warn(format!("打开 {} 失败：{e}", path.display()));
-            }
+            let mut ctx = api::CommandCtx::new(&mut runtime);
+            crate::platform_cmds::open_document(&mut ctx, api::Location::local(path));
         }
 
         // 初始视图（布局文件已存在时由适配器负责恢复布局，不再叠加初始视图）
@@ -1473,7 +1552,7 @@ mod tests {
     }
 
     fn request(
-        action: Box<dyn FnOnce(&mut dyn api::AppServices, Option<PathBuf>)>,
+        action: Box<dyn FnOnce(&mut dyn api::AppServices, Option<api::Location>)>,
     ) -> FileDialogRequest {
         FileDialogRequest {
             extensions: vec!["rcad".to_string()],
@@ -1489,7 +1568,7 @@ mod tests {
     fn 对话框请求_由帧节拍排水并在主线程执行动作() {
         let mut app = runtime();
         let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<api::Location>>();
         tx.send(Some(PathBuf::from("C:/tmp/part.rcad"))).unwrap();
         app.dialog_in_flight = Some(request(Box::new(move |_, picked| {
             let _ = done_tx.send(picked);
@@ -1499,7 +1578,7 @@ mod tests {
         assert!(app.frame_tick(0.0), "取到结果应报告需要重绘");
         assert_eq!(
             done_rx.try_recv().unwrap(),
-            Some(PathBuf::from("C:/tmp/part.rcad"))
+            Some(api::Location::local("C:/tmp/part.rcad"))
         );
         assert!(app.dialog_in_flight.is_none());
         assert!(app.dialog_result_rx.is_none());
@@ -1511,7 +1590,7 @@ mod tests {
     fn 对话框取消_动作收到空值() {
         let mut app = runtime();
         let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<api::Location>>();
         tx.send(None).unwrap();
         app.dialog_in_flight = Some(request(Box::new(move |_, picked| {
             let _ = done_tx.send(picked);
@@ -1528,7 +1607,7 @@ mod tests {
     fn 对话框线程死亡_按取消处理() {
         let mut app = runtime();
         let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<api::Location>>();
         drop(tx);
         app.dialog_in_flight = Some(request(Box::new(move |_, picked| {
             let _ = done_tx.send(picked);

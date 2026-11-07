@@ -33,6 +33,7 @@ pub mod product;
 pub mod registry;
 pub mod services;
 pub mod settings;
+pub mod storage;
 pub mod tasks;
 pub mod view;
 pub mod workbench;
@@ -53,7 +54,9 @@ pub use command::{
     CtxSnapshot, DocSummary, Hotkey, InvocationRecord, InvocationStatus, KeyCode, SyncHandler,
 };
 pub use dispatch::{clear_dispatcher, dispatch, publish_dispatcher};
-pub use documents::{Document, DocumentContent, DocumentService, DocumentTypeDef, UndoHooks};
+pub use documents::{
+    Document, DocumentContent, DocumentService, DocumentTypeDef, PendingSave, UndoHooks,
+};
 pub use geo::{Color, Point, Rect, Size};
 pub use i18n::Localizer;
 pub use licensing::LicenseTier;
@@ -64,8 +67,9 @@ pub use ids::{
 pub use log::{LogEntry, LogLevel, LogStore};
 pub use product::{I18nSection, ProductProfile, ProductToml};
 pub use registry::Registry;
-pub use services::{AppServices, PluginEntry, RuntimeStats, ServiceHost};
+pub use services::{AppServices, FileThen, PluginEntry, RuntimeStats, ServiceHost};
 pub use settings::{SettingKind, SettingScope, SettingSpec, Settings};
+pub use storage::{Location, Storage, StorageFuture, StorageProvider};
 pub use tasks::{
     task_channel, DocCommit, ProgressHandle, TaskCtx, TaskEvent, TaskEventRx, TaskFailure,
     TaskInfo, TaskJob, TaskKind, TaskManager, TaskOutcome, TaskSession, TaskSpec, TaskStatus,

@@ -826,3 +826,74 @@ fn ribbon_活动tab切换与布局持久化() {
         assert_eq!(ws.active_ribbon_tab, "wb.tools");
     }
 }
+
+/// A storage provider in memory, standing in for OPFS / a cloud store.
+#[derive(Default)]
+struct MemoryStorage(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
+
+impl wb::StorageProvider for MemoryStorage {
+    fn read(&self, key: &str) -> wb::StorageFuture<Vec<u8>> {
+        let file = self.0.lock().unwrap().get(key).cloned();
+        Box::pin(std::future::ready(file.ok_or_else(|| "没有这个文件".to_string())))
+    }
+    fn write(&self, key: &str, bytes: Vec<u8>) -> wb::StorageFuture<()> {
+        self.0.lock().unwrap().insert(key.to_string(), bytes);
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
+
+/// 泵 frame_tick 直到在途文件读写的结果都已应用。
+fn pump_files(app: &mut AppRuntime) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.pending_file_ops() > 0 {
+        assert!(std::time::Instant::now() < deadline, "文件读写超时");
+        app.frame_tick(0.01);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn 存储_经提供者保存并重新打开() {
+    let memory = std::sync::Arc::new(MemoryStorage::default());
+    let mut app = builder().with_storage("mem", memory.clone()).build().expect("装配失败");
+    let doc = app.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), "未命名").unwrap();
+    app.host.docs.commit(doc, "edit", true, Box::new(TestDoc)).unwrap();
+
+    let location = wb::Location::new("mem", "projects/part.shapes");
+    let started = workbench_core::platform_cmds::save_document(
+        &mut wb::CommandCtx::new(&mut app),
+        doc,
+        Some(location.clone()),
+    );
+    assert!(!matches!(started, wb::CommandResult::Failed { .. }));
+    assert!(app.host.docs.get(doc).unwrap().dirty, "写入完成前仍是未保存");
+    pump_files(&mut app);
+    assert!(memory.0.lock().unwrap().contains_key("projects/part.shapes"));
+    let saved = app.host.docs.get(doc).unwrap();
+    assert_eq!(saved.title, "part");
+    assert_eq!(saved.location.as_ref(), Some(&location));
+    assert!(!saved.dirty);
+
+    let mut ctx = wb::CommandCtx::new(&mut app);
+    workbench_core::platform_cmds::open_document(&mut ctx, location.clone());
+    pump_files(&mut app);
+    let opened = app.host.docs.active().expect("打开的文档成为活动文档");
+    assert_ne!(opened.id, doc);
+    assert_eq!(opened.location.as_ref(), Some(&location));
+}
+
+#[test]
+fn 存储_未注册的提供者记录错误() {
+    let mut app = app();
+    workbench_core::platform_cmds::open_document(
+        &mut wb::CommandCtx::new(&mut app),
+        wb::Location::new("nowhere", "a.shapes"),
+    );
+    pump_files(&mut app);
+    assert!(!app.host.docs.docs().any(|d| d.location.is_some()));
+    assert!(app
+        .host
+        .log
+        .entries()
+        .any(|e| e.message.contains("没有 `nowhere` 存储")));
+}

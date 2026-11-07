@@ -61,19 +61,22 @@ impl AsyncExecutor {
     }
 
     /// 提交一个 fire-and-forget 异步任务（完成后自行发送终态事件）。
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn spawn_detached<F>(&self, future: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = &self._threads;
-            wasm_bindgen_futures::spawn_local(future);
-        }
+        self.inner.spawn(future).detach();
+    }
 
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.inner.spawn(future).detach();
-        }
+    /// 提交一个 fire-and-forget 异步任务。Web 端只有页面主线程，future
+    /// 无需 `Send`（存储操作等待的 JS promise 不是 `Send`）。
+    #[cfg(target_arch = "wasm32")]
+    pub fn spawn_detached<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + 'static,
+    {
+        let _ = &self._threads;
+        wasm_bindgen_futures::spawn_local(future);
     }
 }

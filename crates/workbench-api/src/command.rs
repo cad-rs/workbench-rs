@@ -1,10 +1,10 @@
 //! 命令系统契约（design.md §10）：RibbonBar/工具栏、菜单、快捷键与插件 API 的统一执行入口。
 
-use std::path::PathBuf;
 use std::pin::Pin;
 
 use crate::ids::{CommandId, DocumentId};
-use crate::services::AppServices;
+use crate::services::{AppServices, FileThen};
+use crate::storage::Location;
 use crate::tasks::TaskSpec;
 
 // ---- 快捷键 ----
@@ -413,9 +413,17 @@ impl<'a> CommandCtx<'a> {
         &mut self,
         extensions: Vec<String>,
         default_name: Option<String>,
-        action: Box<dyn FnOnce(&mut dyn AppServices, Option<PathBuf>)>,
+        action: Box<dyn FnOnce(&mut dyn AppServices, Option<Location>)>,
     ) {
         self.app.request_file_dialog(extensions, default_name, action);
+    }
+    /// Read a file off the UI thread; see [`AppServices::read_file`].
+    pub fn read_file(&mut self, location: Location, then: FileThen<Vec<u8>>) {
+        self.app.read_file(location, then);
+    }
+    /// Write a file off the UI thread; see [`AppServices::write_file`].
+    pub fn write_file(&mut self, location: Location, bytes: Vec<u8>, then: FileThen<()>) {
+        self.app.write_file(location, bytes, then);
     }
     /// 打开中央视图（可绑定活动文档）。
     pub fn open_view(&mut self, view_type: &str, bind_document: bool) -> Result<(), String> {

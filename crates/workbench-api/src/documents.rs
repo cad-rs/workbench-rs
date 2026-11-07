@@ -4,9 +4,8 @@
 //! 领域内容由 Workbench 通过 [`DocumentTypeDef`] 注册编解码，以
 //! [`DocumentContent`] 类型擦除存放——平台不侵入领域数据模型。
 
-use std::path::{Path, PathBuf};
-
 use crate::ids::{DocumentId, DocumentTypeId};
+use crate::storage::Location;
 
 /// 领域文档内容。通过 blanket impl，任何 `Clone + Send + Sync + 'static` 类型自动实现。
 pub trait DocumentContent: std::any::Any + Send + Sync {
@@ -93,7 +92,8 @@ pub struct Document {
     pub id: DocumentId,
     pub type_id: DocumentTypeId,
     pub title: String,
-    pub path: Option<PathBuf>,
+    /// The file the document was opened from or last saved to.
+    pub location: Option<Location>,
     pub dirty: bool,
     /// 文档版本号：每次提交（含撤销/重做）递增。后台任务据此做提交校验。
     pub revision: u64,
@@ -101,6 +101,8 @@ pub struct Document {
     history: Vec<UndoEntry>,
     /// 已应用的历史条目数（撤销栈顶位置）。
     history_pos: usize,
+    /// A save is in flight ([`DocumentService::begin_save`]).
+    saving: bool,
 }
 
 impl Document {
@@ -206,20 +208,31 @@ impl DocumentService {
             .type_of(type_id)
             .ok_or_else(|| format!("未注册的文档类型: {type_id}"))?;
         let content = (def.create_default)();
+        Ok(self.push(type_id.clone(), title.to_string(), None, content))
+    }
+
+    fn push(
+        &mut self,
+        type_id: DocumentTypeId,
+        title: String,
+        location: Option<Location>,
+        content: Box<dyn DocumentContent>,
+    ) -> DocumentId {
         let id = DocumentId(self.next_id);
         self.next_id += 1;
         self.docs.push(Document {
             id,
-            type_id: type_id.clone(),
-            title: title.to_string(),
-            path: None,
+            type_id,
+            title,
+            location,
             dirty: false,
             revision: 0,
             content,
             history: Vec::new(),
             history_pos: 0,
+            saving: false,
         });
-        Ok(id)
+        id
     }
 
     /// 在事务边界提交一份新的文档内容。
@@ -402,78 +415,183 @@ impl DocumentService {
         Ok(label)
     }
 
-    // ---- 文件 IO ----
+    // ---- 打开与保存 ----
+    //
+    // The service only encodes and decodes: reading and writing the file goes
+    // through the storage provider that holds it, off the UI thread (see
+    // `AppServices::read_file`). Opening is `type_for` → read → `open_bytes`;
+    // saving is `begin_save` → write → `finish_save`.
 
-    /// 保存到已关联路径；无路径时返回错误（调用方应走“另存为”对话框）。
-    pub fn save(&mut self, id: DocumentId) -> Result<PathBuf, String> {
-        let (bytes, path) = {
-            let doc = self.get(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
-            let path = doc
-                .path
-                .clone()
-                .ok_or_else(|| format!("文档「{}」尚未关联文件，请使用另存为", doc.title))?;
-            let def = self
-                .type_of(&doc.type_id)
-                .ok_or_else(|| format!("未注册的文档类型: {}", doc.type_id))?;
-            let bytes = (def.serialize)(doc.content.as_ref())?;
-            (bytes, path)
-        };
-        std::fs::write(&path, &bytes)
-            .map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
-        let doc = self.get_mut(id).unwrap();
-        doc.dirty = false;
-        Ok(path)
+    /// The document type registered for `location`'s extension.
+    pub fn type_for(&self, location: &Location) -> Result<DocumentTypeId, String> {
+        let ext = location.extension().unwrap_or_default();
+        self.find_type_by_extension(ext)
+            .map(|def| def.id.clone())
+            .ok_or_else(|| format!("没有登记 .{ext} 扩展名的文档类型"))
     }
 
-    pub fn save_as(&mut self, id: DocumentId, path: &Path) -> Result<PathBuf, String> {
-        {
-            let doc = self.get_mut(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
-            doc.path = Some(path.to_path_buf());
-            doc.title = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| doc.title.clone());
+    /// Decode `bytes` as a document of `type_id` and add it, clean.
+    /// `location` is the file they were read from; None leaves the document
+    /// without a file, so its first save asks where to put it.
+    pub fn open_bytes(
+        &mut self,
+        type_id: &DocumentTypeId,
+        title: &str,
+        location: Option<Location>,
+        bytes: &[u8],
+    ) -> Result<DocumentId, String> {
+        let def = self
+            .type_of(type_id)
+            .ok_or_else(|| format!("未注册的文档类型: {type_id}"))?;
+        let content = (def.deserialize)(bytes)?;
+        Ok(self.push(type_id.clone(), title.to_string(), location, content))
+    }
+
+    /// Encode a document to save it to `target`, or to its own file when
+    /// `target` is None. Write the bytes to the returned save's location, then
+    /// hand the save and the write's outcome to [`Self::finish_save`]. One
+    /// save per document is in flight at a time, so writes can't land out of
+    /// order.
+    pub fn begin_save(
+        &mut self,
+        id: DocumentId,
+        target: Option<Location>,
+    ) -> Result<(PendingSave, Vec<u8>), String> {
+        let doc = self.get(id).ok_or_else(|| format!("文档不存在: {id:?}"))?;
+        if doc.saving {
+            return Err(format!("文档「{}」正在保存", doc.title));
         }
-        self.save(id)
+        let location = target
+            .or_else(|| doc.location.clone())
+            .ok_or_else(|| format!("文档「{}」尚未关联文件，请使用另存为", doc.title))?;
+        let def = self
+            .type_of(&doc.type_id)
+            .ok_or_else(|| format!("未注册的文档类型: {}", doc.type_id))?;
+        let bytes = (def.serialize)(doc.content.as_ref())?;
+        let save = PendingSave {
+            doc: id,
+            location,
+            revision: doc.revision,
+        };
+        self.get_mut(id).expect("checked above").saving = true;
+        Ok((save, bytes))
     }
 
-    /// 从文件打开：按扩展名匹配文档类型并反序列化，返回新文档 ID。
-    pub fn open_file(&mut self, path: &Path) -> Result<DocumentId, String> {
-        let ext = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let (type_id, deserialize) = {
-            let def = self
-                .find_type_by_extension(&ext)
-                .ok_or_else(|| format!("没有登记 .{ext} 扩展名的文档类型"))?;
-            (def.id.clone(), def.deserialize)
-        };
-        let bytes = std::fs::read(path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
-        let content = deserialize(&bytes)?;
-        let id = DocumentId(self.next_id);
-        self.next_id += 1;
-        let title = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "未命名".to_string());
-        self.docs.push(Document {
-            id,
-            type_id,
-            title,
-            path: Some(path.to_path_buf()),
-            dirty: false,
-            revision: 0,
-            content,
-            history: Vec::new(),
-            history_pos: 0,
-        });
-        Ok(id)
+    /// Record how a save from [`Self::begin_save`] ended. On success the
+    /// document lives at the save's location (a new location renames it after
+    /// the file); it is clean unless it was edited while the write ran.
+    pub fn finish_save(
+        &mut self,
+        save: PendingSave,
+        written: Result<(), String>,
+    ) -> Result<Location, String> {
+        let doc = self
+            .get_mut(save.doc)
+            .ok_or_else(|| format!("文档已关闭，保存到 {} 的结果被丢弃", save.location))?;
+        doc.saving = false;
+        written?;
+        if doc.location.as_ref() != Some(&save.location) {
+            let stem = save.location.file_stem();
+            if !stem.is_empty() {
+                doc.title = stem.to_string();
+            }
+            doc.location = Some(save.location.clone());
+        }
+        if doc.revision == save.revision {
+            doc.dirty = false;
+        }
+        Ok(save.location)
     }
+}
+
+/// A save started by [`DocumentService::begin_save`].
+#[derive(Debug)]
+pub struct PendingSave {
+    pub doc: DocumentId,
+    /// Where the bytes go.
+    pub location: Location,
+    /// The revision that was encoded.
+    revision: u64,
 }
 
 impl Default for DocumentService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct Text(String);
+
+    fn service() -> (DocumentService, DocumentId) {
+        let mut docs = DocumentService::new();
+        docs.register_type(DocumentTypeDef {
+            id: DocumentTypeId::new("test.text"),
+            title: "Text".into(),
+            extensions: vec!["txt".into()],
+            create_default: || Box::new(Text(String::new())),
+            serialize: |c| Ok(c.as_any().downcast_ref::<Text>().unwrap().0.clone().into_bytes()),
+            deserialize: |b| Ok(Box::new(Text(String::from_utf8_lossy(b).into_owned()))),
+            open_view: None,
+            undo_hooks: None,
+            source: None,
+        })
+        .unwrap();
+        let id = docs.create(&DocumentTypeId::new("test.text"), "未命名").unwrap();
+        docs.edit::<Text>(id, "type", true, |t| t.0 = "hello".into()).unwrap();
+        (docs, id)
+    }
+
+    #[test]
+    fn a_save_moves_the_document_to_its_file_and_cleans_it() {
+        let (mut docs, id) = service();
+        assert!(docs.begin_save(id, None).is_err(), "no file yet: save-as is needed");
+
+        let target = Location::new("mem", "dir/note.txt");
+        let (save, bytes) = docs.begin_save(id, Some(target.clone())).unwrap();
+        assert_eq!(bytes, b"hello");
+        assert!(docs.begin_save(id, None).is_err(), "one save in flight at a time");
+        assert_eq!(docs.finish_save(save, Ok(())), Ok(target.clone()));
+
+        let doc = docs.get(id).unwrap();
+        assert_eq!(doc.title, "note");
+        assert_eq!(doc.location.as_ref(), Some(&target));
+        assert!(!doc.dirty);
+    }
+
+    #[test]
+    fn an_edit_during_the_write_keeps_the_document_dirty() {
+        let (mut docs, id) = service();
+        let (save, _) = docs.begin_save(id, Some(Location::new("mem", "a.txt"))).unwrap();
+        docs.edit::<Text>(id, "more", true, |t| t.0.push('!')).unwrap();
+        docs.finish_save(save, Ok(())).unwrap();
+        assert!(docs.get(id).unwrap().dirty);
+    }
+
+    #[test]
+    fn a_failed_write_changes_nothing_but_allows_another_save() {
+        let (mut docs, id) = service();
+        let (save, _) = docs.begin_save(id, Some(Location::new("mem", "a.txt"))).unwrap();
+        assert!(docs.finish_save(save, Err("disk full".into())).is_err());
+        let doc = docs.get(id).unwrap();
+        assert_eq!(doc.title, "未命名");
+        assert!(doc.location.is_none() && doc.dirty);
+        assert!(docs.begin_save(id, Some(Location::new("mem", "a.txt"))).is_ok());
+    }
+
+    #[test]
+    fn opening_picks_the_type_by_extension() {
+        let (mut docs, _) = service();
+        let location = Location::new("mem", "b.TXT");
+        let type_id = docs.type_for(&location).unwrap();
+        let id = docs
+            .open_bytes(&type_id, location.file_stem(), Some(location.clone()), b"x")
+            .unwrap();
+        assert_eq!(docs.read::<Text, _>(id, |t| t.0.clone()).as_deref(), Some("x"));
+        assert!(docs.type_for(&Location::new("mem", "c.bin")).is_err());
     }
 }

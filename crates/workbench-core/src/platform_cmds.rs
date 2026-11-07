@@ -273,20 +273,13 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
             let Some(doc_id) = ctx.active_document() else {
                 return CommandResult::failed("没有活动文档");
             };
-            let has_path = ctx
+            let has_file = ctx
                 .host()
                 .docs
                 .get(doc_id)
-                .map(|d| d.path.is_some())
-                .unwrap_or(false);
-            if has_path {
-                match ctx.host().docs.save(doc_id) {
-                    Ok(path) => {
-                        ctx.host().log.info(format!("已保存到 {}", path.display()));
-                        CommandResult::done()
-                    }
-                    Err(e) => CommandResult::failed(e),
-                }
+                .is_some_and(|d| d.location.is_some());
+            if has_file {
+                save_document(ctx, doc_id, None)
             } else {
                 request_save_as_dialog(ctx, doc_id)
             }
@@ -503,43 +496,61 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
     registry.add_toolbar_group(help_group);
 }
 
-/// 打开文件路径（打开命令共用流程）。
-pub fn open_path(ctx: &mut CommandCtx, path: &std::path::Path) -> CommandResult {
-    let doc_id = match ctx.host().docs.open_file(path) {
-        Ok(id) => id,
-        Err(e) => return CommandResult::failed(e),
-    };
-    ctx.host().docs.set_active(Some(doc_id));
-    ctx.host().log.info(format!("已打开 {}", path.display()));
-    if let Some(vt) = preferred_view_of(ctx, doc_id) {
-        if let Err(e) = ctx.open_view(vt.as_str(), true) {
-            ctx.host().log.warn(format!("打开视图失败: {e}"));
+/// Open the document at `location`: its storage provider reads the file off
+/// the UI thread, then the document is decoded, made active and shown in its
+/// preferred view. Failures go to the log.
+pub fn open_document(ctx: &mut CommandCtx, location: api::Location) {
+    let type_id = match ctx.host().docs.type_for(&location) {
+        Ok(type_id) => type_id,
+        Err(e) => {
+            ctx.host().log.error(e);
+            return;
         }
-    }
-    CommandResult::done()
+    };
+    ctx.read_file(location.clone(), Box::new(move |app, bytes| {
+        let mut ctx = CommandCtx::new(app);
+        let opened = bytes.and_then(|bytes| {
+            let title = location.file_stem();
+            ctx.host().docs.open_bytes(&type_id, title, Some(location.clone()), &bytes)
+        });
+        let doc_id = match opened {
+            Ok(id) => id,
+            Err(e) => {
+                ctx.host().log.error(e);
+                return;
+            }
+        };
+        ctx.host().docs.set_active(Some(doc_id));
+        ctx.host().log.info(format!("已打开 {location}"));
+        if let Some(vt) = preferred_view_of(&mut ctx, doc_id) {
+            if let Err(e) = ctx.open_view(vt.as_str(), true) {
+                ctx.host().log.warn(format!("打开视图失败: {e}"));
+            }
+        }
+    }));
 }
 
-/// 运行时直接打开路径（selfcheck 使用，不经对话框）。
-pub fn open_path_runtime(
-    app: &mut crate::app::AppRuntime,
-    path: &std::path::Path,
-) -> Result<(), String> {
-    use api::AppServices as _;
-    let doc_id = app.host.docs.open_file(path)?;
-    app.host.docs.set_active(Some(doc_id));
-    app.host.log.info(format!("已打开 {}", path.display()));
-    let view = {
-        let docs = &app.host.docs;
-        docs.get(doc_id).and_then(|d| {
-            let def = docs.type_of(&d.type_id)?;
-            let open_view = def.open_view?;
-            open_view(d.content.as_ref())
-        })
+/// Save a document to `target`, or to its own file when None. It is encoded
+/// now and written off the UI thread; how the write went goes to the log.
+pub fn save_document(
+    ctx: &mut CommandCtx,
+    doc_id: api::DocumentId,
+    target: Option<api::Location>,
+) -> CommandResult {
+    let save_as = target.is_some();
+    let (save, bytes) = match ctx.host().docs.begin_save(doc_id, target) {
+        Ok(started) => started,
+        Err(e) => return CommandResult::failed(e),
     };
-    if let Some(vt) = view {
-        app.open_view(vt.as_str(), true)?;
-    }
-    Ok(())
+    ctx.write_file(save.location.clone(), bytes, Box::new(move |app, written| {
+        let host = app.host();
+        match host.docs.finish_save(save, written) {
+            Ok(location) if save_as => host.log.info(format!("已另存为 {location}")),
+            Ok(location) => host.log.info(format!("已保存到 {location}")),
+            Err(e) => host.log.error(e),
+        }
+    }));
+    CommandResult::done()
 }
 
 /// 请平台在后台线程弹出“打开文档”对话框，选中后于 UI 线程打开。
@@ -549,12 +560,8 @@ pub fn open_path_runtime(
 fn request_open_dialog(ctx: &mut CommandCtx) {
     let exts = all_extensions(ctx);
     ctx.request_file_dialog(exts, None, Box::new(|ctx, picked| {
-        let Some(path) = picked else {
-            return;
-        };
-        let mut cmd = CommandCtx::new(ctx);
-        if let CommandResult::Failed { error } = open_path(&mut cmd, &path) {
-            cmd.host().log.error(error);
+        if let Some(location) = picked {
+            open_document(&mut CommandCtx::new(ctx), location);
         }
     }));
 }
@@ -585,13 +592,12 @@ fn request_save_as_dialog(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> Comm
         }
     };
     ctx.request_file_dialog(exts, Some(default_name), Box::new(move |ctx, picked| {
-        let Some(path) = picked else {
+        let Some(location) = picked else {
             return;
         };
         let mut cmd = CommandCtx::new(ctx);
-        match cmd.host().docs.save_as(doc_id, &path) {
-            Ok(saved) => cmd.host().log.info(format!("已另存为 {}", saved.display())),
-            Err(e) => cmd.host().log.error(e),
+        if let CommandResult::Failed { error } = save_document(&mut cmd, doc_id, Some(location)) {
+            cmd.host().log.error(error);
         }
     }));
     CommandResult::done_with("已弹出文件对话框")

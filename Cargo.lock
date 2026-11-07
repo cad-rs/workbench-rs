@@ -8397,6 +8397,7 @@ version = "0.1.0"
 dependencies = [
  "async-executor",
  "async-io",
+ "blocking",
  "futures-lite",
  "rfd",
  "serde",

@@ -13,6 +13,8 @@ pub mod assets;
 pub mod cli;
 pub mod dialog;
 pub mod executor;
+#[cfg(not(target_arch = "wasm32"))]
+mod local_files;
 pub mod platform_cmds;
 pub mod product;
 pub mod selfcheck;

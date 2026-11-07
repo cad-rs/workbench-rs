@@ -1,13 +1,13 @@
 //! 平台服务聚合与工作台可见的能力门面（design.md §4.1 Platform）。
 
 use std::any::{Any, TypeId};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::command::{CommandArgs, CommandResult, CtxSnapshot};
 use crate::documents::DocumentService;
 use crate::log::LogStore;
 use crate::settings::Settings;
+use crate::storage::{Location, Storage};
 use crate::tasks::{TaskEventRx, TaskManager};
 use crate::workspace::WorkspaceState;
 
@@ -42,6 +42,9 @@ pub struct PluginEntry {
 /// 平台服务聚合。UI 线程所有。
 pub struct ServiceHost {
     pub docs: DocumentService,
+    /// Where user files live; reach it through [`AppServices::read_file`] /
+    /// [`AppServices::write_file`], which run the I/O off the UI thread.
+    pub storage: Storage,
     pub tasks: TaskManager,
     pub ws: WorkspaceState,
     pub log: LogStore,
@@ -76,6 +79,7 @@ impl ServiceHost {
     ) -> Self {
         Self {
             docs: DocumentService::new(),
+            storage: Storage::default(),
             tasks: TaskManager::new(tx),
             ws: WorkspaceState::new(default_mode),
             log: LogStore::new(1000),
@@ -286,11 +290,21 @@ pub trait AppServices {
     /// 阻塞式 OS 模态循环绝不能在 UI 线程内执行：它会在 gpui 的窗口过程
     /// 重入窗口状态借用，楔死渲染循环（进程 Responding=False）。对话框因此
     /// 在后台线程运行，`action` 于下一帧节拍在 UI 线程被调用，参数为选中的
-    /// 路径（`None` = 取消）。同一时刻只允许一个在途对话框。
+    /// 文件（`None` = 取消）。同一时刻只允许一个在途对话框。
     fn request_file_dialog(
         &mut self,
         extensions: Vec<String>,
         default_name: Option<String>,
-        action: Box<dyn FnOnce(&mut dyn AppServices, Option<PathBuf>)>,
+        action: Box<dyn FnOnce(&mut dyn AppServices, Option<Location>)>,
     );
+    /// Read the file at `location` through its storage provider. The read
+    /// runs off the UI thread; `then` runs on the UI thread on a later frame
+    /// tick, with the bytes or a user-readable error.
+    fn read_file(&mut self, location: Location, then: FileThen<Vec<u8>>);
+    /// Write `bytes` to the file at `location`; like [`Self::read_file`].
+    fn write_file(&mut self, location: Location, bytes: Vec<u8>, then: FileThen<()>);
 }
+
+/// What to do on the UI thread once a file operation has finished. It is
+/// `Send` because the operation's future carries it.
+pub type FileThen<T> = Box<dyn FnOnce(&mut dyn AppServices, Result<T, String>) + Send>;
