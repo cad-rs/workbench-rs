@@ -2,6 +2,7 @@
 name = "ribbon-demo"
 version = "0.1.0"
 edition = "2021"
+publish = false
 description = "Standalone RibbonBar demo: exercises every item kind, tier, tab and collapse behavior without any workbench dependencies"
 
 [dependencies]

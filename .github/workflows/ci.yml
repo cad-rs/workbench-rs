@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Full debug info for this dependency tree would fill a runner's disk.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    # Linux and macOS have not been built yet: they report without blocking
+    # until they have been green once.
+    continue-on-error: ${{ matrix.provisional }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            provisional: false
+          - os: ubuntu-latest
+            provisional: true
+          - os: macos-latest
+            provisional: true
+    steps:
+      - name: Allow long paths in dependency checkouts
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake clang pkg-config \
+            libasound2-dev libfontconfig-dev libssl-dev libzstd-dev \
+            libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libvulkan1 mesa-vulkan-drivers
+      - name: Test
+        run: cargo test --workspace --no-fail-fast
+      - name: Selfcheck
+        run: cargo run -p product-demo -- --selfcheck
+
+  web:
+    name: Web (wasm32)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check -p product-web --target wasm32-unknown-unknown
+
+  dependencies:
+    name: Dependency licenses and sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses sources
