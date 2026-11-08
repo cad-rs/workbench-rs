@@ -394,6 +394,10 @@ pub struct SavedTab {
     pub bind_document: bool,
 }
 
+/// The [`LayoutFile`] version this build writes. Older files load through `#[serde(default)]`;
+/// newer ones are ignored, since a layout can always fall back to the default.
+pub const LAYOUT_VERSION: u32 = 1;
+
 /// The layout file (design.md §6.5). The `ui` field is left for GUI frontends to save their own
 /// physical layout details.
 #[derive(Serialize, Deserialize)]
@@ -860,7 +864,7 @@ impl WorkspaceState {
 
     pub fn save_layout(&self) -> LayoutFile {
         LayoutFile {
-            version: 1,
+            version: LAYOUT_VERSION,
             work_mode: self.work_mode.clone(),
             active_tab: self.active_tab,
             panels: self

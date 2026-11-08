@@ -7,8 +7,8 @@ mod views;
 
 use workbench_api as wb;
 use wb::{
-    ComboState, CommandArgs, CommandCtx, CommandDef, CommandResult, DocumentTypeDef, DockArea,
-    PanelDef, Registry, RibbonTab, ToolbarGroup, ToolbarItem, ViewDef,
+    ComboState, CommandArgs, CommandCtx, CommandDef, CommandResult, DockArea, PanelDef, Registry,
+    RibbonTab, ToolbarGroup, ToolbarItem, ViewDef,
 };
 
 use shapes::ShapeDoc;
@@ -23,19 +23,7 @@ impl wb::Workbench for ExampleWorkbench {
 
     fn init(&self, reg: &mut Registry) {
         // ---- Document types ----
-        reg.register_document_type(DocumentTypeDef {
-            id: wb::DocumentTypeId::new("example.shapes"),
-            title: "Shape Document".to_string(),
-            extensions: vec!["shapes".to_string()],
-            create_default: || Box::new(ShapeDoc::default()),
-            serialize: shapes::serialize,
-            deserialize: shapes::deserialize,
-            open_view: Some(|_content: &dyn wb::DocumentContent| {
-                Some(wb::ViewTypeId::new("example.canvas"))
-            }),
-            undo_hooks: None,
-            source: None,
-        });
+        reg.register_document_type(shapes::document_type());
 
         // ---- Central views ----
         reg.register_view(

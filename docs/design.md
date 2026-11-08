@@ -741,6 +741,31 @@ import/export are in place. Next: cloud providers with version-checked writes
 a cloud provider sits next to the local file system); rename and delete in
 the picker.
 
+#### Saving and file format versions
+
+- **Saves are all-or-nothing.** `StorageProvider::write` must leave the old
+  content when it fails or is cut off. The desktop writes a temporary file
+  beside the target, flushes it to the disk and renames it over the target
+  (`workbench_core::atomic`, which the app state store uses too); OPFS gets the
+  same from its writable stream's swap file. A file that an in-place write
+  would have been refused on (read-only, locked, another user's) stays refused.
+- **File formats are versioned per document type** (`DocumentTypeDef::format`;
+  None for formats defined elsewhere). The domain module says where a file
+  stores its version and supplies one upgrade step per version, bytes to
+  bytes; the version it writes follows from the number of steps, and a save
+  stamped with any other version is refused.
+- **The platform owns the policy.** Older files are upgraded as they are
+  opened, autosaves included, and the document stays clean: the file changes
+  only when the user saves. The first save over an upgraded file first copies
+  it to `<stem>.v<N>.<ext>`, the way back should an upgrade be wrong and what
+  older builds can still open; if the copy fails, nothing is written. Files
+  newer than the build, or older than it still reads, are refused with the
+  reason before they are decoded. An autosave that can't be recovered stays
+  until the next clean exit.
+- **The layout** carries a version too (`LAYOUT_VERSION`), but it is
+  disposable: a newer one is ignored in favour of the default, and additions
+  load through `#[serde(default)]`.
+
 ### 12.2 Transactions and undo/redo
 
 - commands commit changes with well-defined transaction boundaries;

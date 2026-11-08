@@ -3,6 +3,7 @@
 
 use std::pin::Pin;
 
+use crate::documents::PendingSave;
 use crate::ids::{CommandId, DocumentId};
 use crate::services::{AppServices, FileThen, IoTask, UiThen};
 use crate::storage::{Entry, Location, StorageFuture};
@@ -445,6 +446,21 @@ impl<'a> CommandCtx<'a> {
     pub fn write_file(&mut self, location: Location, bytes: Vec<u8>, then: FileThen<()>) {
         let write = self.host().storage.write(&location, bytes);
         self.then_on_ui(write, then);
+    }
+    /// Write the bytes of a save from `DocumentService::begin_save`, first
+    /// keeping the file they replace if the save asks for that, and finish
+    /// the save; `then` gets where the document now lives, like
+    /// [`Self::read_file`].
+    pub fn write_save(&mut self, save: PendingSave, bytes: Vec<u8>, then: FileThen<Location>) {
+        let storage = &self.host().storage;
+        let write = match &save.keep_old_at {
+            Some(keep_at) => storage.write_keeping_old(&save.location, keep_at, bytes),
+            None => storage.write(&save.location, bytes),
+        };
+        self.then_on_ui(write, Box::new(move |app, written| {
+            let saved = app.host().docs.finish_save(save, written);
+            then(app, saved);
+        }));
     }
     /// List the folder at `location`; like [`Self::read_file`].
     pub fn list_dir(&mut self, location: Location, then: FileThen<Vec<Entry>>) {

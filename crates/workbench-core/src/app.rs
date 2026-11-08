@@ -428,29 +428,25 @@ impl AppRuntime {
     }
 
     /// At startup: if the last session exited abnormally (no clean-exit marker), recover the
-    /// autosaved documents. After a clean exit, or once documents were recovered, the autosave
-    /// area is cleared — an old session's autosaves must not pop up after some later crash;
-    /// when none could be recovered they are kept for investigation.
+    /// autosaved documents. After a clean exit the autosave area is cleared — an old session's
+    /// autosaves must not pop up after some later crash.
     fn restore_session(&mut self) {
-        let crashed = self.state.read(CLEAN_EXIT).is_none();
-        let recovered = if crashed {
-            self.host
-                .log
-                .warn("[Session] The last session did not exit cleanly; recovering autosaves…");
-            self.recover_autosaves()
-        } else {
-            0
-        };
-        if !crashed || recovered > 0 {
+        if self.state.read(CLEAN_EXIT).is_some() {
             for key in self.state.keys(AUTOSAVE_DIR) {
                 self.state.remove(&key);
             }
+            return;
         }
+        self.host
+            .log
+            .warn("[Session] The last session did not exit cleanly; recovering autosaves…");
+        self.recover_autosaves();
     }
 
-    /// Reopen the documents in the autosave area (marked unsaved); returns how many were
-    /// recovered.
-    fn recover_autosaves(&mut self) -> usize {
+    /// Reopen the documents in the autosave area (marked unsaved) and remove their entries.
+    /// An entry that can't be recovered, such as one from a newer build, stays until the next
+    /// clean exit, so a user going back to that build can still get it.
+    fn recover_autosaves(&mut self) {
         let keys = self.state.keys(AUTOSAVE_DIR);
         let mut recovered = 0;
         for (meta_key, stem) in keys.iter().filter_map(|k| Some((k, k.strip_suffix(".json")?))) {
@@ -489,6 +485,8 @@ impl AppRuntime {
                         d.dirty = true; // recovered content is saved only once the user confirms
                     }
                     self.host.docs.set_active(Some(id));
+                    self.state.remove(meta_key);
+                    self.state.remove(content_key);
                     recovered += 1;
                 }
                 Err(e) => self
@@ -503,7 +501,6 @@ impl AppRuntime {
                  (marked unsaved, please review and save them)"
             ));
         }
-        recovered
     }
 
     // ---- Frame stats (phase 5: diagnostics panel) ----
@@ -825,6 +822,13 @@ impl AppRuntime {
                 return None;
             }
         };
+        if file.version > api::LAYOUT_VERSION {
+            self.host.log.warn(format!(
+                "The layout was saved in a newer format ({}); using the default",
+                file.version
+            ));
+            return None;
+        }
         let skipped = self.host.ws.apply_layout(&file);
         for msg in skipped {
             self.host.log.warn(msg);

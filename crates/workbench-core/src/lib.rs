@@ -12,6 +12,8 @@ pub mod app;
 pub mod assets;
 pub mod cli;
 #[cfg(not(target_arch = "wasm32"))]
+mod atomic;
+#[cfg(not(target_arch = "wasm32"))]
 mod dialog;
 pub mod executor;
 pub mod file_picker;

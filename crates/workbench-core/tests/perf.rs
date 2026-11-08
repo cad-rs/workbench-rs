@@ -44,6 +44,7 @@ impl wb::Workbench for PerfWb {
                     .map(|v: Vec<u32>| Box::new(v) as Box<dyn wb::DocumentContent>)
                     .map_err(|e| e.to_string())
             },
+            format: None,
             open_view: None,
             undo_hooks: None,
             source: None,

@@ -57,7 +57,8 @@ pub use command::{
 };
 pub use dispatch::{clear_dispatcher, dispatch, publish_dispatcher};
 pub use documents::{
-    Document, DocumentContent, DocumentService, DocumentTypeDef, PendingSave, UndoHooks,
+    Document, DocumentContent, DocumentFormat, DocumentService, DocumentTypeDef, FormatUpgrade,
+    PendingSave, UndoHooks,
 };
 pub use geo::{Color, Point, Rect, Size};
 pub use i18n::Localizer;
@@ -83,5 +84,5 @@ pub use workbench::{boxed, Workbench};
 pub use workspace::{
     AccountPhase, DockArea, ItemSize, LayoutFile, PanelDef, PanelSlot, RibbonItemKind, RibbonTab,
     SavedPanel, SavedTab, TabSlot, TextEdit, ToolbarGroup, ToolbarItem, ViewDef, ViewFactory,
-    WorkspaceState,
+    WorkspaceState, LAYOUT_VERSION,
 };

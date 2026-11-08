@@ -585,6 +585,9 @@ fn add_document(
     };
     ctx.host().docs.set_active(Some(doc_id));
     ctx.host().log.info(done);
+    if let Some(from) = ctx.host().docs.get(doc_id).and_then(|doc| doc.upgraded_from) {
+        ctx.host().log.info(format!("Upgraded {name} from file format {from}"));
+    }
     if let Some(vt) = preferred_view_of(ctx, doc_id) {
         if let Err(e) = ctx.open_view(vt.as_str(), true) {
             ctx.host().log.warn(format!("Failed to open the view: {e}"));
@@ -604,11 +607,17 @@ pub fn save_document(
         Ok(started) => started,
         Err(e) => return CommandResult::failed(e),
     };
-    ctx.write_file(save.location.clone(), bytes, Box::new(move |app, written| {
+    let kept = save.keep_old_at.clone();
+    ctx.write_save(save, bytes, Box::new(move |app, saved| {
         let host = app.host();
-        match host.docs.finish_save(save, written) {
-            Ok(location) if save_as => host.log.info(format!("Saved as {location}")),
-            Ok(location) => host.log.info(format!("Saved to {location}")),
+        match saved {
+            Ok(location) => {
+                let saved = if save_as { "Saved as" } else { "Saved to" };
+                host.log.info(format!("{saved} {location}"));
+                if let Some(kept) = kept {
+                    host.log.info(format!("The file's older format is kept as {kept}"));
+                }
+            }
             Err(e) => host.log.error(e),
         }
     }));

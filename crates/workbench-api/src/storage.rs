@@ -64,6 +64,15 @@ impl Location {
     pub fn child(&self, name: &str) -> Location {
         Location::new(self.provider.as_str(), join_key(&self.key, name))
     }
+
+    /// The file beside this one with `.{tag}` before the extension:
+    /// `a/part.rcad` tagged `v1` is `a/part.v1.rcad` (for keys that are paths).
+    pub fn tagged(&self, tag: &str) -> Location {
+        let stem_end = self.key.len() - self.file_name().len() + self.file_stem().len();
+        let mut key = self.key.clone();
+        key.insert_str(stem_end, &format!(".{tag}"));
+        Location::new(self.provider.as_str(), key)
+    }
 }
 
 /// The key of `name` in the folder `dir` (the root is `""`).
@@ -132,7 +141,8 @@ pub trait StorageProvider: Send + Sync {
     fn label(&self) -> &str;
     /// The whole content of the file at `key`.
     fn read(&self, key: &str) -> StorageFuture<Vec<u8>>;
-    /// Create the file at `key`, or replace its content, with `bytes`.
+    /// Create the file at `key`, or replace its content, with `bytes`. All or
+    /// nothing: a write that fails or is cut off must leave the old content.
     fn write(&self, key: &str, bytes: Vec<u8>) -> StorageFuture<()>;
     /// The folders and files in the folder `dir` (the root is `""`); the
     /// in-app picker browses with this.
@@ -194,6 +204,24 @@ impl Storage {
         self.route(location, format!("write {location}"), |p, key| p.write(key, bytes))
     }
 
+    /// Write `bytes` to `location` after copying the file they replace to
+    /// `keep_at`. If the copy fails, nothing is written.
+    pub fn write_keeping_old(
+        &self,
+        location: &Location,
+        keep_at: &Location,
+        bytes: Vec<u8>,
+    ) -> StorageFuture<()> {
+        let (storage, location, keep_at) = (self.clone(), location.clone(), keep_at.clone());
+        // One step at a time: providers may start working when called, not
+        // when polled, so each write is only requested once its turn comes.
+        Box::pin(async move {
+            let old = storage.read(&location).await?;
+            storage.write(&keep_at, old).await?;
+            storage.write(&location, bytes).await
+        })
+    }
+
     /// Run `op` on the provider holding `location`; errors say what failed.
     fn route<T: Send + 'static>(
         &self,
@@ -242,5 +270,14 @@ mod tests {
         assert_eq!(with_extension("part.RCAD", &exts), "part.RCAD");
         assert_eq!(with_extension("part.v2", &exts), "part.v2.rcad");
         assert_eq!(with_extension("notes.txt", &[]), "notes.txt");
+    }
+
+    #[test]
+    fn a_tag_goes_before_the_extension() {
+        let tagged = |key: &str| Location::new("p", key).tagged("v1").key;
+        assert_eq!(tagged("a/part.rcad"), "a/part.v1.rcad");
+        assert_eq!(tagged(r"C:\work\part.v2.rcad"), r"C:\work\part.v2.v1.rcad");
+        assert_eq!(tagged("dir.d/part"), "dir.d/part.v1");
+        assert_eq!(tagged(".hidden"), ".hidden.v1");
     }
 }

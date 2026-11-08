@@ -42,6 +42,8 @@ impl api::StorageProvider for Opfs {
             if !has_method(&handle, "createWritable") {
                 return Err("This browser can't write to browser storage".to_string());
             }
+            // The stream writes to a swap file that `close` moves into place,
+            // so an interrupted write leaves the old content.
             let stream: FileSystemWritableFileStream = resolve(handle.create_writable()).await?;
             JsFuture::from(stream.write_with_u8_array(&bytes).map_err(js_error)?)
                 .await

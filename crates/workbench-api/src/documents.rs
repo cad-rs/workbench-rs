@@ -5,6 +5,8 @@
 //! content is stored type-erased as a [`DocumentContent`] — the platform stays out of the domain
 //! data model.
 
+use std::borrow::Cow;
+
 use crate::ids::{DocumentId, DocumentTypeId};
 use crate::storage::Location;
 
@@ -37,6 +39,69 @@ pub type DocumentSerializeFn = fn(&dyn DocumentContent) -> Result<Vec<u8>, Strin
 /// Document deserialize function (supplied by the domain module).
 pub type DocumentDeserializeFn = fn(&[u8]) -> Result<Box<dyn DocumentContent>, String>;
 
+/// One step of a file format's upgrade path: a file's bytes in one version in, its bytes in the
+/// next version out (a failure returns a user-readable error).
+pub type FormatUpgrade = fn(Vec<u8>) -> Result<Vec<u8>, String>;
+
+/// How a document type's files are versioned (`DocumentTypeDef::format`).
+///
+/// The domain module owns the bytes: where the version is stored and what each step changes. The
+/// platform owns the policy: older files are upgraded as they are opened, files this build can't
+/// read are refused before they are decoded, and the first save over an upgraded file keeps the
+/// old one ([`PendingSave::keep_old_at`]).
+#[derive(Clone, Copy)]
+pub struct DocumentFormat {
+    /// The oldest version this build still reads.
+    pub oldest: u32,
+    /// `upgrades[i]` turns version `oldest + i` into the next one, so adding a step is what
+    /// raises the [current](Self::current) version.
+    pub upgrades: &'static [FormatUpgrade],
+    /// The version a file's bytes are in. A file from before the type had versions reads as
+    /// the version its layout corresponds to, normally `oldest`.
+    pub version_of: fn(&[u8]) -> Result<u32, String>,
+}
+
+impl DocumentFormat {
+    /// The version this build writes; `serialize` must stamp files with it.
+    pub const fn current(&self) -> u32 {
+        self.oldest + self.upgrades.len() as u32
+    }
+
+    /// `bytes` in the current version, and the version they were in if that needed an upgrade.
+    /// `title` names the file in the errors.
+    fn upgrade<'a>(
+        &self,
+        title: &str,
+        bytes: &'a [u8],
+    ) -> Result<(Cow<'a, [u8]>, Option<u32>), String> {
+        let found = (self.version_of)(bytes)?;
+        let current = self.current();
+        if found > current {
+            return Err(format!(
+                "\"{title}\" was saved in file format {found}, but this version of the \
+                 application reads up to format {current}; update the application to open it"
+            ));
+        }
+        if found < self.oldest {
+            return Err(format!(
+                "\"{title}\" was saved in file format {found}, which this version of the \
+                 application no longer reads (the oldest it reads is format {})",
+                self.oldest
+            ));
+        }
+        if found == current {
+            return Ok((Cow::Borrowed(bytes), None));
+        }
+        let mut upgraded = bytes.to_vec();
+        let steps = &self.upgrades[(found - self.oldest) as usize..];
+        for (step, version) in steps.iter().zip(found..) {
+            upgraded = step(upgraded)
+                .map_err(|e| format!("Failed to upgrade \"{title}\" from file format {version}: {e}"))?;
+        }
+        Ok((Cow::Owned(upgraded), Some(found)))
+    }
+}
+
 /// Delegated undo hooks (supplied by the domain module; `DocumentTypeDef::undo_hooks`).
 ///
 /// When they are supplied the platform no longer keeps a snapshot history (full clones are too
@@ -66,6 +131,9 @@ pub struct DocumentTypeDef {
     pub create_default: fn() -> Box<dyn DocumentContent>,
     pub serialize: DocumentSerializeFn,
     pub deserialize: DocumentDeserializeFn,
+    /// How the type's files are versioned (None: its files have no versions to manage, such as
+    /// a format defined by someone else).
+    pub format: Option<DocumentFormat>,
     /// The view to open for this document's content. The platform calls it with
     /// the document's content, so one document type can open different views
     /// depending on what the document actually holds.
@@ -99,6 +167,9 @@ pub struct Document {
     pub title: String,
     /// The file the document was opened from or last saved to.
     pub location: Option<Location>,
+    /// The file format version the document was upgraded from when it was opened. The file
+    /// itself stays in that version until the next successful save.
+    pub upgraded_from: Option<u32>,
     pub dirty: bool,
     /// Document revision: incremented on every commit (including undo/redo). Background tasks
     /// check their commits against it.
@@ -216,7 +287,7 @@ impl DocumentService {
             .type_of(type_id)
             .ok_or_else(|| format!("Unregistered document type: {type_id}"))?;
         let content = (def.create_default)();
-        Ok(self.push(type_id.clone(), title.to_string(), None, content))
+        Ok(self.push(type_id.clone(), title.to_string(), None, None, content))
     }
 
     fn push(
@@ -224,6 +295,7 @@ impl DocumentService {
         type_id: DocumentTypeId,
         title: String,
         location: Option<Location>,
+        upgraded_from: Option<u32>,
         content: Box<dyn DocumentContent>,
     ) -> DocumentId {
         let id = DocumentId(self.next_id);
@@ -233,6 +305,7 @@ impl DocumentService {
             type_id,
             title,
             location,
+            upgraded_from,
             dirty: false,
             revision: 0,
             content,
@@ -450,10 +523,24 @@ impl DocumentService {
         let def = self
             .type_of(&doc.type_id)
             .ok_or_else(|| format!("Unregistered document type: {}", doc.type_id))?;
-        (def.serialize)(doc.content.as_ref())
+        let bytes = (def.serialize)(doc.content.as_ref())?;
+        // A file stamped with any other version would be misread when it is opened again.
+        if let Some(format) = &def.format {
+            let written = (format.version_of)(&bytes)?;
+            if written != format.current() {
+                return Err(format!(
+                    "Document type {} wrote file format {written} instead of {}; \
+                     the document was not saved",
+                    doc.type_id,
+                    format.current()
+                ));
+            }
+        }
+        Ok(bytes)
     }
 
-    /// Decode `bytes` as a document of `type_id` and add it, clean.
+    /// Decode `bytes` as a document of `type_id` and add it, clean, upgrading them first if
+    /// they are in an older file format.
     /// `location` is the file they were read from; None leaves the document
     /// without a file, so its first save asks where to put it.
     pub fn open_bytes(
@@ -466,8 +553,12 @@ impl DocumentService {
         let def = self
             .type_of(type_id)
             .ok_or_else(|| format!("Unregistered document type: {type_id}"))?;
-        let content = (def.deserialize)(bytes)?;
-        Ok(self.push(type_id.clone(), title.to_string(), location, content))
+        let (bytes, upgraded_from) = match &def.format {
+            Some(format) => format.upgrade(title, bytes)?,
+            None => (Cow::Borrowed(bytes), None),
+        };
+        let content = (def.deserialize)(&bytes)?;
+        Ok(self.push(type_id.clone(), title.to_string(), location, upgraded_from, content))
     }
 
     /// Encode a document to save it to `target`, or to its own file when
@@ -488,10 +579,15 @@ impl DocumentService {
             .or_else(|| doc.location.clone())
             .ok_or_else(|| format!("Document \"{}\" has no file yet; use Save As", doc.title))?;
         let revision = doc.revision;
+        let keep_old_at = doc
+            .upgraded_from
+            .filter(|_| doc.location.as_ref() == Some(&location))
+            .map(|version| location.tagged(&format!("v{version}")));
         let bytes = self.encode(id)?;
         let save = PendingSave {
             doc: id,
             location,
+            keep_old_at,
             revision,
         };
         self.get_mut(id).expect("checked above").saving = true;
@@ -516,6 +612,7 @@ impl DocumentService {
             })?;
         doc.saving = false;
         written?;
+        doc.upgraded_from = None;
         if doc.location.as_ref() != Some(&save.location) {
             let stem = save.location.file_stem();
             if !stem.is_empty() {
@@ -536,6 +633,10 @@ pub struct PendingSave {
     pub doc: DocumentId,
     /// Where the bytes go.
     pub location: Location,
+    /// Where to copy the file being replaced before writing, when this is the first save over
+    /// a file in an older format: that copy is what older builds can still open, and the way
+    /// back should an upgrade step turn out wrong.
+    pub keep_old_at: Option<Location>,
     /// The revision that was encoded.
     revision: u64,
 }
@@ -562,6 +663,7 @@ mod tests {
             create_default: || Box::new(Text(String::new())),
             serialize: |c| Ok(c.as_any().downcast_ref::<Text>().unwrap().0.clone().into_bytes()),
             deserialize: |b| Ok(Box::new(Text(String::from_utf8_lossy(b).into_owned()))),
+            format: None,
             open_view: None,
             undo_hooks: None,
             source: None,
@@ -570,6 +672,62 @@ mod tests {
         let id = docs.create(&DocumentTypeId::new("test.text"), "Untitled").unwrap();
         docs.edit::<Text>(id, "type", true, |t| t.0 = "hello".into()).unwrap();
         (docs, id)
+    }
+
+    /// Files are `v<N>:<text>`; versions 1 to 3 are readable, and each upgrade step marks the
+    /// text so a test can see which steps ran.
+    fn split(bytes: &[u8]) -> Result<(u32, String), String> {
+        let text = String::from_utf8_lossy(bytes);
+        let (version, body) = text.split_once(':').ok_or("no version")?;
+        let version = version.strip_prefix('v').ok_or("no version")?;
+        Ok((version.parse().map_err(|_| "bad version")?, body.to_string()))
+    }
+
+    fn step(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+        let (version, body) = split(&bytes)?;
+        if body == "broken" {
+            return Err("cannot convert this".to_string());
+        }
+        Ok(format!("v{}:{body}+{}", version + 1, version + 1).into_bytes())
+    }
+
+    const FORMAT: DocumentFormat = DocumentFormat {
+        oldest: 1,
+        upgrades: &[step, step],
+        version_of: |bytes| split(bytes).map(|(version, _)| version),
+    };
+
+    /// A document type using `FORMAT`, writing the given version.
+    fn versioned(writes: fn(&dyn DocumentContent) -> Result<Vec<u8>, String>) -> DocumentService {
+        let mut docs = DocumentService::new();
+        docs.register_type(DocumentTypeDef {
+            id: DocumentTypeId::new("test.versioned"),
+            title: "Versioned".into(),
+            extensions: vec!["ver".into()],
+            create_default: || Box::new(Text(String::new())),
+            serialize: writes,
+            deserialize: |b| Ok(Box::new(Text(split(b)?.1))),
+            format: Some(FORMAT),
+            open_view: None,
+            undo_hooks: None,
+            source: None,
+        })
+        .unwrap();
+        docs
+    }
+
+    fn writes_current(content: &dyn DocumentContent) -> Result<Vec<u8>, String> {
+        let text = &content.as_any().downcast_ref::<Text>().unwrap().0;
+        Ok(format!("v3:{text}").into_bytes())
+    }
+
+    fn open(docs: &mut DocumentService, bytes: &[u8]) -> Result<DocumentId, String> {
+        let location = Location::new("mem", "dir/a.ver");
+        docs.open_bytes(&DocumentTypeId::new("test.versioned"), "a", Some(location), bytes)
+    }
+
+    fn text_of(docs: &DocumentService, id: DocumentId) -> String {
+        docs.read::<Text, _>(id, |t| t.0.clone()).unwrap()
     }
 
     #[test]
@@ -619,5 +777,95 @@ mod tests {
             .unwrap();
         assert_eq!(docs.read::<Text, _>(id, |t| t.0.clone()).as_deref(), Some("x"));
         assert!(docs.type_for("c.bin").is_err());
+    }
+
+    #[test]
+    fn an_older_file_runs_only_the_steps_it_needs() {
+        let mut docs = versioned(writes_current);
+        assert_eq!(FORMAT.current(), 3);
+
+        let from_1 = open(&mut docs, b"v1:x").unwrap();
+        assert_eq!(text_of(&docs, from_1), "x+2+3");
+        assert_eq!(docs.get(from_1).unwrap().upgraded_from, Some(1));
+        assert!(!docs.get(from_1).unwrap().dirty, "opening is not an edit");
+
+        let from_2 = open(&mut docs, b"v2:x").unwrap();
+        assert_eq!(text_of(&docs, from_2), "x+3");
+        assert_eq!(docs.get(from_2).unwrap().upgraded_from, Some(2));
+
+        let current = open(&mut docs, b"v3:x").unwrap();
+        assert_eq!(text_of(&docs, current), "x");
+        assert_eq!(docs.get(current).unwrap().upgraded_from, None);
+    }
+
+    #[test]
+    fn a_file_this_build_cannot_read_is_refused_with_the_reason() {
+        let mut docs = versioned(writes_current);
+
+        let newer = open(&mut docs, b"v4:x").unwrap_err();
+        assert!(newer.contains("\"a\"") && newer.contains("format 4"), "{newer}");
+        assert!(newer.contains("update the application"), "{newer}");
+
+        let older = open(&mut docs, b"v0:x").unwrap_err();
+        assert!(older.contains("no longer reads"), "{older}");
+
+        let failing = open(&mut docs, b"v2:broken").unwrap_err();
+        assert!(failing.contains("from file format 2"), "{failing}");
+        assert!(failing.contains("cannot convert this"), "{failing}");
+
+        assert!(open(&mut docs, b"garbage").is_err());
+        assert_eq!(docs.docs().count(), 0);
+    }
+
+    #[test]
+    fn the_first_save_over_an_upgraded_file_keeps_the_old_one() {
+        let mut docs = versioned(writes_current);
+        let id = open(&mut docs, b"v1:x").unwrap();
+
+        let (save, bytes) = docs.begin_save(id, None).unwrap();
+        assert_eq!(bytes, b"v3:x+2+3");
+        assert_eq!(save.keep_old_at, Some(Location::new("mem", "dir/a.v1.ver")));
+        docs.finish_save(save, Ok(())).unwrap();
+        assert_eq!(docs.get(id).unwrap().upgraded_from, None);
+
+        let (save, _) = docs.begin_save(id, None).unwrap();
+        assert_eq!(save.keep_old_at, None, "the file is in the current format now");
+    }
+
+    #[test]
+    fn a_failed_save_still_keeps_the_old_file_on_the_next_try() {
+        let mut docs = versioned(writes_current);
+        let id = open(&mut docs, b"v2:x").unwrap();
+
+        let (save, _) = docs.begin_save(id, None).unwrap();
+        assert!(docs.finish_save(save, Err("disk full".into())).is_err());
+        assert_eq!(docs.get(id).unwrap().upgraded_from, Some(2));
+
+        let (save, _) = docs.begin_save(id, None).unwrap();
+        assert_eq!(save.keep_old_at, Some(Location::new("mem", "dir/a.v2.ver")));
+    }
+
+    #[test]
+    fn saving_elsewhere_leaves_nothing_to_keep() {
+        let mut docs = versioned(writes_current);
+        let id = open(&mut docs, b"v1:x").unwrap();
+
+        let (save, _) = docs.begin_save(id, Some(Location::new("mem", "dir/b.ver"))).unwrap();
+        assert_eq!(save.keep_old_at, None, "the old file is not being replaced");
+        docs.finish_save(save, Ok(())).unwrap();
+
+        let doc = docs.get(id).unwrap();
+        assert_eq!(doc.location, Some(Location::new("mem", "dir/b.ver")));
+        assert_eq!(doc.upgraded_from, None, "the document's file is current now");
+    }
+
+    #[test]
+    fn a_document_that_writes_the_wrong_version_is_not_saved() {
+        let mut docs = versioned(|_| Ok(b"v2:stale".to_vec()));
+        let id = open(&mut docs, b"v3:x").unwrap();
+        let error = docs.begin_save(id, None).unwrap_err();
+        assert!(error.contains("wrote file format 2 instead of 3"), "{error}");
+        assert!(docs.begin_save(id, None).is_err(), "and no save was left in flight");
+        assert!(!docs.get(id).unwrap().saving);
     }
 }

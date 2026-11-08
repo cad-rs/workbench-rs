@@ -35,6 +35,7 @@ impl wb::Workbench for TestWb {
             create_default: || Box::new(TestDoc),
             serialize: |_| Ok(Vec::new()),
             deserialize: |_| Ok(Box::new(TestDoc)),
+            format: None,
             open_view: None,
             undo_hooks: None,
             source: None,
@@ -96,6 +97,7 @@ impl wb::Workbench for SecondDocWb {
             create_default: || Box::new(TestDoc),
             serialize: |_| Ok(Vec::new()),
             deserialize: |_| Ok(Box::new(TestDoc)),
+            format: None,
             open_view: None,
             undo_hooks: None,
             source: None,
@@ -254,6 +256,7 @@ fn document_edit_undo_redo_and_revision() {
                     .map(|v: Box<Vec<u32>>| v as Box<dyn wb::DocumentContent>)
                     .map_err(|e| e.to_string())
             },
+            format: None,
             open_view: None,
             undo_hooks: None,
             source: None,
@@ -339,6 +342,7 @@ fn document_delegated_undo() {
                     ..Default::default()
                 }))
             },
+            format: None,
             open_view: None,
             undo_hooks: Some(wb::UndoHooks {
                 undo: delegated_undo,
@@ -387,6 +391,7 @@ fn document_background_commit_revision_check() {
             create_default: || Box::new(0u32),
             serialize: |_c| Ok(vec![]),
             deserialize: |_b| Ok(Box::new(0u32)),
+            format: None,
             open_view: None,
             undo_hooks: None,
             source: None,
@@ -732,6 +737,7 @@ fn phase2_document_revision_query() {
             create_default: || Box::new(0u32),
             serialize: |_| Ok(vec![]),
             deserialize: |_| Ok(Box::new(0u32)),
+            format: None,
             open_view: None,
             undo_hooks: None,
             source: None,
@@ -835,6 +841,8 @@ fn ribbon_active_tab_switch_and_layout_persistence() {
 struct MemoryStorage {
     files: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
     dirs: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// Keys writes fail on.
+    refused: std::sync::Mutex<Vec<String>>,
 }
 
 impl MemoryStorage {
@@ -856,6 +864,9 @@ impl wb::StorageProvider for MemoryStorage {
         Box::pin(std::future::ready(file.ok_or_else(|| "No such file".to_string())))
     }
     fn write(&self, key: &str, bytes: Vec<u8>) -> wb::StorageFuture<()> {
+        if self.refused.lock().unwrap().iter().any(|refused| refused == key) {
+            return Box::pin(std::future::ready(Err("Refused".to_string())));
+        }
         self.files.lock().unwrap().insert(key.to_string(), bytes);
         Box::pin(std::future::ready(Ok(())))
     }
@@ -957,6 +968,218 @@ fn autosave_recovers_after_crash_and_clears_after_clean_exit() {
     assert!(!c.host.docs.docs().any(|d| d.title.starts_with("[Recovered]")));
     assert!(c.state().keys("autosave/").is_empty());
     drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- File format versions ----
+
+/// A file's version and text: files are `v<N>:<text>`.
+fn versioned_parts(bytes: &[u8]) -> Result<(u32, String), String> {
+    let text = String::from_utf8_lossy(bytes);
+    let (version, body) = text.split_once(':').ok_or("Not a versioned file")?;
+    let version = version.trim_start_matches('v').parse().map_err(|_| "Bad version")?;
+    Ok((version, body.to_string()))
+}
+
+fn upgrade_1_to_2(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    let (_, body) = versioned_parts(&bytes)?;
+    Ok(format!("v2:{body} (upgraded)").into_bytes())
+}
+
+/// A document type whose files reached version 2 in this build.
+struct VersionedWb;
+
+impl wb::Workbench for VersionedWb {
+    fn id(&self) -> wb::WorkbenchId {
+        wb::WorkbenchId::new("wb-versioned")
+    }
+    fn init(&self, reg: &mut wb::Registry) {
+        reg.register_document_type(wb::DocumentTypeDef {
+            id: wb::DocumentTypeId::new("test.versioned"),
+            title: "Versioned".to_string(),
+            extensions: vec!["vers".to_string()],
+            create_default: || Box::new(String::new()),
+            serialize: |content| {
+                let text = content.as_any().downcast_ref::<String>().unwrap();
+                Ok(format!("v2:{text}").into_bytes())
+            },
+            deserialize: |bytes| Ok(Box::new(versioned_parts(bytes)?.1)),
+            format: Some(wb::DocumentFormat {
+                oldest: 1,
+                upgrades: &[upgrade_1_to_2],
+                version_of: |bytes| versioned_parts(bytes).map(|(version, _)| version),
+            }),
+            open_view: None,
+            undo_hooks: None,
+            source: None,
+        });
+    }
+}
+
+fn empty_dir(test: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("workbench-rs-{test}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn open_and_pump(app: &mut AppRuntime, location: &wb::Location) {
+    workbench_core::platform_cmds::open_document(&mut wb::CommandCtx::new(app), location.clone());
+    assert!(pump(app, std::time::Duration::from_secs(5)));
+}
+
+fn save_and_pump(app: &mut AppRuntime, doc: wb::DocumentId) {
+    let started = workbench_core::platform_cmds::save_document(
+        &mut wb::CommandCtx::new(app),
+        doc,
+        None,
+    );
+    assert!(!matches!(started, wb::CommandResult::Failed { .. }));
+    assert!(pump(app, std::time::Duration::from_secs(5)));
+}
+
+#[test]
+fn saving_an_upgraded_local_file_keeps_the_original_beside_it() {
+    let dir = empty_dir("upgrade");
+    let files = dir.join("files");
+    std::fs::create_dir_all(&files).unwrap();
+    let file = files.join("part.vers");
+    std::fs::write(&file, b"v1:data").unwrap();
+    let mut app = builder()
+        .with_workbench(VersionedWb)
+        .with_layout_path(dir.join("state").join("layout.json"))
+        .build()
+        .unwrap();
+
+    open_and_pump(&mut app, &wb::Location::local(&file));
+    let doc = app.host.docs.active().expect("the file opens");
+    assert_eq!(doc.upgraded_from, Some(1));
+    assert!(!doc.dirty, "opening is not an edit");
+    let id = doc.id;
+    assert_eq!(app.host.docs.read::<String, _>(id, Clone::clone).as_deref(), Some("data (upgraded)"));
+    assert_eq!(std::fs::read(&file).unwrap(), b"v1:data", "opening leaves the file as it was");
+
+    save_and_pump(&mut app, id);
+    assert_eq!(std::fs::read(&file).unwrap(), b"v2:data (upgraded)");
+    let kept = files.join("part.v1.vers");
+    assert_eq!(std::fs::read(&kept).unwrap(), b"v1:data");
+
+    // Later saves have nothing older to keep, and overwrite only the file.
+    app.host.docs.edit::<String>(id, "edit", true, |text| text.push('!')).unwrap();
+    save_and_pump(&mut app, id);
+    assert_eq!(std::fs::read(&file).unwrap(), b"v2:data (upgraded)!");
+    assert_eq!(std::fs::read(&kept).unwrap(), b"v1:data");
+
+    let mut names: Vec<_> = std::fs::read_dir(&files)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["part.v1.vers", "part.vers"], "no temporary files stay behind");
+    drop(app);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_is_not_replaced_when_its_old_version_cannot_be_kept() {
+    let memory = std::sync::Arc::new(MemoryStorage::default());
+    memory.files.lock().unwrap().insert("part.vers".to_string(), b"v1:data".to_vec());
+    memory.refused.lock().unwrap().push("part.v1.vers".to_string());
+    let mut app = builder()
+        .with_workbench(VersionedWb)
+        .with_storage("mem", memory.clone())
+        .build()
+        .unwrap();
+
+    open_and_pump(&mut app, &wb::Location::new("mem", "part.vers"));
+    let id = app.host.docs.active().expect("the file opens").id;
+    save_and_pump(&mut app, id);
+    assert_eq!(memory.files.lock().unwrap()["part.vers"], b"v1:data");
+    assert_eq!(app.host.docs.get(id).unwrap().upgraded_from, Some(1));
+    assert!(app.host.log.entries().any(|e| e.message.contains("Failed to write mem:part.v1.vers")));
+
+    // Once the copy can be made, the same save goes through.
+    memory.refused.lock().unwrap().clear();
+    save_and_pump(&mut app, id);
+    let files = memory.files.lock().unwrap();
+    assert_eq!(files["part.vers"], b"v2:data (upgraded)");
+    assert_eq!(files["part.v1.vers"], b"v1:data");
+}
+
+#[test]
+fn a_file_from_a_newer_build_is_refused_and_left_alone() {
+    let memory = std::sync::Arc::new(MemoryStorage::default());
+    memory.files.lock().unwrap().insert("part.vers".to_string(), b"v9:data".to_vec());
+    let mut app = builder()
+        .with_workbench(VersionedWb)
+        .with_storage("mem", memory.clone())
+        .build()
+        .unwrap();
+
+    open_and_pump(&mut app, &wb::Location::new("mem", "part.vers"));
+    assert!(!app.host.docs.docs().any(|doc| doc.location.is_some()));
+    assert!(app.host.log.entries().any(|e| e.message.contains("update the application")));
+    assert_eq!(memory.files.lock().unwrap()["part.vers"], b"v9:data");
+}
+
+#[test]
+fn autosaves_upgrade_on_recovery_and_unreadable_ones_are_kept() {
+    let dir = empty_dir("autosave-versions");
+    let session = || {
+        builder()
+            .with_workbench(VersionedWb)
+            .with_layout_path(dir.join("layout.json"))
+            .build()
+            .unwrap()
+    };
+
+    // A crashed session's autosaves: one older than this build, one newer.
+    let state = session().state().clone();
+    state.remove("autosave/session.clean");
+    let put = |name: &str, content: &[u8]| {
+        state.write(&format!("autosave/{name}_.vers"), content).unwrap();
+        let meta = serde_json::json!({ "title": name }).to_string();
+        state.write(&format!("autosave/{name}_.json"), meta.as_bytes()).unwrap();
+    };
+    put("old", b"v1:data");
+    put("newer", b"v9:data");
+
+    let app = session();
+    let recovered: Vec<_> = app
+        .host
+        .docs
+        .docs()
+        .filter(|doc| doc.title.starts_with("[Recovered]"))
+        .collect();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].title, "[Recovered] old");
+    assert!(recovered[0].dirty);
+    let text = app.host.docs.read::<String, _>(recovered[0].id, Clone::clone);
+    assert_eq!(text.as_deref(), Some("data (upgraded)"));
+    assert!(app.host.log.entries().any(|e| e.message.contains("update the application")));
+    assert_eq!(
+        app.state().keys("autosave/"),
+        ["autosave/newer_.json", "autosave/newer_.vers"],
+        "what was recovered is gone; what could not be stays",
+    );
+    drop(app);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_layout_from_a_newer_build_falls_back_to_the_default() {
+    let dir = empty_dir("layout-version");
+    let mut app = builder().with_layout_path(dir.join("layout.json")).build().unwrap();
+    app.save_layout(serde_json::json!({}), None).unwrap();
+    let saved = app.state().read("layout.json").unwrap();
+    let mut layout: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(layout["version"], wb::LAYOUT_VERSION);
+
+    layout["version"] = (wb::LAYOUT_VERSION + 1).into();
+    app.state().write("layout.json", layout.to_string().as_bytes()).unwrap();
+    assert!(app.load_layout().is_none());
+    assert!(app.host.log.entries().any(|e| e.message.contains("newer format")));
+    drop(app);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
