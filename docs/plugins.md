@@ -30,11 +30,12 @@ version = "0.1.0"
 api_version = "1"              # must equal the host HOST_API_VERSION ("1"), otherwise refused
 entry_point = "plugin.rhai"    # Rhai script; "plugin.rhai:setup" names the entry fn (default: register)
 requires = "some.feature"      # optional: a feature the product defines; without it the plugin is not loaded
+modules = ["cad.sketch"]       # optional: compiled-in Workbench modules this plugin turns on
 
-[compatibility]
-products = ["*"]               # optional: restrict to product IDs
+[compatibility]                # optional: parsed, not enforced yet
+products = ["*"]
 
-[permissions]                  # optional: audit/prompt purposes only
+[permissions]                  # optional: parsed, not enforced yet
                                # (in-process scripting is not a security sandbox)
 document_read = false
 document_write = false
@@ -159,13 +160,18 @@ fn register() {
 }
 ```
 
-The view opens from the platform's window/view menu like any registered view.
+Host API v1 has no call to open a view, so a product or Workbench opens it: a
+command calling `ctx.open_view("my.inspector", false)`, or
+`open_on_start("my.inspector", false)` on the builder.
 
 ## Lifecycle and boundaries
 
 - invalid manifest / incompatible `api_version` / `register()` runtime error →
   the plugin is **refused** (reason visible in the platform log and the
   Plugins panel); other plugins and the host are unaffected;
+- a plugin whose `requires` feature the product refuses is **refused** the same
+  way, before its script runs; this is checked as plugins load, and the manifest
+  is a plain text file, so it is not a way to protect a paid feature;
 - the Plugins panel offers runtime **Disable**: removes every command and
   toolbar contribution the plugin registered (session-scoped);
 - a duplicate plugin id is skipped for later discoveries;

@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! fn main() {
-//!     let cli = workbench_core::cli::from_env();
+//!     let cli = workbench_core::cli::Cli::from_env();
 //!     let builder = workbench_core::WorkbenchAppBuilder::new("com.example.prod", "My Product")
 //!         .with_backend_label("gpui")
 //!         .with_workbench(my_workbench)
@@ -22,6 +22,7 @@
 //!             workbench_core::cli::default_plugin_dirs("com.example.prod")))
 //!         .create_default_document(true);
 //!     let builder = cli.apply(builder);
+//!     workbench_core::diagnostics::init(&builder);
 //!
 //!     match cli.mode {
 //!         CliMode::Selfcheck => workbench_core::selfcheck::exit_with(&mut builder.build().unwrap()),

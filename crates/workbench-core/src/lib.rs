@@ -5,6 +5,7 @@
 //!   plugin stages, default layout);
 //! - [`cli`]: product CLI conventions (run / `--selfcheck` /
 //!   `--selfcheck-crash` / `--smoke`);
+//! - [`diagnostics`]: log file and crash reports (call `init` from `main`);
 //! - [`selfcheck`]: headless selfcheck (probe-based; unrelated items SKIP).
 
 pub mod account;

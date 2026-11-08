@@ -14,16 +14,18 @@ License: [MIT](LICENSE). Library crates are crates.io-ready under the
 
 ```text
 crates/
-  workbench-api         GUI-agnostic platform contracts: IDs, geometry, PaintBackend,
-                        commands, tasks, documents, workspace/Ribbon model
+  workbench-api         GUI-agnostic platform contracts: IDs, geometry, commands, tasks,
+                        documents, storage, entitlements, workspace/Ribbon model
   workbench-core        Platform runtime: assembly, command dispatch, tasks/async executor,
-                        autosave, layout persistence, selfcheck
+                        storage providers, autosave, diagnostics, layout persistence, selfcheck
   workbench-ui          gpui frontend (gpui-fast + gpui-component + gpui-rhai script views)
+  workbench-render      wgpu viewport render core (camera, pipelines, headless-testable)
   workbench-rhai        Rhai script plugin host (Host API v1: commands, toolbar,
                         script UI panels)
+  ribbon                RibbonBar component for gpui (no workbench dependency)
+  ribbon-demo           Standalone RibbonBar demo
 workbenches/
-  wb-example            Example Workbench module (package name workbench-example,
-                        depends only on workbench-api)
+  wb-example            Example Workbench module (package name workbench-example)
 products/
   product-demo          Example desktop product
   product-web           Example web product (wasm32 + trunk, WebGPU rendering)
@@ -31,11 +33,15 @@ plugins/
   rhai-demo             Demo Rhai plugin (sync command + background progress task +
                         toolbar contribution + script UI panel)
 docs/                   Requirements / plan / plugin authoring guide
+scripts/                One-shot verification, web font helper
+.github/workflows/      CI (see "Continuous integration")
 ```
 
 Dependency direction: `product → ui → core → api` and `product → wb-example → api`.
-**Workbench modules never touch gpui / rhai-rendering / wgpu** — GUI code lives
-only in `workbench-ui`; plugin scripts live in `plugins/`.
+Commands, documents and the rest of a Workbench module are GUI-agnostic. The
+exception is a view's content, which is a gpui element tree
+(`ViewInstance::element`), so a module with views also depends on `gpui`; it
+never touches `wgpu` or the frontend crates. Plugin scripts live in `plugins/`.
 
 > **UI framework decision (2026-10)**: gpui is the single frontend. The
 > former egui frontend was removed; `workbench-ui-gpui` became
@@ -49,7 +55,8 @@ only in `workbench-ui`; plugin scripts live in `plugins/`.
 > snapshots they build on at the same gpui-fast commit (see the root
 > Cargo.toml and `.vendor/gpui-pre-compat`). GPU viewports present through
 > a DirectComposition surface on Windows and a GPUI dynamic texture on the
-> web (`crates/workbench-ui/src/gpu_view/present.rs`).
+> web, and read frames back on other desktops
+> (`crates/workbench-ui/src/gpu_view/present.rs`).
 
 ## Quick start
 
@@ -80,9 +87,13 @@ it at startup (before first frame) for Chinese text. A Latin base font
 `gpui_web` platform.
 
 Web-slice differences vs the desktop product: no script plugin stage (plugin
-directories are a desktop convenience), no local file dialogs, no background
-thread tasks (they fail with a terminal state; async commands run on the
-main-thread event loop), and layout/autosave persistence is memory-only.
+directories are a desktop convenience) and no background thread tasks (they
+fail with a terminal state; async commands run on the main-thread event loop).
+Documents live in the browser's private file system (OPFS), browsed by an
+in-app picker; Import and Export move copies to and from the device through the
+browser's chooser and downloads. Settings and the layout are kept in
+localStorage. There is no autosave, crash recovery or log file, and the
+device-flow login's HTTP client is desktop-only.
 
 ## Integration guide
 
@@ -94,10 +105,10 @@ product `main` only performs assembly; the CLI conventions (run /
 platform:
 
 ```rust
-use workbench_core::cli::{self, CliMode};
+use workbench_core::cli::{Cli, CliMode};
 
 fn main() {
-    let cli = cli::from_env();
+    let cli = Cli::from_env();
     let builder = workbench_core::WorkbenchAppBuilder::new("com.example.prod", "My Product")
         .with_backend_label("gpui")                       // shown in the diagnostics panel
         .with_workbench(my_cad_workbench)                 // assemble Workbench modules
@@ -107,6 +118,7 @@ fn main() {
         .create_default_document(true)
         .open_on_start("cad.viewport", true);
     let builder = cli.apply(builder);
+    workbench_core::diagnostics::init(&builder);          // log file + crash reports
 
     match cli.mode {
         CliMode::Selfcheck =>                             // headless selfcheck (probe-based, unrelated items SKIP)
@@ -122,12 +134,59 @@ fn main() {
 ```
 
 A complete runnable version lives in `products/product-demo/src/main.rs`
-(about 50 lines).
+(about 70 lines).
+
+#### What a product can plug in
+
+| Builder call | What it adds |
+|---|---|
+| `with_storage(id, provider)` | Another place documents can live (a cloud store, …), offered in the in-app file picker |
+| `with_account(service)` | Sign-in; `account::DeviceFlowClient` is a ready OAuth 2.0 device-flow client (its session lasts until the app exits) |
+| `with_entitlements(e)` | Which features the user may use (below) |
+| `with_crash_reporter(r)` | Where crash reports go; adds a setting that is off by default |
+| `with_profile(p)` | Identity and branding from `product.toml` (`product::discover()` finds one) |
+
+#### Limiting features
+
+The framework is open source and free for commercial use, and how a product is
+sold is the product's decision, so there are no tiers or license formats here.
+A feature is a name the product chooses, and the product decides who has it:
+
+```rust
+struct MyLicense { /* … */ }
+
+impl wb::Entitlements for MyLicense {
+    fn allows(&self, feature: &str) -> bool { /* … */ }     // asked many times a second: answer from memory
+    fn refusal(&self, feature: &str) -> String {            // optional
+        format!("{feature} needs the Pro plan")
+    }
+}
+
+let builder = builder.with_entitlements(Arc::new(MyLicense::load()));
+```
+
+Put `.requires("pro.export")` on a `CommandDef`, `ViewDef` or `PanelDef`, or
+`requires = "pro.export"` in a plugin manifest. Without the feature, commands
+and panel toggles are disabled, views don't open, panels stay hidden and plugins
+don't load. If the answer changes while the app runs, the UI follows within a
+tick and what is no longer allowed closes; documents are untouched. Domain code
+can ask `ctx.host().allows("…")` for anything finer. With nothing injected,
+everything is allowed.
+
+Verifying licenses is the product's job. A manifest is a plain text file, so
+gate what matters in compiled code.
+
+#### Languages
+
+UI text is written in English, and those strings are the keys of translation
+tables: `reg.register_locales("zh-CN", [("Save", "保存")])`. Chinese ships for the
+platform's own text. The `ui.locale` setting picks the language, and
+`[i18n] default_locale` in `product.toml` sets its default.
 
 ### 2) Workbench developers: contribute commands / panels / views / document types
 
-A Workbench is a plain Rust crate that **depends only on `workbench-api`** and
-implements one trait:
+A Workbench is a plain Rust crate that **depends on `workbench-api`** (plus
+`gpui` for the content of its views) and implements one trait:
 
 ```rust
 struct CadWorkbench;
@@ -147,7 +206,7 @@ impl wb::Workbench for CadWorkbench {
         );
         // Ribbon Tab (stable group IDs; legacy add_toolbar_group lands in the "Home" Tab)
         reg.add_ribbon_tab(wb::RibbonTab::new("cad.model", "Model").groups(vec![...]));
-        // Dock panel / central view: implement ViewInstance::paint (GUI-agnostic drawing)
+        // Dock panel / central view: implement ViewInstance::element (a gpui element tree)
         reg.register_panel(wb::PanelDef::new("cad.props", "Properties", wb::DockArea::Right, 300.0, 0,
             || Box::new(PropsPanel)));
         // Script panel: the content is a gpui-rhai Rhai view instead of Rust
@@ -163,14 +222,20 @@ impl wb::Workbench for CadWorkbench {
 
 Key points:
 
-- Views draw through `PaintBackend` (six primitives + `draw_icon`) and never
-  touch GUI types;
+- A view's `element` returns a gpui element tree, handed to the frontend
+  type-erased so the platform contract stays GUI-agnostic;
 - Panels registered with `.script(path)` mount a gpui-rhai view: the Rhai
   script returns a declarative UiNode tree rendered by the gpui frontend;
 - Commands have three execution tiers: `Sync` (UI thread) / `Async` (shared
   executor) / `Background` (dedicated thread task with progress + cancellation);
 - Document edits go through `DocumentService::edit/commit`; background results
   come back as `DocCommit` (version-checked) — undo/redo work automatically;
+- Files go through storage providers: opening and saving run off the UI thread,
+  and a save is all-or-nothing, so a crash or full disk can't damage the file;
+- `DocumentTypeDef::format` versions a type's files, with one upgrade step per
+  version (`None` for formats defined elsewhere). Older files upgrade as they
+  open, the first save over one keeps a copy (`part.v1.ext`), and files this
+  build can't read are refused with the reason;
 - `init` may panic — the failure is caught and isolated during assembly,
   without taking the product down.
 
@@ -181,7 +246,8 @@ monochrome SVG icon: declare a path (`.icon("icons/extrude.svg")`) and mount
 an asset source on the product
 (`builder.with_assets(wb_example::example_assets())` — typically a static
 `include_bytes!` table via `wb::StaticAssets`). Lookup falls back to the
-platform standard icons (new/open/save/undo/redo under `wb-std/`), and a
+platform standard icons (new/open/save/undo/redo and
+diagnostics/plugins/settings/about under `wb-std/`), and a
 product can override those by reusing their paths. Icons render as an alpha
 mask tinted with the widget foreground color (gray when disabled); a missing
 or unparseable icon degrades to text-only UI.
@@ -215,7 +281,7 @@ The `ui/main.rhai` script panel returns a declarative UiNode tree composed of
 registry components (button/input/label/tag/progress/card/…), with state in
 the script and callbacks as named functions — see `plugins/rhai-demo/ui/`.
 Manifest validation, API version checks, error isolation, and runtime disable
-are all built in.
+are all built in, and `requires` puts a plugin behind a product feature.
 
 ## Running & diagnostics
 
@@ -224,8 +290,30 @@ are all built in.
 | `--selfcheck` | Headless selfcheck (probe-based: items unrelated to the product SKIP automatically), exit code 0/1 |
 | `--selfcheck-crash` | Crash-recovery probe (invoked by the selfcheck; not for manual runs) |
 | `--smoke [secs]` | Run for the given number of seconds and exit (default 2.5), for CI smoke tests |
-| `RUST_LOG=info` | wgpu/gpui diagnostics |
-| stderr `wb-log [...]` | Mirror of the platform log (visible in the terminal, greppable in automation) |
+| `RUST_LOG=info` | What reaches stderr (errors only by default); when set it also replaces the log file's filter |
+
+A product that calls `diagnostics::init` keeps these in its config directory
+(`%APPDATA%\<product id>` on Windows, `~/.config/<product id>` elsewhere):
+
+- `logs/app.log`: warnings and up, plus information from the workbench crates.
+  It rolls over at 5 MB and three older files are kept.
+- `crashes/`: a report for each panic, with the location, the backtrace and the
+  end of the log. The next launch says so once, and the newest 20 are kept.
+  Native crashes (an access violation in a driver, say) are not captured yet.
+
+**Help → Export Diagnostics…** saves one plain text file for support: versions,
+system, plugins, platform settings, the end of the log and the latest crash
+reports. Account details and plugin settings stay out; the log can contain file
+paths. Nothing is sent anywhere unless the product injects a crash reporter and
+the user turns on its setting.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on pull requests and pushes to master: tests and
+selfcheck on Windows, Linux and macOS, a wasm32 check, and `cargo deny` against
+`deny.toml` (licenses that put no limit on commercial use, known sources). Linux
+and macOS report without blocking until they have been green once. Packaging,
+code signing and updates are left to products.
 
 ## Script plugins (Rhai)
 
@@ -241,10 +329,15 @@ Plugin directories are scanned from `./plugins` and the user config directory
 - **Phase 3 (plugin loop)**: manifest & discovery, API version check, Host API v1, error isolation, runtime disable, demo plugin — **now Rhai-based** (Python host removed, 2026-10).
 - **RibbonBar**: three-level model `RibbonTab -> Group -> Command` (stable IDs, controlled merging, active-Tab persistence), rendering verified via screenshots.
 - **Phase 5 (production hardening, first batch)**: settings service, autosave + crash recovery, plugin management panel, diagnostics panel with frame statistics, performance regression tests + one-shot verification script.
-- **SVG icons**: GUI-agnostic icon contract (`AssetSource` + icon fields on commands/views/panels + `PaintBackend::draw_icon`), platform standard icon set, alpha-mask tinting and texture caching (design.md §9.2.1).
+- **SVG icons**: GUI-agnostic icon contract (`AssetSource` + icon fields on commands/views/panels), platform standard icon set, alpha-mask tinting and texture caching (design.md §9.2.1).
 - **Web slice (wasm32 + trunk)**: gpui in the browser via `gpui_web` (WebGPU), fonts injected before first frame.
 - **Single frontend (2026-10)**: egui frontend removed; crates renamed (`workbench-ui`, `product-demo`, `product-web`); script plugins moved from Python to Rhai (see docs/plan.md §15).
-- TODO: wgpu render service (optional capability), process isolation for untrusted plugins (design sketch in plan.md section 10.6), multi-platform packaging.
+- **gpui-fast base (2026-11)**: gpui-fast from git replaces the gpui-ce fork; GPU viewports on DirectComposition (Windows) and a GPUI dynamic texture (web).
+- **Files and state**: storage providers behind async open/save, in-app file picker, OPFS and import/export on the web, app state behind a `StateStore`.
+- **Data safety**: atomic saves, versioned document formats with upgrades on opening and the original kept on the first save over it.
+- **Diagnostics**: rolling log file, crash reports, Export Diagnostics, opt-in crash reporting.
+- **Entitlements**: product-defined features gating commands, views, panels and plugins, following changes while the app runs.
+- TODO: process isolation for untrusted plugins (design sketch in plan.md section 10.6), native crash capture.
 
 ## Publishing (crates.io)
 

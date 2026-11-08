@@ -2,7 +2,8 @@
 
 Implements docs/design.md. This plan merged Phase 0 (GUI validation) and
 Phase 1 (minimal platform loop) into one runnable vertical slice; later
-sections record the completed phases 2, 3, 5, RibbonBar, and release prep.
+sections record the completed phases 2, 3, 5, RibbonBar, release prep, and the
+2026-11 production groundwork (§16).
 
 ## 1. Goals and scope of the vertical slice
 
@@ -375,10 +376,10 @@ Implements design.md §18 phase 5. Landed 5 items trimmed by real product need,
 
 | Item | Trigger | Sketch |
 |---|---|---|
-| process isolation for untrusted plugins (§11.5 "if needed") | a real need to run untrusted plugins | manifest gains `sandbox = "process"`; product binary gains a `--plugin-worker <dir>` subprocess mode embedding pyo3; host forwards register/call/progress over stdio JSON-RPC; command calls reuse the existing InvocationRecord channel |
+| process isolation for untrusted plugins (§11.5 "if needed") | a real need to run untrusted plugins | manifest gains `sandbox = "process"`; product binary gains a `--plugin-worker <dir>` subprocess mode hosting the script engine; host forwards register/call/progress over stdio JSON-RPC; command calls reuse the existing InvocationRecord channel |
 | plugin source management & updates | once a distribution channel exists | `plugin.toml [source]` + local repo directory version comparison (no network dependency initially) |
 | GPU resource recovery / view diagnostics | after the wgpu render service lands (§9.4) | render service owns device lifecycle; diagnostics panel gains GPU adapter / per-view resource entries |
-| multi-platform packaging | once multi-platform distribution is needed | cargo-dist or per-target scripts; the Windows package is already producible via release profile + verify.ps1 |
+| multi-platform packaging | belongs to products (§16) | a product can use cargo-dist or per-target scripts; the framework only builds and tests its own crates in CI |
 
 ## 11. Open-source release preparation (done)
 
@@ -538,7 +539,7 @@ Project decision: converge on **one UI framework and one scripting language**.
   tree composed of registry components). The gpui frontend mounts it via
   `FileScriptView::prepare().mount(...)` through a per-window
   `ScriptViewHost`; script panels carry no Rust instance.
-- **gpui base = git fork (temporary)**: the workspace pins
+- **gpui base = git fork (temporary; superseded by §16)**: the workspace pins
   `javagg/gpui-ce` through `[patch.crates-io]` for all four platform crates
   (gpui-ce, gpui_ce_platform, gpui_ce_web, gpui_ce_wgpu) because the fork
   carries wgpu rendering fixes not yet merged upstream. **Remove the patch
@@ -547,7 +548,7 @@ Project decision: converge on **one UI framework and one scripting language**.
   gone — the fork's `gpui_web` ships no embedded fonts at all, so
   `workbench-ui` embeds a Latin base font (IBM Plex Sans, OFL) and the web
   product fetches a CJK font at startup, both before the first frame.
-- **gpui-rhai version pin = 0.1.5**: the newest release compiled against
+- **gpui-rhai version pin = 0.1.5 (superseded by §16)**: the newest release compiled against
   `gpui-ce 0.2.2` (exact). 0.1.6+ moved to the `gpui-pre 0.3.7` pre-release
   line and cannot be mixed into this workspace. Upgrade path: once the
   upstream base moves to gpui-pre 0.3.x, revisit gpui-rhai 0.2.x.
@@ -562,3 +563,50 @@ Both targets compile warning-free (desktop + wasm32 for product-web);
 validation, load & registration, sync note, background progress/cancel,
 runtime disable); headless-browser screenshots confirm product-web renders
 on the fork base; product-demo selfcheck covers the Rhai plugin probes.
+
+## 16. gpui-fast base and production groundwork (2026-11, done)
+
+### Decision record
+
+- **gpui base = gpui-fast from git.** It replaces the gpui-ce fork of §15, which
+  never merged the Windows wgpu renderer fixes. The web viewport needs
+  `WebPlatform::wgpu_context` and `WgpuDynamicTexture`, which only gpui-fast's
+  main branch carries. gpui-component 0.9 and gpui-rhai 0.4.2 build on `gpui-pre`
+  snapshots that `[patch.crates-io]` points at the same commit, so every `rev`
+  must stay identical (root Cargo.toml and `.vendor/gpui-pre-compat`).
+- **Viewports.** gpui-fast renders with D3D11 on Windows, so there is no wgpu
+  device to share: a viewport owns a DX12 swap chain on a DirectComposition
+  visual there, renders into a GPUI dynamic texture on the web, and reads frames
+  back on other desktops.
+- **Files and state (design.md §12.1).** Documents remember a `Location`
+  (provider + key) and go through async storage providers: the local file system
+  on the desktop, OPFS on the web. Non-local providers are browsed by an in-app
+  picker. Import and export move one-off copies. Settings, layout and autosaves
+  sit behind a small `StateStore`: files on the desktop, localStorage on the web.
+- **English source text.** UI strings are English and double as translation
+  keys; Chinese is kept as the `zh-CN` table.
+- **Saves and formats (design.md §12.1).** Saves are all-or-nothing. A document
+  type can version its files: the domain module supplies the upgrade steps, and
+  the platform upgrades on opening, keeps the original on the first save over it,
+  and refuses what the build can't read.
+- **Diagnostics (design.md §12.4).** Rolling log file, crash reports for panics,
+  Export Diagnostics, and an opt-in `CrashReporter` a product can inject.
+- **CI.** GitHub Actions builds and tests the framework; `deny.toml` holds
+  dependencies to licenses that put no limit on commercial use.
+- **Entitlements (design.md §13.1).** The framework is open source and free for
+  commercial use, and how a product is sold is the product's decision. The
+  `Trial/Pro/OEM` tiers were a business model built into the framework, so they
+  were replaced by product-defined features gating commands, views, panels and
+  plugins. Packaging, code signing, updates and license verification belong to
+  products. An auto-update capability was considered and left until a product
+  needs one.
+
+### Verification
+
+On Windows: `cargo test --workspace` (172 tests), selfcheck 21/21 including the
+crash-recovery probe, and a wasm32 check. In headless Edge: saving, reopening and
+upgrading documents in OPFS, import and export, the diagnostics download, and
+entitlements changing with no user input.
+
+Open: Linux and macOS have not been built, native crashes are not captured, and
+an error at desktop window close is still unresolved.

@@ -1,6 +1,6 @@
 //! wb-example: the example Workbench module that exercises the workbench-rs platform.
 //!
-//! Depends only on workbench-api, not on any GUI framework (design.md acceptance #21).
+//! Depends on workbench-api, plus gpui for the content of its views.
 
 mod shapes;
 mod views;

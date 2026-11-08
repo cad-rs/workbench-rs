@@ -2,8 +2,8 @@
 //!
 //! This crate defines the GUI-agnostic platform APIs: IDs, geometry, commands,
 //! tasks, documents, the workspace model, and Workbench extension points.
-//! Workbench modules may only depend on this crate (never on egui / gpui /
-//! wgpu — design.md acceptance item #21).
+//! Workbench modules build on this crate; one with views also uses gpui's
+//! element types for their content, and never touches wgpu.
 //!
 //! A view's *content* is a frontend element tree, so the view contract hands
 //! the frontend a type-erased element handle rather than a drawing interface;

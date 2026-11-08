@@ -1,13 +1,15 @@
 # workbench-rs: Requirements & Design for a Generic Engineering Desktop Application Framework
 
-> **Implementation status note (2026-10).** This document is the original
+> **Implementation status note (2026-11).** This document is the original
 > design baseline. Decisions taken during implementation supersede parts of
 > it: the GUI converged on **GPUI only** (the egui candidate was removed;
-> `workbench-ui-gpui` is now `workbench-ui`), and the plugin language is
+> `workbench-ui-gpui` is now `workbench-ui`), the plugin language is
 > **Rhai via gpui-rhai** (the Python host was replaced by
-> `workbench-rhai`; script panels render gpui-rhai UiNode trees). The gpui
-> base temporarily tracks a git fork carrying wgpu fixes
-> (docs/plan.md §15 has the full record and the switch-back condition).
+> `workbench-rhai`; script panels render gpui-rhai UiNode trees), and a
+> view's content is a gpui element tree (`ViewInstance::element`). The gpui
+> base is gpui-fast pinned by git revision (docs/plan.md §15 and §16 have the
+> full record). §12.1, §12.4 and §13.1 describe what is implemented; the
+> README has the crate layout actually in use.
 
 - **Project name:** `workbench-rs`
 - **Document status:** initial design baseline
@@ -314,7 +316,8 @@ current work mode; the active RibbonBar Tab (or product-permitted display
 preferences).
 
 When a plugin or Workbench is missing, the platform skips unrestorable layout
-entries and allows the user to reset the layout.
+entries and allows the user to reset the layout. A restored layout cannot bring
+back a view or panel whose feature the product refuses (§13.1).
 
 ### 6.6 GUI frontend relationship
 
@@ -828,10 +831,13 @@ these is a mechanism with no business model in it (`workbench_api::Entitlements`
 a feature is a name the product chooses, the product injects what decides it
 (`WorkbenchAppBuilder::with_entitlements`: a license file, an account's plan, a
 dongle), and the platform applies the answer to commands
-(`CommandDef::requires`: disabled, and refused with the product's message) and
-plugins (`requires` in the manifest: not loaded). Domain code can ask
-`ServiceHost::allows` for anything finer. With nothing injected, everything is
-allowed. A check in the binary is only as strong as the product makes it: the
+(`requires`: disabled, and refused with the product's message), views and
+panels (`requires`: not opened, the toggle disabled, and closed if the answer
+changes to no) and plugins (`requires` in the manifest: not loaded). The answers
+for features named by `requires` are compared every tick, so an activation or an
+expiry shows without a restart or user input; plugins are only checked as they
+load. Domain code can ask `ServiceHost::allows` for anything finer. With nothing
+injected, everything is allowed. A check in the binary is only as strong as the product makes it: the
 product owns verifying its licenses.
 
 ### 13.2 Build-time selection
