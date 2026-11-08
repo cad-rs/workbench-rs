@@ -1192,6 +1192,81 @@ fn a_layout_from_a_newer_build_falls_back_to_the_default() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---- Entitlements ----
+
+/// The product's answer, which can change while the app runs.
+#[derive(Default)]
+struct FeatureSwitch(std::sync::Mutex<Vec<String>>);
+
+impl wb::Entitlements for FeatureSwitch {
+    fn allows(&self, feature: &str) -> bool {
+        self.0.lock().unwrap().iter().any(|allowed| allowed == feature)
+    }
+    fn refusal(&self, feature: &str) -> String {
+        format!("{feature} needs an upgrade")
+    }
+}
+
+/// One ordinary command and one behind a feature.
+struct GatedWb;
+
+impl wb::Workbench for GatedWb {
+    fn id(&self) -> wb::WorkbenchId {
+        wb::WorkbenchId::new("wb-gated")
+    }
+    fn init(&self, reg: &mut wb::Registry) {
+        reg.register_command(wb::CommandDef::sync("test.open", "Open", |_ctx, _args| {
+            wb::CommandResult::done()
+        }));
+        reg.register_command(
+            wb::CommandDef::sync("test.gated", "Gated", |_ctx, _args| {
+                wb::CommandResult::done_with("ran")
+            })
+            .requires("pro.export"),
+        );
+    }
+}
+
+#[test]
+fn a_command_behind_a_feature_follows_the_product_answer() {
+    let switch = std::sync::Arc::new(FeatureSwitch::default());
+    let mut app = builder()
+        .with_workbench(GatedWb)
+        .with_entitlements(switch.clone())
+        .build()
+        .unwrap();
+    let args = wb::CommandArgs::default();
+
+    assert!(app.is_enabled("test.open"), "commands without a requirement are unaffected");
+    assert!(!app.is_enabled("test.gated"));
+    assert!(matches!(
+        app.execute_command("test.gated", &args),
+        wb::CommandResult::Failed { error } if error == "pro.export needs an upgrade"
+    ));
+    assert!(app.host.log.entries().any(|e| e.message == "pro.export needs an upgrade"));
+
+    // An activation while the app runs takes effect without a restart.
+    switch.0.lock().unwrap().push("pro.export".to_string());
+    assert!(app.is_enabled("test.gated"));
+    assert!(!matches!(
+        app.execute_command("test.gated", &args),
+        wb::CommandResult::Failed { .. }
+    ));
+    assert!(app.host.allows("pro.export"));
+    assert!(!app.host.allows("pro.import"));
+}
+
+#[test]
+fn without_entitlements_every_feature_is_allowed() {
+    let mut app = builder().with_workbench(GatedWb).build().unwrap();
+    assert!(app.is_enabled("test.gated"));
+    assert!(!matches!(
+        app.execute_command("test.gated", &wb::CommandArgs::default()),
+        wb::CommandResult::Failed { .. }
+    ));
+    assert!(app.host.allows("anything"));
+}
+
 // ---- Diagnostics ----
 
 const SEND_CRASH_REPORTS: &str = "diagnostics.send_crash_reports";

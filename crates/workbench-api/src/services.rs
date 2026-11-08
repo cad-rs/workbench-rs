@@ -35,9 +35,8 @@ pub struct PluginEntry {
     pub state: &'static str,
     /// Why it was Rejected/Disabled.
     pub detail: Option<String>,
-    /// License tier the plugin requires (manifest `tier`); None = no
-    /// requirement. The licensing milestone gates loading on this.
-    pub tier: Option<crate::licensing::LicenseTier>,
+    /// The feature the plugin requires (manifest `requires`); None = no requirement.
+    pub requires: Option<String>,
 }
 
 /// The platform service aggregate. Owned by the UI thread.
@@ -58,6 +57,8 @@ pub struct ServiceHost {
     /// filled at build time; display sites go through [`ServiceHost::tr`].
     pub localizer: crate::i18n::Localizer,
     /// Injected account capability (Phase 3); None = no login surface.
+    /// What decides gated features; None = everything is allowed.
+    pub entitlements: Option<std::sync::Arc<dyn crate::entitlements::Entitlements>>,
     pub account: Option<std::sync::Arc<dyn crate::account::AccountService>>,
     /// In-flight device-login poll thread: phase updates (drained each frame
     /// into `ws.account` by the runtime) and the cancel flag.
@@ -88,6 +89,7 @@ impl ServiceHost {
             settings: Settings::in_memory(),
             setting_specs: Vec::new(),
             localizer: crate::i18n::Localizer::new(),
+            entitlements: None,
             account: None,
             account_login_rx: None,
             account_login_cancel: None,
@@ -112,6 +114,16 @@ impl ServiceHost {
     }
 
     /// Platform uptime (seconds).
+    /// Whether the user may use `feature` (see [`crate::Entitlements`]).
+    pub fn allows(&self, feature: &str) -> bool {
+        self.refusal(feature).is_none()
+    }
+
+    /// Why the user may not use `feature`; None when they may.
+    pub fn refusal(&self, feature: &str) -> Option<String> {
+        crate::entitlements::refusal(self.entitlements.as_ref(), feature)
+    }
+
     pub fn uptime_secs(&self) -> f32 {
         self.started.elapsed().as_secs_f32()
     }

@@ -46,9 +46,12 @@ pub struct Registry {
     /// has already compiled. The product gets the deduplicated set from
     /// [`Registry::plugin_module_ids`] and assembles it.
     pub plugin_modules: Vec<(String, Vec<String>)>,
-    /// Each loaded plugin's required license tier (manifest `tier`); moved into the
-    /// ServiceHost::plugins entries at build time, and the Licensing milestone gates loading on it.
-    pub plugin_tiers: Vec<(String, crate::licensing::LicenseTier)>,
+    /// The feature each loaded plugin requires (manifest `requires`); moved into the
+    /// ServiceHost::plugins entries at build time.
+    pub plugin_requirements: Vec<(String, String)>,
+    /// What decides gated features, when the product limits any; plugin loaders ask
+    /// [`Registry::refusal`].
+    pub entitlements: Option<std::sync::Arc<dyn crate::entitlements::Entitlements>>,
     /// Rejected/failed plugins: (plugin ID or directory, reason).
     pub plugins_rejected: Vec<(String, String)>,
     /// IDs of the plugins disabled at runtime (phase 5).
@@ -63,6 +66,11 @@ pub struct Registry {
 impl Registry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Why the user may not use `feature`; None when they may.
+    pub fn refusal(&self, feature: &str) -> Option<String> {
+        crate::entitlements::refusal(self.entitlements.as_ref(), feature)
     }
 
     pub fn error(&mut self, message: impl Into<String>) {

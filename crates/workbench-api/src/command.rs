@@ -274,6 +274,9 @@ pub struct CommandDef {
     pub hotkey: Option<Hotkey>,
     /// Enable condition (None means always enabled). Evaluated against the CtxSnapshot.
     pub enabled: Option<EnabledWhen>,
+    /// The feature this command needs (see [`crate::Entitlements`]); without it the command
+    /// is disabled and refuses to run.
+    pub requires: Option<String>,
     /// Toggle checked state query (None is always unchecked). Evaluated against the CtxSnapshot,
     /// in the same pattern as `enabled` — the command system is the single source of the on/off
     /// state (ribbon-bar.md §4.2).
@@ -306,6 +309,7 @@ impl CommandDef {
             title: title.into(),
             hotkey: None,
             enabled: None,
+            requires: None,
             checked: None,
             combo: None,
             kind: CommandKind::Sync(Box::new(handler)),
@@ -323,6 +327,7 @@ impl CommandDef {
             title: title.into(),
             hotkey: None,
             enabled: None,
+            requires: None,
             checked: None,
             combo: None,
             kind: CommandKind::Background(Box::new(starter)),
@@ -340,6 +345,7 @@ impl CommandDef {
             title: title.into(),
             hotkey: None,
             enabled: None,
+            requires: None,
             checked: None,
             combo: None,
             kind: CommandKind::Async(Box::new(starter)),
@@ -355,6 +361,11 @@ impl CommandDef {
     /// AssetSource). When unset or unresolved, the UI falls back to plain text.
     pub fn icon(mut self, path: impl Into<String>) -> Self {
         self.icon = Some(path.into());
+        self
+    }
+    /// Put this command behind a feature the product defines.
+    pub fn requires(mut self, feature: impl Into<String>) -> Self {
+        self.requires = Some(feature.into());
         self
     }
     pub fn enabled_when(

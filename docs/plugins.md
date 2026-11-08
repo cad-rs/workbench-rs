@@ -29,6 +29,7 @@ name = "My Plugin"
 version = "0.1.0"
 api_version = "1"              # must equal the host HOST_API_VERSION ("1"), otherwise refused
 entry_point = "plugin.rhai"    # Rhai script; "plugin.rhai:setup" names the entry fn (default: register)
+requires = "some.feature"      # optional: a feature the product defines; without it the plugin is not loaded
 
 [compatibility]
 products = ["*"]               # optional: restrict to product IDs

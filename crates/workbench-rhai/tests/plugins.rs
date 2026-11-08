@@ -254,3 +254,61 @@ fn rejected_plugin_script_does_not_crash() {
     assert!(app.plugins_loaded().is_empty());
     assert_eq!(app.command_title("rhai.hello"), None);
 }
+
+/// Allows only the features it was built with.
+struct Allowing(&'static [&'static str]);
+
+impl wb::Entitlements for Allowing {
+    fn allows(&self, feature: &str) -> bool {
+        self.0.contains(&feature)
+    }
+    fn refusal(&self, feature: &str) -> String {
+        format!("{feature} is not in your plan")
+    }
+}
+
+#[test]
+fn a_plugin_behind_a_feature_loads_only_when_it_is_allowed() {
+    let dir = std::env::temp_dir().join(format!("wb-rhai-gated-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugin = dir.join("gated");
+    std::fs::create_dir_all(&plugin).unwrap();
+    let manifest = manifest_text("com.test.gated", "1") + "requires = \"pro.scripts\"\n";
+    std::fs::write(plugin.join("plugin.toml"), manifest).unwrap();
+    std::fs::copy(fixture("good/plugin.rhai"), plugin.join("plugin.rhai")).unwrap();
+
+    let build = |allowed: &'static [&'static str]| {
+        WorkbenchAppBuilder::new("test.product", "Test Product")
+            .with_entitlements(std::sync::Arc::new(Allowing(allowed)))
+            .with_plugin_stage(workbench_rhai::plugin_stage(vec![dir.clone()]))
+            .build()
+            .expect("assembly failed")
+    };
+    let entry = |app: &AppRuntime| {
+        app.host.plugins.iter().find(|p| p.id == "com.test.gated").cloned().unwrap()
+    };
+
+    let refused = build(&[]);
+    assert_eq!(entry(&refused).state, "Rejected");
+    assert_eq!(entry(&refused).detail.as_deref(), Some("pro.scripts is not in your plan"));
+    assert!(refused.command_title("test.good.hello").is_none(), "its script never ran");
+    drop(refused);
+
+    let allowed = build(&["pro.scripts"]);
+    assert_eq!(entry(&allowed).state, "Loaded");
+    assert_eq!(entry(&allowed).requires.as_deref(), Some("pro.scripts"));
+    assert!(allowed.command_title("test.good.hello").is_some());
+    drop(allowed);
+
+    // A product that limits nothing loads it too.
+    let open = build_with(vec![dir.clone()]);
+    assert_eq!(entry(&open).state, "Loaded");
+    drop(open);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_manifest_must_name_the_feature_it_requires() {
+    let text = manifest_text("com.test.empty", "1") + "requires = \"\"\n";
+    assert!(workbench_rhai::parse_manifest(&text).is_err());
+}

@@ -29,10 +29,10 @@ pub struct PluginInfo {
     /// leaves this out.
     #[serde(default)]
     pub modules: Vec<String>,
-    /// License tier this plugin requires ("trial" / "pro" / "oem"); omitted
-    /// = no requirement. The licensing milestone gates loading on it — for
-    /// now it is parsed, validated and displayed only.
-    pub tier: Option<String>,
+    /// The feature this plugin needs, a name the product defines (see
+    /// `workbench_api::Entitlements`); without it the plugin is not loaded.
+    /// Omitted = no requirement.
+    pub requires: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,12 +99,8 @@ fn validate(manifest: &PluginManifest) -> Result<(), String> {
             return Err(format!("module ID contains invalid characters: {module}"));
         }
     }
-    if let Some(tier) = &manifest.plugin.tier {
-        if workbench_api::LicenseTier::parse(tier).is_none() {
-            return Err(format!(
-                "unknown tier: {tier} (one of trial/pro/oem)"
-            ));
-        }
+    if manifest.plugin.requires.as_deref().is_some_and(str::is_empty) {
+        return Err("requires names no feature".to_string());
     }
     Ok(())
 }

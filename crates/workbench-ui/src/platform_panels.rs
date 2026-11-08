@@ -156,9 +156,8 @@ impl wb::ViewInstance for PluginsPanel {
                                 .text_color(col(color))
                                 .child(tr(state_key)),
                         );
-                    // License tier requirement badge (e.g. "Pro"); only
-                    // shown when the manifest declared one.
-                    if let Some(tier) = entry.tier {
+                    // The feature the plugin requires, when the manifest names one.
+                    if let Some(feature) = &entry.requires {
                         row = row.child(
                             div()
                                 .px_1p5()
@@ -166,7 +165,7 @@ impl wb::ViewInstance for PluginsPanel {
                                 .bg(col(Color::ACCENT))
                                 .text_size(px(10.))
                                 .text_color(col(Color::WHITE))
-                                .child(tier.as_str().to_string()),
+                                .child(feature.clone()),
                         );
                     }
                     if let Some(detail) = &entry.detail {

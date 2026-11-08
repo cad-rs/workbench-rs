@@ -131,6 +131,7 @@ impl AppRuntime {
     /// Whether the command is currently enabled (per the snapshot the last frame_tick made).
     pub fn is_enabled(&self, id: &str) -> bool {
         match self.registry.command(id) {
+            Some(def) if def.requires.as_deref().is_some_and(|f| !self.host.allows(f)) => false,
             Some(def) => match &def.enabled {
                 Some(f) => f(&self.snapshot),
                 None => true,
@@ -718,6 +719,12 @@ impl AppRuntime {
             self.host.log.error(msg.clone());
             return CommandResult::failed(msg);
         };
+        if let Some(refusal) = def.requires.as_deref().and_then(|f| self.host.refusal(f)) {
+            self.registry.put_command(def);
+            self.note_invocation(seq, InvocationStatus::Failed, Some(refusal.clone()));
+            self.host.log.warn(refusal.clone());
+            return CommandResult::failed(refusal);
+        }
         let snapshot = self.make_snapshot();
         if let Some(enabled) = &def.enabled {
             if !enabled(&snapshot) {
@@ -1104,6 +1111,8 @@ pub struct WorkbenchAppBuilder {
     /// platform calls it after loading plugins.
     module_loader: Option<ModuleLoader>,
     /// Injected account capability (Phase 3); None = no login surface.
+    /// What decides gated features; None = everything is allowed.
+    entitlements: Option<Arc<dyn api::Entitlements>>,
     /// Where crash reports go if the user agrees; None = they stay local.
     crash_reporter: Option<Arc<dyn api::CrashReporter>>,
     account: Option<Arc<dyn api::AccountService>>,
@@ -1150,6 +1159,7 @@ impl WorkbenchAppBuilder {
             theme: "dark".to_string(),
             module_loader: None,
             account: None,
+            entitlements: None,
             crash_reporter: None,
             storage,
         }
@@ -1191,6 +1201,14 @@ impl WorkbenchAppBuilder {
     /// [`crate::account::DeviceFlowClient`].
     pub fn with_account(mut self, service: Arc<dyn api::AccountService>) -> Self {
         self.account = Some(service);
+        self
+    }
+
+    /// Inject what decides which features the user may use. Features are names the product
+    /// chooses, applied through [`api::CommandDef::requires`] and a plugin manifest's
+    /// `requires`. Without this, everything is allowed.
+    pub fn with_entitlements(mut self, entitlements: Arc<dyn api::Entitlements>) -> Self {
+        self.entitlements = Some(entitlements);
         self
     }
 
@@ -1354,6 +1372,7 @@ impl WorkbenchAppBuilder {
         host.ws.set_work_modes(self.work_modes.clone(), &self.default_mode);
 
         let mut registry = Registry::new();
+        registry.entitlements = self.entitlements.clone();
         for wb in &self.workbenches {
             registry.workbenches.push(wb.id());
             let result = catch_unwind(AssertUnwindSafe(|| wb.init(&mut registry)));
@@ -1538,21 +1557,21 @@ impl WorkbenchAppBuilder {
         // Account capability (Phase 3): injected by the product; commands and
         // the status bar render from host.account + ws.account.
         host.account = self.account;
+        host.entitlements = self.entitlements.clone();
         host.storage = self.storage;
 
-        // The plugin registry mirror (for the diagnostics/management panels); tier is the
-        // license requirement the manifest declares.
+        // The plugin registry mirror (for the diagnostics/management panels).
         for id in &registry.plugins_loaded {
-            let tier = registry
-                .plugin_tiers
+            let requires = registry
+                .plugin_requirements
                 .iter()
                 .find(|(pid, _)| pid == id)
-                .map(|(_, tier)| *tier);
+                .map(|(_, feature)| feature.clone());
             host.plugins.push(api::PluginEntry {
                 id: id.clone(),
                 state: "Loaded",
                 detail: None,
-                tier,
+                requires,
             });
         }
         for (id, reason) in &registry.plugins_rejected {
@@ -1560,7 +1579,7 @@ impl WorkbenchAppBuilder {
                 id: id.clone(),
                 state: "Rejected",
                 detail: Some(reason.clone()),
-                tier: None,
+                requires: None,
             });
         }
 

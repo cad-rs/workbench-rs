@@ -27,7 +27,7 @@ pub mod documents;
 pub mod geo;
 pub mod ids;
 pub mod i18n;
-pub mod licensing;
+pub mod entitlements;
 pub mod log;
 pub mod picker;
 pub mod product;
@@ -62,7 +62,7 @@ pub use documents::{
 };
 pub use geo::{Color, Point, Rect, Size};
 pub use i18n::Localizer;
-pub use licensing::LicenseTier;
+pub use entitlements::Entitlements;
 pub use ids::{
     CommandId, DocumentId, DocumentTypeId, PanelId, StableId, TabInstanceId, TaskId, ToolbarGroupId,
     ViewTypeId, WorkbenchId,

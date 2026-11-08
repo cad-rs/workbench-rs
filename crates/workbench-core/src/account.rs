@@ -4,8 +4,7 @@
 //! IdP-agnostic by construction: all deployment-specific input is an issuer
 //! URL and a client id. Endpoints come from OIDC discovery
 //! (`{issuer}/.well-known/openid-configuration`); tokens are cached in
-//! memory for the session (persistent/keyring storage lands with the
-//! activation milestone). Every call performs blocking network I/O — the
+//! memory for the session. Every call performs blocking network I/O — the
 //! platform invokes them from background threads, never the UI thread.
 //!
 //! The HTTP layer is injectable ([`HttpTransport`]): desktop uses

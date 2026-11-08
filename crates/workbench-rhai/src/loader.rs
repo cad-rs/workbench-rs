@@ -58,6 +58,11 @@ fn load_one(registry: &mut Registry, dir: &Path) {
         return;
     }
 
+    if let Some(refusal) = manifest.plugin.requires.as_deref().and_then(|f| registry.refusal(f)) {
+        registry.plugins_rejected.push((plugin_id, refusal));
+        return;
+    }
+
     let (entry_file, entry_fn) = split_entry_point(&manifest.plugin.entry_point);
     let entry_path = dir.join(&entry_file);
     let Ok(source) = std::fs::read_to_string(&entry_path) else {
@@ -162,14 +167,8 @@ fn load_one(registry: &mut Registry, dir: &Path) {
     registry
         .plugin_modules
         .push((plugin_id.clone(), manifest.plugin.modules.clone()));
-    // License tier requirement (manifest `tier`); validated at parse time.
-    if let Some(tier) = manifest
-        .plugin
-        .tier
-        .as_deref()
-        .and_then(workbench_api::LicenseTier::parse)
-    {
-        registry.plugin_tiers.push((plugin_id.clone(), tier));
+    if let Some(feature) = &manifest.plugin.requires {
+        registry.plugin_requirements.push((plugin_id.clone(), feature.clone()));
     }
     registry.plugins_loaded.push(plugin_id);
 }

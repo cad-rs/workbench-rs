@@ -833,13 +833,4 @@ mod tests {
             "clamped to spec min"
         );
     }
-
-    #[test]
-    fn plugin_tier_gate_rules() {
-        use api::LicenseTier;
-        // No license service yet: satisfies() is the gate Phase 4 wires in.
-        assert!(LicenseTier::Trial.satisfies(None));
-        assert!(!LicenseTier::Trial.satisfies(Some(LicenseTier::Pro)));
-        assert!(LicenseTier::OEM.satisfies(Some(LicenseTier::Pro)));
-    }
 }

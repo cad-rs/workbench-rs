@@ -821,6 +821,19 @@ central tab policy; the document types and file associations it provides; the
 range and policy of installable plugins; the Python runtime and plugin
 distribution policy.
 
+The framework is open source and free for commercial use, and how a product
+is sold is the product's decision, so packaging, code signing, updates and
+licensing terms belong to products. What the framework offers for the last of
+these is a mechanism with no business model in it (`workbench_api::Entitlements`):
+a feature is a name the product chooses, the product injects what decides it
+(`WorkbenchAppBuilder::with_entitlements`: a license file, an account's plan, a
+dongle), and the platform applies the answer to commands
+(`CommandDef::requires`: disabled, and refused with the product's message) and
+plugins (`requires` in the manifest: not loaded). Domain code can ask
+`ServiceHost::allows` for anything finer. With nothing injected, everything is
+allowed. A check in the binary is only as strong as the product makes it: the
+product owns verifying its licenses.
+
 ### 13.2 Build-time selection
 
 GUI selection happens in product configuration or at build time. It may be
