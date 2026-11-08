@@ -7,18 +7,19 @@
 //! file, an account's plan, a dongle or anything else. Without one, everything
 //! is allowed.
 //!
-//! The platform applies the answer to commands (`CommandDef::requires`) and
-//! plugins (`requires` in the manifest); domain code can ask directly through
-//! `ServiceHost::allows`.
+//! The platform applies the answer to commands, views and panels (`requires`
+//! on their definitions) and plugins (`requires` in the manifest); domain code
+//! can ask directly through `ServiceHost::allows`.
 
 use std::sync::Arc;
 
 /// The product's answer to what the current user may use.
 pub trait Entitlements: Send + Sync {
-    /// Whether the user may use `feature`. Asked on the UI thread, as often as
-    /// every frame while the ribbon is drawn, so answer from memory. The answer
-    /// may change while the app runs (an activation, an expiry); plugins are
-    /// only checked as they load.
+    /// Whether the user may use `feature`. Asked on the UI thread many times a
+    /// second, so answer from memory. The answer may change while the app runs
+    /// (an activation, an expiry): the platform notices within a tick for the
+    /// features named by `requires`, closes what is no longer allowed and
+    /// redraws. Plugins are only checked as they load.
     fn allows(&self, feature: &str) -> bool;
 
     /// What to tell the user when `feature` is refused.

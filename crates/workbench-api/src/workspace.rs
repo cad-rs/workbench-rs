@@ -209,6 +209,9 @@ pub struct ViewDef {
     /// frontend). When set the tab content is fully defined by the script and
     /// `factory` is never called.
     pub script: Option<String>,
+    /// The feature this view needs (see [`crate::Entitlements`]); without it the view does
+    /// not open, and an open tab closes.
+    pub requires: Option<String>,
     /// The plugin this view type was contributed by, if any.
     pub source: Option<String>,
     pub factory: ViewFactory,
@@ -227,6 +230,7 @@ impl ViewDef {
             icon: None,
             singleton,
             script: None,
+            requires: None,
             source: None,
             factory: Box::new(factory),
         }
@@ -241,6 +245,11 @@ impl ViewDef {
     /// (pass a placeholder).
     pub fn script(mut self, path: impl Into<String>) -> Self {
         self.script = Some(path.into());
+        self
+    }
+    /// Put this view behind a feature the product defines.
+    pub fn requires(mut self, feature: impl Into<String>) -> Self {
+        self.requires = Some(feature.into());
         self
     }
     /// Attribute this view type to a plugin, so disabling the plugin removes it.
@@ -266,6 +275,9 @@ pub struct PanelDef {
     /// Default size: the width for left/right, the height for top/bottom (logical pixels).
     pub default_size: f32,
     pub order: i32,
+    /// The feature this panel needs (see [`crate::Entitlements`]); without it the panel stays
+    /// hidden and its toggle command is disabled.
+    pub requires: Option<String>,
     /// The plugin this panel was contributed by, if any.
     pub source: Option<String>,
     pub factory: ViewFactory,
@@ -288,6 +300,7 @@ impl PanelDef {
             area,
             default_size,
             order,
+            requires: None,
             source: None,
             factory: Box::new(factory),
         }
@@ -301,6 +314,11 @@ impl PanelDef {
     /// `path` is the script file path; `factory` is never called (pass a placeholder).
     pub fn script(mut self, path: impl Into<String>) -> Self {
         self.script = Some(path.into());
+        self
+    }
+    /// Put this panel behind a feature the product defines.
+    pub fn requires(mut self, feature: impl Into<String>) -> Self {
+        self.requires = Some(feature.into());
         self
     }
     /// Attribute this panel to a plugin, so disabling the plugin removes it.

@@ -1198,6 +1198,12 @@ fn a_layout_from_a_newer_build_falls_back_to_the_default() {
 #[derive(Default)]
 struct FeatureSwitch(std::sync::Mutex<Vec<String>>);
 
+impl FeatureSwitch {
+    fn set(&self, allowed: &[&str]) {
+        *self.0.lock().unwrap() = allowed.iter().map(ToString::to_string).collect();
+    }
+}
+
 impl wb::Entitlements for FeatureSwitch {
     fn allows(&self, feature: &str) -> bool {
         self.0.lock().unwrap().iter().any(|allowed| allowed == feature)
@@ -1224,6 +1230,21 @@ impl wb::Workbench for GatedWb {
             })
             .requires("pro.export"),
         );
+        reg.register_view(
+            wb::ViewDef::new("test.gated_view", "Gated View", false, || Box::new(TestView))
+                .requires("pro.view"),
+        );
+        reg.register_panel(
+            wb::PanelDef::new(
+                "test.gated_panel",
+                "Gated Panel",
+                wb::DockArea::Right,
+                200.0,
+                0,
+                || Box::new(TestView),
+            )
+            .requires("pro.panel"),
+        );
     }
 }
 
@@ -1246,7 +1267,7 @@ fn a_command_behind_a_feature_follows_the_product_answer() {
     assert!(app.host.log.entries().any(|e| e.message == "pro.export needs an upgrade"));
 
     // An activation while the app runs takes effect without a restart.
-    switch.0.lock().unwrap().push("pro.export".to_string());
+    switch.set(&["pro.export"]);
     assert!(app.is_enabled("test.gated"));
     assert!(!matches!(
         app.execute_command("test.gated", &args),
@@ -1259,12 +1280,130 @@ fn a_command_behind_a_feature_follows_the_product_answer() {
 #[test]
 fn without_entitlements_every_feature_is_allowed() {
     let mut app = builder().with_workbench(GatedWb).build().unwrap();
+    assert!(panel_visible(&app, "test.gated_panel"));
+    wb::CommandCtx::new(&mut app).open_view("test.gated_view", false).unwrap();
     assert!(app.is_enabled("test.gated"));
     assert!(!matches!(
         app.execute_command("test.gated", &wb::CommandArgs::default()),
         wb::CommandResult::Failed { .. }
     ));
     assert!(app.host.allows("anything"));
+}
+
+/// A runtime with the gated items, starting with the given features allowed.
+fn gated_app(switch: &std::sync::Arc<FeatureSwitch>, allowed: &[&str]) -> AppRuntime {
+    switch.set(allowed);
+    let mut app = builder()
+        .with_workbench(GatedWb)
+        .with_entitlements(switch.clone())
+        .build()
+        .unwrap();
+    app.frame_tick(0.0);
+    app
+}
+
+fn panel_visible(app: &AppRuntime, id: &str) -> bool {
+    app.host.ws.panels.iter().any(|panel| panel.id.0 == id && panel.visible)
+}
+
+fn tab_open(app: &AppRuntime, type_id: &str) -> bool {
+    app.host.ws.tabs.iter().any(|tab| tab.type_id.0 == type_id)
+}
+
+const TOGGLE_GATED_PANEL: &str = "app.toggle_panel.test.gated_panel";
+
+#[test]
+fn a_view_behind_a_feature_opens_only_when_allowed() {
+    let switch = std::sync::Arc::new(FeatureSwitch::default());
+    let mut app = gated_app(&switch, &[]);
+
+    let refused = wb::CommandCtx::new(&mut app).open_view("test.gated_view", false);
+    assert_eq!(refused, Err("pro.view needs an upgrade".to_string()));
+    assert!(!tab_open(&app, "test.gated_view"));
+
+    switch.set(&["pro.view"]);
+    wb::CommandCtx::new(&mut app).open_view("test.gated_view", false).unwrap();
+    assert!(tab_open(&app, "test.gated_view"));
+}
+
+#[test]
+fn a_panel_behind_a_feature_starts_hidden_and_its_toggle_follows() {
+    let switch = std::sync::Arc::new(FeatureSwitch::default());
+    let mut app = gated_app(&switch, &[]);
+
+    assert!(!panel_visible(&app, "test.gated_panel"));
+    assert!(!app.is_enabled(TOGGLE_GATED_PANEL));
+    assert!(matches!(
+        app.execute_command(TOGGLE_GATED_PANEL, &wb::CommandArgs::default()),
+        wb::CommandResult::Failed { error } if error == "pro.panel needs an upgrade"
+    ));
+    let direct = wb::CommandCtx::new(&mut app).toggle_panel("test.gated_panel");
+    assert_eq!(direct, Err("pro.panel needs an upgrade".to_string()));
+    assert!(!panel_visible(&app, "test.gated_panel"));
+
+    switch.set(&["pro.panel"]);
+    assert!(app.is_enabled(TOGGLE_GATED_PANEL));
+    wb::CommandCtx::new(&mut app).toggle_panel("test.gated_panel").unwrap();
+    assert!(panel_visible(&app, "test.gated_panel"));
+}
+
+#[test]
+fn gaining_a_feature_asks_for_one_redraw() {
+    let switch = std::sync::Arc::new(FeatureSwitch::default());
+    let mut app = gated_app(&switch, &[]);
+    assert!(!app.frame_tick(0.0), "nothing changed");
+
+    switch.set(&["pro.export"]);
+    assert!(app.frame_tick(0.0), "the disabled controls need redrawing");
+    assert!(!app.frame_tick(0.0), "once is enough");
+    assert!(app.host.log.entries().any(|e| e.message == "The available features changed"));
+}
+
+#[test]
+fn losing_a_feature_closes_what_it_gated() {
+    let switch = std::sync::Arc::new(FeatureSwitch::default());
+    let mut app = gated_app(&switch, &["pro.view", "pro.panel"]);
+    let doc = app.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), "Draft").unwrap();
+    app.host.docs.commit(doc, "edit", true, Box::new(TestDoc)).unwrap();
+    wb::CommandCtx::new(&mut app).open_view("test.gated_view", false).unwrap();
+    assert!(panel_visible(&app, "test.gated_panel"));
+    app.frame_tick(0.0);
+
+    switch.set(&[]);
+    assert!(app.frame_tick(0.0));
+    assert!(!tab_open(&app, "test.gated_view"));
+    assert!(!panel_visible(&app, "test.gated_panel"));
+    assert!(app.host.log.entries().any(|e| e.message == "pro.view needs an upgrade"));
+    assert!(app.host.log.entries().any(|e| e.message == "pro.panel needs an upgrade"));
+    assert!(app.host.docs.get(doc).is_some_and(|doc| doc.dirty), "the document is untouched");
+}
+
+#[test]
+fn a_restored_layout_cannot_bring_back_what_is_not_allowed() {
+    let dir = empty_dir("entitlements-layout");
+    let switch = std::sync::Arc::new(FeatureSwitch::default());
+    let session = || {
+        builder()
+            .with_workbench(GatedWb)
+            .with_entitlements(switch.clone())
+            .with_layout_path(dir.join("layout.json"))
+            .build()
+            .unwrap()
+    };
+
+    switch.set(&["pro.view", "pro.panel"]);
+    let mut licensed = session();
+    wb::CommandCtx::new(&mut licensed).open_view("test.gated_view", false).unwrap();
+    licensed.save_layout(serde_json::json!({}), None).unwrap();
+    drop(licensed);
+
+    switch.set(&[]);
+    let mut expired = session();
+    assert!(expired.load_layout().is_some());
+    assert!(!tab_open(&expired, "test.gated_view"));
+    assert!(!panel_visible(&expired, "test.gated_panel"));
+    drop(expired);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- Diagnostics ----

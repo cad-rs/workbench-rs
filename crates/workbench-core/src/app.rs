@@ -62,6 +62,10 @@ pub struct AppRuntime {
     saved_layout: Option<String>,
     /// Where crash reports go if the user agrees.
     crash_reporter: Option<Arc<dyn api::CrashReporter>>,
+    /// The features named by `requires`, and the product's last answer for each (empty when
+    /// the product limits nothing).
+    gated_features: Vec<String>,
+    last_answers: Vec<bool>,
     /// Seconds accumulated since the last autosave.
     autosave_accum: f32,
     dispatch_depth: u32,
@@ -314,6 +318,7 @@ impl AppRuntime {
     /// background task count then lags).
     pub fn frame_tick(&mut self, dt_secs: f32) -> bool {
         let mut changed = self.drain_io();
+        changed |= self.entitlements_changed();
         changed |= self.drain_account_login();
         changed |= self.pump_task_events();
         // Autosave (phase 5: §18 production extensions)
@@ -446,6 +451,62 @@ impl AppRuntime {
             .log
             .warn("[Session] The last session did not exit cleanly; recovering autosaves…");
         self.recover_autosaves();
+    }
+
+    fn view_refusal(&self, type_id: &ViewTypeId) -> Option<String> {
+        let feature = self.host.ws.view_def(type_id)?.requires.as_deref()?;
+        self.host.refusal(feature)
+    }
+
+    fn panel_refusal(&self, id: &PanelId) -> Option<String> {
+        let feature = self.host.ws.panel_def(id)?.requires.as_deref()?;
+        self.host.refusal(feature)
+    }
+
+    /// Close the tabs and hide the panels the user may not use; returns why, one per item.
+    fn withdraw_refused(&mut self) -> Vec<String> {
+        let ws = &self.host.ws;
+        let tabs: Vec<_> = ws
+            .tabs
+            .iter()
+            .filter_map(|tab| Some((tab.instance_id, self.view_refusal(&tab.type_id)?)))
+            .collect();
+        let panels: Vec<_> = ws
+            .panels
+            .iter()
+            .filter(|panel| panel.visible)
+            .filter_map(|panel| Some((panel.id.clone(), self.panel_refusal(&panel.id)?)))
+            .collect();
+        let mut refusals = Vec::new();
+        for (tab, refusal) in tabs {
+            self.host.ws.close_tab_by_instance(tab);
+            refusals.push(refusal);
+        }
+        for (panel, refusal) in panels {
+            let _ = self.host.ws.toggle_panel(&panel);
+            refusals.push(refusal);
+        }
+        refusals
+    }
+
+    fn current_answers(&self) -> Vec<bool> {
+        self.gated_features.iter().map(|feature| self.host.allows(feature)).collect()
+    }
+
+    /// Whether the product's answers changed since the last tick (an activation, an expiry),
+    /// so disabled controls are redrawn; what is no longer allowed is withdrawn.
+    fn entitlements_changed(&mut self) -> bool {
+        let answers = self.current_answers();
+        if answers == self.last_answers {
+            return false;
+        }
+        self.last_answers = answers;
+        self.host.log.info("The available features changed");
+        for refusal in self.withdraw_refused() {
+            self.host.log.warn(refusal);
+        }
+        self.snapshot = self.make_snapshot();
+        true
     }
 
     /// At startup: say so once if crash reports were written since the last launch, send them
@@ -901,6 +962,7 @@ impl AppRuntime {
             return None;
         }
         let skipped = self.host.ws.apply_layout(&file);
+        self.withdraw_refused();
         for msg in skipped {
             self.host.log.warn(msg);
         }
@@ -942,6 +1004,9 @@ impl api::AppServices for AppRuntime {
             None
         };
         let type_id = ViewTypeId::new(view_type);
+        if let Some(refusal) = self.view_refusal(&type_id) {
+            return Err(refusal);
+        }
         self.host.ws.open_view(&type_id, doc, None)?;
         self.snapshot = self.make_snapshot();
         Ok(())
@@ -967,7 +1032,12 @@ impl api::AppServices for AppRuntime {
     }
 
     fn toggle_panel(&mut self, panel_id: &str) -> Result<(), String> {
-        let now_visible = self.host.ws.toggle_panel(&PanelId::new(panel_id))?;
+        let id = PanelId::new(panel_id);
+        let showing = self.host.ws.panels.iter().any(|p| p.id == id && !p.visible);
+        if let Some(refusal) = self.panel_refusal(&id).filter(|_| showing) {
+            return Err(refusal);
+        }
+        let now_visible = self.host.ws.toggle_panel(&id)?;
         self.host.log.info(format!(
             "Panel `{panel_id}` {}",
             if now_visible { "shown" } else { "hidden" }
@@ -1437,11 +1507,6 @@ impl WorkbenchAppBuilder {
 
         // Platform commands (including each panel's show/hide command and the "View" toolbar
         // group)
-        let panels: Vec<(String, String, Option<String>)> = registry
-            .panels
-            .iter()
-            .map(|p| (p.id.0.clone(), p.title.clone(), p.icon.clone()))
-            .collect();
         if self.crash_reporter.is_some() {
             registry.register_setting(api::SettingSpec {
                 key: crate::diagnostics::SEND_CRASH_REPORTS.into(),
@@ -1452,7 +1517,7 @@ impl WorkbenchAppBuilder {
                 scope: api::SettingScope::User,
             });
         }
-        platform_cmds::register(&mut registry, &panels);
+        platform_cmds::register(&mut registry);
 
         // Registry → runtime
         for def in std::mem::take(&mut registry.doc_types) {
@@ -1616,6 +1681,8 @@ impl WorkbenchAppBuilder {
             io_done_rx,
             io_pending: 0,
             crash_reporter: self.crash_reporter.clone(),
+            gated_features: Vec::new(),
+            last_answers: Vec::new(),
         };
         runtime.snapshot = runtime.make_snapshot();
 
@@ -1668,6 +1735,18 @@ impl WorkbenchAppBuilder {
                     runtime.host.log.warn(format!("Failed to open initial view {vt}: {e}"));
                 }
             }
+        }
+        if runtime.host.entitlements.is_some() {
+            let ws = &runtime.host.ws;
+            let views = ws.view_type_ids().filter_map(|id| ws.view_def(id)?.requires.clone());
+            let panels = ws.panels.iter().filter_map(|p| ws.panel_def(&p.id)?.requires.clone());
+            let commands = runtime.registry.commands().filter_map(|c| c.requires.clone());
+            let mut features: Vec<String> = views.chain(panels).chain(commands).collect();
+            features.sort();
+            features.dedup();
+            runtime.gated_features = features;
+            runtime.last_answers = runtime.current_answers();
+            runtime.withdraw_refused();
         }
         Ok(runtime)
     }

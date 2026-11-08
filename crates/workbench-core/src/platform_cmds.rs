@@ -193,14 +193,13 @@ fn preferred_view_of(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> Option<ap
     open_view(doc.content.as_ref())
 }
 
-/// Register the platform commands. `panels` carries each panel's
-/// `(id, title, icon)`: the toggle command inherits the panel's icon so the
-/// Home tab's "View" group shows the same glyph the panel header does (the
-/// panel owns the path; the platform only forwards it).
-pub fn register(registry: &mut Registry, panels: &[(String, String, Option<String>)]) {
+/// Register the platform commands. A panel's toggle command inherits its icon,
+/// so the Home tab's "View" group shows the same glyph the panel header does,
+/// and the feature it requires, so the toggle is disabled with the panel.
+pub fn register(registry: &mut Registry) {
     // The built-in platform panels (diagnostics / plugins) are view
     // implementations, so the frontend registers them before this runs; their
-    // ids therefore already appear in `panels` below.
+    // ids therefore already appear in `registry.panels` below.
 
     // ---- Platform built-in settings ----
     register_builtin_settings(registry);
@@ -529,9 +528,13 @@ pub fn register(registry: &mut Registry, panels: &[(String, String, Option<Strin
 
     // A show/hide command per panel + the "View" toolbar group (including the platform's own
     // panels)
-    let all_panels: Vec<(String, String, Option<String>)> = panels.to_vec();
+    let panels: Vec<_> = registry
+        .panels
+        .iter()
+        .map(|p| (p.id.0.clone(), p.title.clone(), p.icon.clone(), p.requires.clone()))
+        .collect();
     let mut window_group = api::ToolbarGroup::new("app.window", "View");
-    for (id, title, icon) in &all_panels {
+    for (id, title, icon, requires) in &panels {
         let panel_id = id.clone();
         let pid = panel_id.clone();
         let title = title.clone();
@@ -547,6 +550,9 @@ pub fn register(registry: &mut Registry, panels: &[(String, String, Option<Strin
         // workbench's path for theirs) — the ribbon toggle shows it too.
         if let Some(icon) = icon.clone() {
             def = def.icon(icon);
+        }
+        if let Some(feature) = requires.clone() {
+            def = def.requires(feature);
         }
         registry.register_command(def);
         window_group
