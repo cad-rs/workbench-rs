@@ -85,7 +85,7 @@ impl Gpu {
         let wanted = requirements();
         let missing = wanted.features - context.device.features();
         if !missing.is_empty() {
-            eprintln!(
+            log::warn!(
                 "gpu viewport: GPUI's web device lacks features the product asked for: {missing:?}"
             );
         }
@@ -121,6 +121,8 @@ impl Gpu {
             apply_limit_buckets: false,
         }))
         .context("no suitable GPU adapter found")?;
+        let info = adapter.get_info();
+        log::info!("gpu viewport: {} ({:?}, driver {})", info.name, info.backend, info.driver);
 
         let wanted = requirements();
         let limits = wanted.merged_limits(wgpu::Limits::default().using_resolution(adapter.limits()));
@@ -134,7 +136,7 @@ impl Gpu {
         // Device errors are dispatched asynchronously; wgpu's default
         // handler panics, which would take the UI thread down with it.
         device.on_uncaptured_error(std::sync::Arc::new(|error: wgpu::Error| {
-            eprintln!("gpu viewport: wgpu error: {error}");
+            log::error!("gpu viewport: wgpu error: {error}");
         }));
 
         Ok(Self {

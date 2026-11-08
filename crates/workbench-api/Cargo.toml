@@ -12,6 +12,7 @@ readme = "../../README.md"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+log = { workspace = true }
 web-time = { workspace = true }
 
 # Desktop async timer (wb::sleep)

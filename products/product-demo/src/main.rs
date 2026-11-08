@@ -22,7 +22,6 @@ impl wb::Workbench for DemoWorkbench {
 }
 
 fn main() {
-    env_logger::init();
     let cli = Cli::from_env();
 
     let builder = workbench_core::WorkbenchAppBuilder::new(
@@ -43,6 +42,7 @@ fn main() {
     .open_on_start("example.gpu3d", false)
     .open_on_start("example.gpu_top", false);
     let builder = cli.apply(builder);
+    workbench_core::diagnostics::init(&builder);
 
     match cli.mode {
         CliMode::Selfcheck => workbench_core::selfcheck::exit_with(&mut builder.build().unwrap()),

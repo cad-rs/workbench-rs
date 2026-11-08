@@ -128,7 +128,7 @@ pub fn shared_gpu(_window: &Window) -> Option<Rc<Gpu>> {
                 match Gpu::new() {
                     Ok(gpu) => *slot = GpuSlot::Ready(Rc::new(gpu)),
                     Err(err) => {
-                        eprintln!("gpu viewport: failed to init wgpu device: {err:#}");
+                        log::error!("gpu viewport: failed to init wgpu device: {err:#}");
                         *slot = GpuSlot::Failed;
                     }
                 }

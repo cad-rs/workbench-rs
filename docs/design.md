@@ -792,6 +792,24 @@ plugin loading, commands, tasks, and view errors; task- and
 document-correlated logs; runtime configuration diagnostics; task and error
 state interfaces queryable by automated tests.
 
+What support gets from a customer's machine (`workbench_core::diagnostics`):
+
+- **A log file.** A product calls `diagnostics::init` from `main`; everything
+  logged through the `log` facade, and the platform's own log, then also goes
+  to `logs/app.log` under its config directory, rolling over at 5 MB with three
+  older files kept. The file takes warnings and up, plus information from the
+  workbench crates; `RUST_LOG` replaces that filter.
+- **Crash reports.** A panic writes `crashes/crash-<UTC time>-….txt` to the app
+  state store: where it happened, the backtrace and the end of the log. The
+  next launch says so once, and the newest 20 are kept. A native crash (an
+  access violation in a driver, say) is not a panic and is not captured yet.
+- **Export Diagnostics** (Help group) saves one plain text file: versions,
+  system, plugins, platform settings, the end of the log and the latest crash
+  reports. The user can read what they are about to send; account details and
+  plugin settings stay out. The web has only this session's log to include.
+- **Sending reports is opt-in.** A product may inject a `CrashReporter`, which
+  adds a setting that is off by default; nothing leaves the machine otherwise.
+
 ## 13. Product composition and build
 
 ### 13.1 Product responsibilities

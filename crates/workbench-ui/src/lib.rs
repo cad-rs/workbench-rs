@@ -1082,7 +1082,7 @@ fn launch_app(
         if let Some(requirements) = gpu_requirements {
             match requirements.downcast::<gpu_view::GpuRequirements>() {
                 Ok(requirements) => gpu_view::set_requirements(*requirements),
-                Err(_) => eprintln!(
+                Err(_) => log::error!(
                     "with_gpu_requirements: expected workbench_ui::gpu_view::GpuRequirements; ignored"
                 ),
             }

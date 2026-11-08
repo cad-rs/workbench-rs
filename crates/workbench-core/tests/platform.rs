@@ -1192,6 +1192,110 @@ fn a_layout_from_a_newer_build_falls_back_to_the_default() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---- Diagnostics ----
+
+const SEND_CRASH_REPORTS: &str = "diagnostics.send_crash_reports";
+
+#[derive(Default)]
+struct RecordingReporter(std::sync::Mutex<Vec<(String, String)>>);
+
+impl wb::CrashReporter for RecordingReporter {
+    fn send(&self, name: &str, report: &str) -> Result<(), String> {
+        self.0.lock().unwrap().push((name.to_string(), report.to_string()));
+        Ok(())
+    }
+}
+
+#[test]
+fn crash_reports_are_sent_only_once_the_user_agrees() {
+    let dir = empty_dir("crash-consent");
+    let reporter = std::sync::Arc::new(RecordingReporter::default());
+    let session = || {
+        builder()
+            .with_layout_path(dir.join("layout.json"))
+            .with_crash_reporter(reporter.clone())
+            .build()
+            .unwrap()
+    };
+    let app = session();
+    assert!(app.host.setting_specs.iter().any(|spec| spec.key == SEND_CRASH_REPORTS));
+    assert!(!app.host.settings.get_bool(SEND_CRASH_REPORTS, true), "off by default");
+    let state = app.state().clone();
+    state.write("crashes/crash-1.txt", b"first").unwrap();
+    drop(app);
+
+    let mut app = session();
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    assert!(reporter.0.lock().unwrap().is_empty(), "nothing leaves without consent");
+    app.host.settings.set(SEND_CRASH_REPORTS, serde_json::json!(true)).unwrap();
+    state.write("crashes/crash-2.txt", b"second").unwrap();
+    drop(app);
+
+    let mut app = session();
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    assert_eq!(
+        *reporter.0.lock().unwrap(),
+        [("crash-2.txt".to_string(), "second".to_string())],
+        "only what is new since the last launch",
+    );
+    drop(app);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn no_crash_reporter_means_no_setting_for_one() {
+    let app = app();
+    assert!(!app.host.setting_specs.iter().any(|spec| spec.key == SEND_CRASH_REPORTS));
+}
+
+#[test]
+fn only_the_newest_crash_reports_are_kept() {
+    let dir = empty_dir("crash-retention");
+    let session = || builder().with_layout_path(dir.join("layout.json")).build().unwrap();
+    let state = session().state().clone();
+    for n in 0..25 {
+        state.write(&format!("crashes/crash-{n:02}.txt"), b"report").unwrap();
+    }
+    drop(session());
+    let left = state.keys("crashes/");
+    assert_eq!(left.len(), 20);
+    assert_eq!(left[0], "crashes/crash-05.txt");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_diagnostics_report_gathers_what_support_needs() {
+    let dir = empty_dir("diagnostics-report");
+    let mut app = builder().with_layout_path(dir.join("layout.json")).build().unwrap();
+    app.host.log.warn("a warning for support");
+    app.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), "Draft").unwrap();
+    app.state().write("crashes/crash-1.txt", b"what the crash said").unwrap();
+
+    let report = wb::CommandCtx::new(&mut app).diagnostics_report();
+    assert!(report.starts_with("Test Product"), "{report}");
+    assert!(report.contains(wb::VERSION), "{report}");
+    assert!(report.contains(std::env::consts::OS), "{report}");
+    assert!(report.contains("Documents: 1 open"), "{report}");
+    assert!(report.contains("ui.locale"), "{report}");
+    assert!(report.contains("a warning for support"), "{report}");
+    assert!(report.contains("crash-1.txt") && report.contains("what the crash said"), "{report}");
+    drop(app);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn export_diagnostics_writes_the_report_where_the_user_picks() {
+    let memory = std::sync::Arc::new(MemoryStorage::default());
+    let mut app = builder().with_storage("mem", memory.clone()).build().unwrap();
+    app.execute_command("app.export_diagnostics", &wb::CommandArgs::default());
+    assert!(app.host.ws.file_picker.is_some(), "the save dialog asks where");
+
+    app.finish_file_dialog(Some(wb::Location::new("mem", "support/diagnostics.txt")));
+    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    let text = memory.files.lock().unwrap()["support/diagnostics.txt"].clone();
+    assert!(String::from_utf8(text).unwrap().starts_with("Test Product"));
+}
+
 /// The names in the open picker's listing (folders end in `/`).
 fn listing(app: &AppRuntime) -> Vec<String> {
     let picker = app.host.ws.file_picker.as_ref().expect("picker open");

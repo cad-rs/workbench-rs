@@ -20,6 +20,7 @@ pub const REDO: &str = "app.redo";
 pub const CLOSE_ACTIVE_VIEW: &str = "app.close_active_view";
 pub const TOGGLE_PANEL_PREFIX: &str = "app.toggle_panel.";
 pub const ABOUT: &str = "app.about";
+pub const EXPORT_DIAGNOSTICS: &str = "app.export_diagnostics";
 pub const SETTINGS_SET: &str = "app.settings.set";
 pub const SETTINGS_EDIT_BEGIN: &str = "app.settings.edit_begin";
 pub const ACCOUNT_LOGIN: &str = "app.account.login";
@@ -42,6 +43,8 @@ fn register_builtin_locales(registry: &mut Registry) {
             ("Save As…", "另存为…"),
             ("Import…", "导入…"),
             ("Export…", "导出…"),
+            ("Export Diagnostics…", "导出诊断信息…"),
+            ("Send crash reports", "发送崩溃报告"),
             ("Undo", "撤销"),
             ("Redo", "重做"),
             ("Close Tab", "关闭当前标签"),
@@ -510,6 +513,20 @@ pub fn register(registry: &mut Registry, panels: &[(String, String, Option<Strin
         .enabled_when(|_| true),
     );
 
+    registry.register_command(
+        CommandDef::sync(
+            EXPORT_DIAGNOSTICS,
+            "Export Diagnostics…",
+            |ctx: &mut CommandCtx, _args: &CommandArgs| {
+                save_copy(ctx, "diagnostics.txt".to_string(), vec!["txt".to_string()], |ctx| {
+                    Ok(ctx.diagnostics_report().into_bytes())
+                })
+            },
+        )
+        .icon(crate::assets::icons::DIAGNOSTICS)
+        .enabled_when(|_| true),
+    );
+
     // A show/hide command per panel + the "View" toolbar group (including the platform's own
     // panels)
     let all_panels: Vec<(String, String, Option<String>)> = panels.to_vec();
@@ -538,11 +555,14 @@ pub fn register(registry: &mut Registry, panels: &[(String, String, Option<Strin
     }
     registry.add_toolbar_group(window_group);
 
-    // The "Help" toolbar group: the About dialog entry (product branding info).
+    // The "Help" toolbar group: the About dialog (product branding info) and what support needs.
     let mut help_group = api::ToolbarGroup::new("app.help", "Help");
     help_group
         .items
         .push(api::ToolbarItem::labeled(ABOUT, "About"));
+    help_group
+        .items
+        .push(api::ToolbarItem::labeled(EXPORT_DIAGNOSTICS, "Export Diagnostics…"));
     registry.add_toolbar_group(help_group);
 }
 
@@ -706,15 +726,22 @@ fn request_export(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResul
     let Some((name, exts)) = file_name_of(ctx, doc_id) else {
         return CommandResult::failed("No such document");
     };
+    save_copy(ctx, name, exts, move |ctx| ctx.host().docs.encode(doc_id))
+}
+
+/// Hand a copy of some bytes to the user's device as `name`: a download on
+/// the web, the file dialog on the desktop. `bytes` makes them once they are
+/// wanted, so a cancelled dialog costs nothing.
+fn save_copy(
+    ctx: &mut CommandCtx,
+    name: String,
+    exts: Vec<String>,
+    bytes: impl FnOnce(&mut CommandCtx) -> Result<Vec<u8>, String> + 'static,
+) -> CommandResult {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = exts;
-        let exported = ctx
-            .host()
-            .docs
-            .encode(doc_id)
-            .and_then(|bytes| crate::web_files::download(&name, &bytes));
-        match exported {
+        match bytes(ctx).and_then(|bytes| crate::web_files::download(&name, &bytes)) {
             Ok(()) => CommandResult::done_with(format!("Exported {name}")),
             Err(e) => CommandResult::failed(e),
         }
@@ -726,7 +753,7 @@ fn request_export(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResul
                 return;
             };
             let mut ctx = CommandCtx::new(app);
-            let bytes = match ctx.host().docs.encode(doc_id) {
+            let bytes = match bytes(&mut ctx) {
                 Ok(bytes) => bytes,
                 Err(e) => return ctx.host().log.error(e),
             };

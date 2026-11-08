@@ -158,7 +158,7 @@ impl<C: ViewportContent> Viewport<C> {
             let dirty = std::mem::take(dirty);
             let mut draw = |view: &wgpu::TextureView, size| content.draw(view, size);
             if let Err(err) = presenter.paint(id, bounds, dirty, window, &mut draw) {
-                eprintln!("gpu viewport: {err:#}");
+                log::error!("gpu viewport: {err:#}");
                 return false;
             }
             presenter.native_input()
@@ -320,7 +320,7 @@ impl Presenter {
         let presenter = match native::NativePresenter::new(gpu.clone(), owner, window, cx) {
             Ok(presenter) => Self::Native(presenter),
             Err(error) => {
-                eprintln!(
+                log::warn!(
                     "gpu viewport: window composition unavailable, reading frames back instead: {error:#}"
                 );
                 Self::Readback(ReadbackPresenter::new(gpu.clone()))
@@ -346,7 +346,7 @@ impl Presenter {
         match self {
             #[cfg(target_os = "windows")]
             Self::Native(presenter) => presenter.place(bounds, scale).unwrap_or_else(|error| {
-                eprintln!("gpu viewport: placing the native surface: {error:#}");
+                log::error!("gpu viewport: placing the native surface: {error:#}");
                 false
             }),
             _ => false,
@@ -585,7 +585,7 @@ mod native {
                     .platform_surface()
                     .and_then(|surface| surface.set_bounds(Bounds::default()));
                 if let Err(error) = hidden {
-                    eprintln!("gpu viewport: hiding the native surface: {error:#}");
+                    log::error!("gpu viewport: hiding the native surface: {error:#}");
                 }
             }
         }
@@ -600,7 +600,7 @@ mod native {
                 .platform_surface()
                 .and_then(|surface| surface.set_parent_origin(Point::default()));
             if let Err(error) = committed {
-                eprintln!("gpu viewport: committing the composition: {error:#}");
+                log::error!("gpu viewport: committing the composition: {error:#}");
             }
         }
 

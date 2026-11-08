@@ -16,4 +16,3 @@ workbench-core = { workspace = true }
 workbench-ui = { workspace = true }
 workbench-rhai = { workspace = true }
 workbench-example = { workspace = true }
-env_logger = { workspace = true }

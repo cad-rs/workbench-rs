@@ -289,6 +289,8 @@ pub trait AppServices {
     fn disable_plugin(&mut self, plugin_id: &str) -> Result<Vec<String>, String>;
     /// Run an autosave right now and return the number of documents saved (phase 5).
     fn autosave_now(&mut self) -> Result<usize, String>;
+    /// What support needs to see, as plain text the user can read before sending it.
+    fn diagnostics_report(&self) -> String;
     /// Ask the user for a file (non-blocking): an open dialog, or a save
     /// dialog suggesting `default_name`. Storage the in-app picker browses
     /// (the browser's, cloud stores) gets that picker; the local file system
@@ -309,6 +311,15 @@ pub trait AppServices {
     /// browser); what it resolves to runs on the UI thread on a later frame
     /// tick. [`crate::CommandCtx::read_file`] and its siblings build on this.
     fn spawn_io(&mut self, io: IoTask);
+}
+
+/// Where crash reports go once the user has agreed to send them
+/// (`WorkbenchAppBuilder::with_crash_reporter`). The product injects it; the
+/// framework binds to no service.
+pub trait CrashReporter: Send + Sync {
+    /// Send the report called `name`. Runs off the UI thread and may block on
+    /// the network. Errors are user-readable.
+    fn send(&self, name: &str, report: &str) -> Result<(), String>;
 }
 
 /// What to do on the UI thread once some I/O has finished.

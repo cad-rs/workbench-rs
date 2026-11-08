@@ -36,6 +36,8 @@ pub(crate) fn autosave_stem(title: &str) -> String {
         .collect();
     format!("{AUTOSAVE_DIR}{safe}_")
 }
+/// The newest crash report already announced at a launch.
+const CRASH_REPORTS_SEEN: &str = "crash_reports_seen";
 /// Written on a clean exit; missing at startup means the last session crashed.
 const CLEAN_EXIT: &str = "autosave/session.clean";
 /// The settings' key in the state store.
@@ -58,6 +60,8 @@ pub struct AppRuntime {
     layout_key: String,
     /// The layout as last loaded or saved, so an unchanged one isn't rewritten.
     saved_layout: Option<String>,
+    /// Where crash reports go if the user agrees.
+    crash_reporter: Option<Arc<dyn api::CrashReporter>>,
     /// Seconds accumulated since the last autosave.
     autosave_accum: f32,
     dispatch_depth: u32,
@@ -441,6 +445,66 @@ impl AppRuntime {
             .log
             .warn("[Session] The last session did not exit cleanly; recovering autosaves…");
         self.recover_autosaves();
+    }
+
+    /// At startup: say so once if crash reports were written since the last launch, send them
+    /// if the user agreed, and drop the oldest ones past the limit.
+    fn handle_crash_reports(&mut self) {
+        use crate::diagnostics::{crash_reports, KEPT_REPORTS, SEND_CRASH_REPORTS};
+
+        let reports = crash_reports(self.state.as_ref());
+        let excess = reports.len().saturating_sub(KEPT_REPORTS);
+        for key in &reports[..excess] {
+            self.state.remove(key);
+        }
+        let seen = self.state.read(CRASH_REPORTS_SEEN).unwrap_or_default();
+        let seen = String::from_utf8_lossy(&seen);
+        let new: Vec<&String> =
+            reports[excess..].iter().filter(|key| key.as_str() > seen.as_ref()).collect();
+        let Some(newest) = new.last() else {
+            return;
+        };
+        let _ = self.state.write(CRASH_REPORTS_SEEN, newest.as_bytes());
+        self.host.log.warn(format!(
+            "A crash was recorded since the last launch ({} report(s)); Export Diagnostics \
+             includes the details",
+            new.len()
+        ));
+
+        let Some(reporter) = self.crash_reporter.clone() else {
+            return;
+        };
+        if !self.host.settings.get_bool(SEND_CRASH_REPORTS, false) {
+            return;
+        }
+        let reports: Vec<(String, String)> = new
+            .iter()
+            .filter_map(|key| {
+                let text = String::from_utf8_lossy(&self.state.read(key)?).into_owned();
+                let name = key.strip_prefix(crate::diagnostics::CRASH_DIR).unwrap_or(key);
+                Some((name.to_string(), text))
+            })
+            .collect();
+        let send = move || -> Vec<String> {
+            reports
+                .iter()
+                .filter_map(|(name, text)| {
+                    let error = reporter.send(name, text).err()?;
+                    Some(format!("Failed to send crash report {name}: {error}"))
+                })
+                .collect()
+        };
+        api::AppServices::spawn_io(self, Box::pin(async move {
+            #[cfg(not(target_arch = "wasm32"))]
+            let failures = blocking::unblock(send).await;
+            #[cfg(target_arch = "wasm32")]
+            let failures = send();
+            Box::new(move |app: &mut dyn api::AppServices| {
+                for failure in failures {
+                    app.host().log.warn(failure);
+                }
+            }) as api::UiThen
+        }));
     }
 
     /// Reopen the documents in the autosave area (marked unsaved) and remove their entries.
@@ -912,6 +976,10 @@ impl api::AppServices for AppRuntime {
         self.autosave_now()
     }
 
+    fn diagnostics_report(&self) -> String {
+        crate::diagnostics::report(self)
+    }
+
     fn request_file_dialog(
         &mut self,
         extensions: Vec<String>,
@@ -1036,6 +1104,8 @@ pub struct WorkbenchAppBuilder {
     /// platform calls it after loading plugins.
     module_loader: Option<ModuleLoader>,
     /// Injected account capability (Phase 3); None = no login surface.
+    /// Where crash reports go if the user agrees; None = they stay local.
+    crash_reporter: Option<Arc<dyn api::CrashReporter>>,
     account: Option<Arc<dyn api::AccountService>>,
     /// Where user files live: the local file system on the desktop, plus
     /// whatever the product adds.
@@ -1080,6 +1150,7 @@ impl WorkbenchAppBuilder {
             theme: "dark".to_string(),
             module_loader: None,
             account: None,
+            crash_reporter: None,
             storage,
         }
     }
@@ -1120,6 +1191,13 @@ impl WorkbenchAppBuilder {
     /// [`crate::account::DeviceFlowClient`].
     pub fn with_account(mut self, service: Arc<dyn api::AccountService>) -> Self {
         self.account = Some(service);
+        self
+    }
+
+    /// Inject where crash reports go. They are sent only once the user turns on the setting
+    /// this adds; by default they never leave the machine.
+    pub fn with_crash_reporter(mut self, reporter: Arc<dyn api::CrashReporter>) -> Self {
+        self.crash_reporter = Some(reporter);
         self
     }
 
@@ -1248,6 +1326,25 @@ impl WorkbenchAppBuilder {
         self.smoke_seconds
     }
 
+    /// `Name version (id)`, as the log and crash reports state it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn product_line(&self) -> String {
+        let version = self.profile.as_ref().map_or(api::VERSION, |p| p.display_version());
+        format!("{} {version} ({})", self.product_name, self.product_id)
+    }
+
+    /// The directory the product's state lives in.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn state_dir(&self) -> PathBuf {
+        crate::state::dir(&self.product_id, self.layout_path.as_deref())
+    }
+
+    /// The product's state store, as the runtime will open it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn state_store(&self) -> Arc<dyn api::StateStore> {
+        crate::state::open(&self.product_id, self.layout_path.as_deref()).0
+    }
+
     /// Assemble the product. Workbench init failures are caught and isolated (acceptance #19).
     pub fn build(mut self) -> Result<AppRuntime, String> {
         use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -1326,6 +1423,16 @@ impl WorkbenchAppBuilder {
             .iter()
             .map(|p| (p.id.0.clone(), p.title.clone(), p.icon.clone()))
             .collect();
+        if self.crash_reporter.is_some() {
+            registry.register_setting(api::SettingSpec {
+                key: crate::diagnostics::SEND_CRASH_REPORTS.into(),
+                label: "Send crash reports".into(),
+                group: "Diagnostics".into(),
+                kind: api::SettingKind::Bool,
+                default: serde_json::json!(false),
+                scope: api::SettingScope::User,
+            });
+        }
         platform_cmds::register(&mut registry, &panels);
 
         // Registry → runtime
@@ -1489,6 +1596,7 @@ impl WorkbenchAppBuilder {
             io_done_tx,
             io_done_rx,
             io_pending: 0,
+            crash_reporter: self.crash_reporter.clone(),
         };
         runtime.snapshot = runtime.make_snapshot();
 
@@ -1497,6 +1605,7 @@ impl WorkbenchAppBuilder {
         if AUTOSAVE {
             runtime.restore_session();
         }
+        runtime.handle_crash_reports();
 
         // Default document
         if self.create_default_document {

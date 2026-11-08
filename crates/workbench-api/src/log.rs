@@ -1,4 +1,5 @@
-//! Structured logging (an in-memory ring buffer, shown by the frontend in the Output panel).
+//! Structured logging: an in-memory ring buffer shown by the frontend in the Output panel,
+//! which also feeds the `log` facade (and so the log file; see `workbench_core::diagnostics`).
 
 use std::collections::VecDeque;
 
@@ -11,6 +12,15 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
+    fn facade(self) -> ::log::Level {
+        match self {
+            LogLevel::Debug => ::log::Level::Debug,
+            LogLevel::Info => ::log::Level::Info,
+            LogLevel::Warn => ::log::Level::Warn,
+            LogLevel::Error => ::log::Level::Error,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             LogLevel::Debug => "DEBUG",
@@ -51,6 +61,8 @@ impl LogStore {
     }
 
     pub fn log(&mut self, level: LogLevel, message: impl Into<String>) {
+        let message = message.into();
+        ::log::log!(target: "workbench", level.facade(), "{message}");
         let elapsed = self.start.elapsed().as_secs_f32();
         let time = format!("{:02}:{:02}.{:03}", (elapsed / 60.0) as u32, (elapsed % 60.0) as u32, ((elapsed * 1000.0) as u32) % 1000);
         self.total_written += 1;
@@ -58,7 +70,7 @@ impl LogStore {
             seq: self.total_written,
             level,
             time,
-            message: message.into(),
+            message,
         });
         while self.entries.len() > self.capacity {
             self.entries.pop_front();

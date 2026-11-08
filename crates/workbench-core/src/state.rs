@@ -19,18 +19,21 @@ pub(crate) fn open(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "layout.json".to_string());
     #[cfg(not(target_arch = "wasm32"))]
-    let store = {
-        let dir = match layout_path {
-            Some(path) => path.parent().map(Into::into).unwrap_or_else(std::env::temp_dir),
-            None => desktop::config_dir(product_id),
-        };
-        desktop::Dir(dir)
-    };
+    let store = desktop::Dir(dir(product_id, layout_path));
     #[cfg(target_arch = "wasm32")]
     let store = web::LocalStorage {
         prefix: format!("{product_id}/"),
     };
     (Arc::new(store), layout_key)
+}
+
+/// The directory the desktop state lives in.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn dir(product_id: &str, layout_path: Option<&std::path::Path>) -> std::path::PathBuf {
+    match layout_path {
+        Some(path) => path.parent().map(Into::into).unwrap_or_else(std::env::temp_dir),
+        None => desktop::config_dir(product_id),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

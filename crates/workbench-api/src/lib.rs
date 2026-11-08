@@ -70,7 +70,9 @@ pub use ids::{
 pub use log::{LogEntry, LogLevel, LogStore};
 pub use product::{I18nSection, ProductProfile, ProductToml};
 pub use registry::Registry;
-pub use services::{AppServices, FileThen, IoTask, PluginEntry, RuntimeStats, ServiceHost, UiThen};
+pub use services::{
+    AppServices, CrashReporter, FileThen, IoTask, PluginEntry, RuntimeStats, ServiceHost, UiThen,
+};
 pub use settings::{SettingKind, SettingScope, SettingSpec, Settings};
 pub use state::StateStore;
 pub use picker::FilePicker;

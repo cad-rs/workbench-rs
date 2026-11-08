@@ -10,6 +10,7 @@ repository.workspace = true
 readme = "../../README.md"
 
 [dependencies]
+log = { workspace = true }
 workbench-api = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,6 +25,9 @@ async-io = { workspace = true }
 async-executor = { workspace = true }
 futures-lite = { workspace = true }
 blocking = { workspace = true }
+# Log file and crash reports
+chrono = { workspace = true }
+env_logger = { workspace = true }
 # OAuth device-flow HTTP (account integration; desktop only — the web build
 # gets a stub AccountService from its product, if any).
 ureq = { workspace = true }

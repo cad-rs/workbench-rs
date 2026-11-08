@@ -499,6 +499,10 @@ impl<'a> CommandCtx<'a> {
     pub fn autosave_now(&mut self) -> Result<usize, String> {
         self.app.autosave_now()
     }
+    /// What support needs to see, as plain text.
+    pub fn diagnostics_report(&self) -> String {
+        self.app.diagnostics_report()
+    }
     /// Shortcut to the active document ID.
     pub fn active_document(&self) -> Option<DocumentId> {
         self.app.snapshot().active_document.map(|d| d.id)

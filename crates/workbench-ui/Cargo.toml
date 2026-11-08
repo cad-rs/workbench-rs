@@ -10,6 +10,7 @@ repository.workspace = true
 readme = "../../README.md"
 
 [dependencies]
+log = { workspace = true }
 workbench-api = { workspace = true }
 workbench-core = { workspace = true }
 # RibbonBar component (a pure gpui component with no workbench dependency; the bridge is in
