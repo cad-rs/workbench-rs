@@ -25,7 +25,7 @@ pub struct Registry {
     pub views: Vec<ViewDef>,
     pub doc_types: Vec<DocumentTypeDef>,
     /// Registered setting specs (platform built-ins + plugin settings); moved into ServiceHost at
-    /// build time, where the settings panel renders from them and `app.settings.set` validates
+    /// build time, where the settings dialog renders from them and `app.settings.set` validates
     /// against them.
     pub setting_specs: Vec<SettingSpec>,
     /// Locale table entries `(locale, key, text)` from the platform and plugins; merged into

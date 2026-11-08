@@ -1,6 +1,6 @@
 //! Text-edit overlay: hosts a gpui-component `Input` while `ws.text_edit` is
 //! active — a settings value (started by `app.settings.edit_begin` from the
-//! settings panel's string rows) or a value prompt any command opens
+//! settings dialog's string rows) or a value prompt any command opens
 //! (`wb::TextEdit::prompt`).
 //!
 //! The Input component provides caret/selection/IME/clipboard/undo; this

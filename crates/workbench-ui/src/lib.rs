@@ -27,8 +27,15 @@ mod component_assets;
 /// About dialog overlay (product brand: logo / name / version / links).
 pub(crate) mod about;
 
+/// The shell shared by the centered modal dialogs.
+pub(crate) mod dialog;
+
 /// In-app file picker overlay (open/save for browser storage, cloud stores).
 mod file_picker;
+
+/// Settings dialog.
+mod settings;
+
 /// Settings text-edit overlay (gpui-component Input hosted at root level).
 pub(crate) mod text_edit;
 
@@ -129,9 +136,10 @@ struct RootView {
     mirror: dock_panel::SharedMirror,
     /// Ribbon mount point (a ribbon crate entity; built lazily on the first frame, like the dock).
     ribbon: ribbon_bridge::RibbonHost,
+    settings_focus: settings::DialogFocus,
     /// Last-applied `ui.theme` / `ui.accent` settings: the render loop
     /// re-applies the theme when either diverges from what is on screen
-    /// (settings panel writes land live).
+    /// (settings dialog writes land live).
     applied_theme: String,
     applied_accent: String,
     /// Settings text edit (Phase 1.5): the Input entity for the open edit,
@@ -146,7 +154,11 @@ struct RootView {
 }
 
 impl RootView {
-    fn new(core: SharedCore, pending_dock: Option<gpui_component::dock::DockAreaState>) -> Self {
+    fn new(
+        core: SharedCore,
+        pending_dock: Option<gpui_component::dock::DockAreaState>,
+        cx: &mut App,
+    ) -> Self {
         publish_runtime_dispatcher(&core);
         // Seed the applied-theme trackers from the current settings so the
         // first frame does not re-apply what launch_app already applied.
@@ -170,6 +182,7 @@ impl RootView {
                 dock_panel::DockMirror::default(),
             )),
             ribbon: ribbon_bridge::RibbonHost::new(),
+            settings_focus: settings::DialogFocus::new(cx),
             applied_theme,
             applied_accent,
             edit_input: None,
@@ -248,7 +261,7 @@ pub(crate) fn paint_placeholder(window: &mut Window, bounds: Bounds<Pixels>) {
     window.paint_quad(gpui::fill(bounds, col(theme::ui_theme().placeholder)));
 }
 
-/// A modal overlay (About, text edit), drawn deferred: on GPUI's overlay
+/// A modal overlay (About, Settings, text edit), drawn deferred: on GPUI's overlay
 /// layer, above everything else — including native viewport surfaces, which
 /// window composition stacks between the base content and the overlays.
 fn modal_overlay(overlay: impl IntoElement) -> gpui::Deferred {
@@ -434,7 +447,7 @@ impl Render for RootView {
         let weak = cx.entity().downgrade();
         let core = self.core.clone();
 
-        // ---- Theme/accent live sync: the settings panel writes through
+        // ---- Theme/accent live sync: the settings dialog writes through
         // `app.settings.set`; re-apply whichever surface diverged. ----
         {
             let (theme_now, accent_now) = {
@@ -610,7 +623,10 @@ impl Render for RootView {
                     // While a text edit is open the Input owns the
                     // keystrokes; hotkeys stay disabled so typing a key that
                     // is also a shortcut does not fire the shortcut.
-                    if text_edit::is_active(&core_k) || file_picker::is_open(&core_k) {
+                    if text_edit::is_active(&core_k)
+                        || file_picker::is_open(&core_k)
+                        || settings::is_open(&core_k)
+                    {
                         return;
                     }
                     let Some(code) = wb::KeyCode::from_name(&ks.key) else {
@@ -642,6 +658,11 @@ impl Render for RootView {
 
         // ---- About dialog overlay (rendered while the app.about command has it set) ----
         if let Some(overlay) = about::maybe_about_overlay(&core, cx) {
+            root_col = root_col.child(modal_overlay(overlay));
+        }
+
+        // ---- Settings dialog: below the text-edit overlay its string rows open ----
+        if let Some(overlay) = settings::overlay(&core, &mut self.settings_focus, window, cx) {
             root_col = root_col.child(modal_overlay(overlay));
         }
 
@@ -1120,7 +1141,7 @@ fn launch_app(
         let dock_window = dock.clone();
         let handle = cx
             .open_window(options, |_window, cx| {
-                cx.new(|_cx| RootView::new(core_window, dock_window))
+                cx.new(|cx| RootView::new(core_window, dock_window, cx))
             })
             .expect("failed to open the window");
         let _ = handle;
@@ -1319,8 +1340,7 @@ mod tests {
                 "example.panel.tasks",
                 "example.panel.properties",
                 "app.panel.diagnostics",
-                "app.panel.plugins",
-                "app.panel.settings"
+                "app.panel.plugins"
             ]
         );
         assert_eq!(snap.right.active.as_deref(), Some("example.panel.tasks"));

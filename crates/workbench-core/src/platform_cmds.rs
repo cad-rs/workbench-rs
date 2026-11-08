@@ -21,6 +21,7 @@ pub const CLOSE_ACTIVE_VIEW: &str = "app.close_active_view";
 pub const TOGGLE_PANEL_PREFIX: &str = "app.toggle_panel.";
 pub const ABOUT: &str = "app.about";
 pub const EXPORT_DIAGNOSTICS: &str = "app.export_diagnostics";
+pub const OPEN_SETTINGS: &str = "app.settings.open";
 pub const SETTINGS_SET: &str = "app.settings.set";
 pub const SETTINGS_EDIT_BEGIN: &str = "app.settings.edit_begin";
 pub const ACCOUNT_LOGIN: &str = "app.account.login";
@@ -66,7 +67,7 @@ fn register_builtin_locales(registry: &mut Registry) {
             ("Plugins", "插件"),
             ("Settings", "设置"),
             ("Welcome", "欢迎"),
-            // Settings panel rows.
+            // Settings dialog rows.
             ("Language", "语言"),
             ("Theme", "主题"),
             ("Dark", "深色"),
@@ -135,7 +136,7 @@ fn register_builtin_locales(registry: &mut Registry) {
     );
 }
 
-/// Built-in setting specs: the settings panel renders rows from these and
+/// Built-in setting specs: the settings dialog renders rows from these and
 /// `app.settings.set` validates writes against them.
 fn register_builtin_settings(registry: &mut Registry) {
     // English is the source language; products can default to another one
@@ -512,6 +513,16 @@ pub fn register(registry: &mut Registry) {
         .enabled_when(|_| true),
     );
 
+    // The Settings dialog: likewise a workspace flag the frontend renders from.
+    registry.register_command(
+        CommandDef::sync(OPEN_SETTINGS, "Settings", |ctx: &mut CommandCtx, _args: &CommandArgs| {
+            ctx.host().ws.settings_open = true;
+            CommandResult::done()
+        })
+        .icon(crate::assets::icons::SETTINGS)
+        .enabled_when(|_| true),
+    );
+
     registry.register_command(
         CommandDef::sync(
             EXPORT_DIAGNOSTICS,
@@ -559,6 +570,7 @@ pub fn register(registry: &mut Registry) {
             .items
             .push(api::ToolbarItem::labeled(format!("{TOGGLE_PANEL_PREFIX}{id}"), title));
     }
+    window_group.items.push(api::ToolbarItem::labeled(OPEN_SETTINGS, "Settings"));
     registry.add_toolbar_group(window_group);
 
     // The "Help" toolbar group: the About dialog (product branding info) and what support needs.

@@ -6,7 +6,7 @@
 //!
 //! A setting's **type and metadata** are described by a [`SettingSpec`]: the platform and
 //! plugins register them during assembly via [`crate::Registry::register_setting`], the
-//! frontend's settings panel renders controls from the spec and writes back through the
+//! frontend's settings dialog renders controls from the spec and writes back through the
 //! `app.settings.set` command (the write side does type checking and range clamping).
 
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::state::StateStore;
 
-/// A registered setting's value type (drives the control the settings panel
+/// A registered setting's value type (drives the control the settings dialog
 /// renders and the validation `app.settings.set` performs).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingKind {
@@ -40,13 +40,13 @@ pub enum SettingScope {
 }
 
 /// Metadata for one setting key: type, label, default and group. Registered
-/// by the platform (built-ins) and by plugins; the settings panel renders one
+/// by the platform (built-ins) and by plugins; the settings dialog renders one
 /// row per spec, the setter validates against it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingSpec {
     /// Dotted key (`ui.theme`, `autosave.interval_secs`, `plugin.<id>.…`).
     pub key: String,
-    /// Human-readable label for the settings panel.
+    /// Human-readable label for the settings dialog.
     pub label: String,
     /// Panel group heading (`"General"`, `"Appearance"`, …).
     pub group: String,

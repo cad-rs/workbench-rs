@@ -21,7 +21,7 @@ pub mod icons {
     pub const DIAGNOSTICS: &str = "wb-std/diagnostics.svg";
     /// Plugins panel (the Home tab's "View" group toggle).
     pub const PLUGINS: &str = "wb-std/plugins.svg";
-    /// Settings panel (the Home tab's "View" group toggle).
+    /// Settings dialog (the Home tab's "View" group).
     pub const SETTINGS: &str = "wb-std/settings.svg";
     /// About dialog (the Home tab's "Help" group).
     pub const ABOUT: &str = "wb-std/about.svg";

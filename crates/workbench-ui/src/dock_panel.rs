@@ -1059,7 +1059,7 @@ mod tests {
                 &[
                     "app.panel.diagnostics",
                     "app.panel.plugins",
-                    "app.panel.settings",
+                    "example.panel.tasks",
                 ],
                 Some("app.panel.diagnostics"),
                 320.0,
@@ -1075,7 +1075,7 @@ mod tests {
             "rcad.assembly.tree",
             "app.panel.diagnostics",
             "app.panel.plugins",
-            "app.panel.settings",
+            "example.panel.tasks",
             "wb.tab.7",
             "wb.tab.9",
         ] {

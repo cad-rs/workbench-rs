@@ -13,7 +13,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Icon, Sizable as _, Size};
 use workbench_api as wb;
 
-use crate::{SharedCore, col, theme};
+use crate::{SharedCore, col, dialog};
 
 /// Renders the About overlay for the current product profile. Returns `None`
 /// when the dialog is not open (the common per-frame case).
@@ -56,45 +56,13 @@ fn render_about(
     cx: &mut Context<crate::RootView>,
 ) -> gpui::Stateful<Div> {
     let profile = &snap.profile;
-    let theme = theme::ui_theme();
     let version = format!("{} {}", snap.version_label, profile.display_version());
 
     // Backdrop: click closes the dialog (same as the close button).
     let core_bg = core.clone();
-    let overlay = div()
-        .id("about-backdrop")
-        .absolute()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(gpui::rgba(0x000000_40))
-        .on_click(cx.listener(
-            move |_: &mut crate::RootView, _: &ClickEvent, _window: &mut Window, cx| {
-                set_about_open(&core_bg, false);
-                cx.notify();
-            },
-        ));
-
-    let mut card = div()
-        .id("about-card")
-        .flex()
-        .flex_col()
-        .w(px(360.0))
-        .p(px(24.0))
-        .gap(px(12.0))
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(col(dim(theme.placeholder, 0.4)))
-        .bg(col(theme.bg))
-        .text_color(col(wb::Color::LIGHT_GRAY))
-        // The backdrop owns clicks; the card must swallow them so a click on
-        // the dialog body does not close it.
-        .on_click(cx.listener(
-            |_: &mut crate::RootView, _: &ClickEvent, _: &mut Window, cx| {
-                cx.stop_propagation();
-            },
-        ));
+    let (overlay, card) =
+        dialog::centered("about", 360.0, move || set_about_open(&core_bg, false), cx);
+    let mut card = card.p(px(24.0)).gap(px(12.0));
 
     // Header: logo (when the product ships one) + name + version.
     let mut header = div().flex().items_center().gap(px(10.0));
@@ -190,9 +158,4 @@ fn set_about_open(core: &SharedCore, open: bool) {
     if let Ok(mut guard) = core.lock() {
         guard.host.ws.about_open = open;
     }
-}
-
-/// Dim a shell color toward black by `factor` (backdrop border).
-fn dim(c: wb::Color, factor: f32) -> wb::Color {
-    wb::Color::rgb(c.r * factor, c.g * factor, c.b * factor)
 }

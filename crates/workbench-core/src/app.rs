@@ -1597,7 +1597,7 @@ impl WorkbenchAppBuilder {
             }
         }
         // Setting specs: registry (platform built-ins + plugins) → host, so
-        // the settings panel and `app.settings.set` see one list. Defaults
+        // the settings dialog and `app.settings.set` see one list. Defaults
         // that are not yet stored are seeded (in memory only — a fresh value
         // persists on first write).
         host.setting_specs = std::mem::take(&mut registry.setting_specs);

@@ -1406,6 +1406,30 @@ fn a_restored_layout_cannot_bring_back_what_is_not_allowed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---- Settings ----
+
+#[test]
+fn settings_open_as_a_dialog_from_the_view_group() {
+    let mut app = app();
+    assert!(!app.host.ws.settings_open);
+    assert!(app.is_enabled("app.settings.open"));
+    assert!(!matches!(
+        app.execute_command("app.settings.open", &wb::CommandArgs::default()),
+        wb::CommandResult::Failed { .. }
+    ));
+    assert!(app.host.ws.settings_open);
+
+    let view_group = app
+        .host
+        .ws
+        .ribbon
+        .iter()
+        .flat_map(|tab| &tab.groups)
+        .find(|group| group.id.0 == "app.window")
+        .expect("the View group");
+    assert_eq!(view_group.items.last().unwrap().command.0, "app.settings.open");
+}
+
 // ---- Diagnostics ----
 
 const SEND_CRASH_REPORTS: &str = "diagnostics.send_crash_reports";

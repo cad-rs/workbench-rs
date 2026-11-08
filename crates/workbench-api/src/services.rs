@@ -50,7 +50,7 @@ pub struct ServiceHost {
     pub log: LogStore,
     pub settings: Settings,
     /// Registered setting specs (platform built-ins + plugin settings),
-    /// filled at build time; the settings panel renders from these and
+    /// filled at build time; the settings dialog renders from these and
     /// `app.settings.set` validates against them.
     pub setting_specs: Vec<crate::settings::SettingSpec>,
     /// Merged locale tables (platform built-ins + plugin contributions),
