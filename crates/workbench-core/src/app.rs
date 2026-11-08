@@ -1321,12 +1321,12 @@ impl WorkbenchAppBuilder {
 
         // Platform commands (including each panel's show/hide command and the "View" toolbar
         // group)
-        let panel_ids: Vec<(String, String)> = registry
+        let panels: Vec<(String, String, Option<String>)> = registry
             .panels
             .iter()
-            .map(|p| (p.id.0.clone(), p.title.clone()))
+            .map(|p| (p.id.0.clone(), p.title.clone(), p.icon.clone()))
             .collect();
-        platform_cmds::register(&mut registry, &panel_ids);
+        platform_cmds::register(&mut registry, &panels);
 
         // Registry → runtime
         for def in std::mem::take(&mut registry.doc_types) {

@@ -8,6 +8,7 @@
 //! stage.
 
 use gpui::{div, prelude::*, px, AnyElement, Div, InteractiveElement, IntoElement};
+use gpui_component::scroll::ScrollableElement as _;
 use workbench_api as wb;
 use wb::{Color, PanelDef, Registry};
 
@@ -108,6 +109,7 @@ impl wb::ViewInstance for DiagnosticsPanel {
             .flex_col()
             .p_3()
             .children(rows)
+            .overflow_y_scrollbar()
             .into_any_element();
         Some(Box::new(element))
     }
@@ -207,6 +209,7 @@ impl wb::ViewInstance for PluginsPanel {
             .gap_1()
             .p_3()
             .children(rows)
+            .overflow_y_scrollbar()
             .into_any_element();
         Some(Box::new(element))
     }
@@ -249,6 +252,7 @@ impl wb::ViewInstance for SettingsPanel {
             .p_3()
             .gap_1()
             .children(rows)
+            .overflow_y_scrollbar()
             .into_any_element();
         Some(Box::new(element))
     }
@@ -423,28 +427,37 @@ fn parse_hex_color(s: &str) -> Option<Color> {
 /// Called from the frontend's assembly stage, before `platform_cmds::register`
 /// builds the "View" toolbar group — so the group picks these up with the rest.
 pub fn register(reg: &mut Registry) {
-    reg.register_panel(PanelDef::new(
-        "app.panel.diagnostics",
-        "Diagnostics",
-        wb::DockArea::Right,
-        320.0,
-        2,
-        || Box::new(DiagnosticsPanel),
-    ));
-    reg.register_panel(PanelDef::new(
-        "app.panel.plugins",
-        "Plugins",
-        wb::DockArea::Right,
-        320.0,
-        3,
-        || Box::new(PluginsPanel),
-    ));
-    reg.register_panel(PanelDef::new(
-        "app.panel.settings",
-        "Settings",
-        wb::DockArea::Right,
-        320.0,
-        4,
-        || Box::new(SettingsPanel),
-    ));
+    reg.register_panel(
+        PanelDef::new(
+            "app.panel.diagnostics",
+            "Diagnostics",
+            wb::DockArea::Right,
+            320.0,
+            2,
+            || Box::new(DiagnosticsPanel),
+        )
+        .icon(workbench_core::assets::icons::DIAGNOSTICS),
+    );
+    reg.register_panel(
+        PanelDef::new(
+            "app.panel.plugins",
+            "Plugins",
+            wb::DockArea::Right,
+            320.0,
+            3,
+            || Box::new(PluginsPanel),
+        )
+        .icon(workbench_core::assets::icons::PLUGINS),
+    );
+    reg.register_panel(
+        PanelDef::new(
+            "app.panel.settings",
+            "Settings",
+            wb::DockArea::Right,
+            320.0,
+            4,
+            || Box::new(SettingsPanel),
+        )
+        .icon(workbench_core::assets::icons::SETTINGS),
+    );
 }

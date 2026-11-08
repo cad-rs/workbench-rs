@@ -17,6 +17,14 @@ pub mod icons {
     pub const SAVE: &str = "wb-std/save.svg";
     pub const UNDO: &str = "wb-std/undo.svg";
     pub const REDO: &str = "wb-std/redo.svg";
+    /// Diagnostics panel (the Home tab's "View" group toggle).
+    pub const DIAGNOSTICS: &str = "wb-std/diagnostics.svg";
+    /// Plugins panel (the Home tab's "View" group toggle).
+    pub const PLUGINS: &str = "wb-std/plugins.svg";
+    /// Settings panel (the Home tab's "View" group toggle).
+    pub const SETTINGS: &str = "wb-std/settings.svg";
+    /// About dialog (the Home tab's "Help" group).
+    pub const ABOUT: &str = "wb-std/about.svg";
 }
 
 static STANDARD_ENTRIES: &[(&str, &[u8])] = &[
@@ -25,6 +33,13 @@ static STANDARD_ENTRIES: &[(&str, &[u8])] = &[
     (icons::SAVE, include_bytes!("../assets/std/save.svg")),
     (icons::UNDO, include_bytes!("../assets/std/undo.svg")),
     (icons::REDO, include_bytes!("../assets/std/redo.svg")),
+    (
+        icons::DIAGNOSTICS,
+        include_bytes!("../assets/std/diagnostics.svg"),
+    ),
+    (icons::PLUGINS, include_bytes!("../assets/std/plugins.svg")),
+    (icons::SETTINGS, include_bytes!("../assets/std/settings.svg")),
+    (icons::ABOUT, include_bytes!("../assets/std/about.svg")),
 ];
 
 /// The platform standard icon asset source (global static, allocation-free lookup).

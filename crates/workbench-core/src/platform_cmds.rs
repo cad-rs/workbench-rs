@@ -190,10 +190,14 @@ fn preferred_view_of(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> Option<ap
     open_view(doc.content.as_ref())
 }
 
-pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
+/// Register the platform commands. `panels` carries each panel's
+/// `(id, title, icon)`: the toggle command inherits the panel's icon so the
+/// Home tab's "View" group shows the same glyph the panel header does (the
+/// panel owns the path; the platform only forwards it).
+pub fn register(registry: &mut Registry, panels: &[(String, String, Option<String>)]) {
     // The built-in platform panels (diagnostics / plugins) are view
     // implementations, so the frontend registers them before this runs; their
-    // ids therefore already appear in `panel_ids` below.
+    // ids therefore already appear in `panels` below.
 
     // ---- Platform built-in settings ----
     register_builtin_settings(registry);
@@ -502,27 +506,32 @@ pub fn register(registry: &mut Registry, panel_ids: &[(String, String)]) {
             ctx.host().ws.about_open = true;
             CommandResult::done()
         })
+        .icon(crate::assets::icons::ABOUT)
         .enabled_when(|_| true),
     );
 
     // A show/hide command per panel + the "View" toolbar group (including the platform's own
     // panels)
-    let all_panels: Vec<(String, String)> = panel_ids.to_vec();
+    let all_panels: Vec<(String, String, Option<String>)> = panels.to_vec();
     let mut window_group = api::ToolbarGroup::new("app.window", "View");
-    for (id, title) in &all_panels {
+    for (id, title, icon) in &all_panels {
         let panel_id = id.clone();
         let pid = panel_id.clone();
         let title = title.clone();
-        registry.register_command(
-            CommandDef::sync(
-                format!("{TOGGLE_PANEL_PREFIX}{id}"),
-                format!("Show/Hide {title}"),
-                move |ctx: &mut CommandCtx, _args: &CommandArgs| match ctx.toggle_panel(&pid) {
-                    Ok(_) => CommandResult::done(),
-                    Err(e) => CommandResult::failed(e),
-                },
-            ),
+        let mut def = CommandDef::sync(
+            format!("{TOGGLE_PANEL_PREFIX}{id}"),
+            format!("Show/Hide {title}"),
+            move |ctx: &mut CommandCtx, _args: &CommandArgs| match ctx.toggle_panel(&pid) {
+                Ok(_) => CommandResult::done(),
+                Err(e) => CommandResult::failed(e),
+            },
         );
+        // The panel's own icon (wb-std/* for the platform panels, the owning
+        // workbench's path for theirs) — the ribbon toggle shows it too.
+        if let Some(icon) = icon.clone() {
+            def = def.icon(icon);
+        }
+        registry.register_command(def);
         window_group
             .items
             .push(api::ToolbarItem::labeled(format!("{TOGGLE_PANEL_PREFIX}{id}"), title));

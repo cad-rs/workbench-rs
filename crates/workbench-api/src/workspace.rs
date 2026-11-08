@@ -255,7 +255,9 @@ pub struct PanelDef {
     pub id: PanelId,
     pub title: String,
     /// Icon asset path (such as `"icons/explorer.svg"`, resolved by the product's AssetSource);
-    /// shown on the panel header, and None falls back to plain text.
+    /// shown on the panel header, and None falls back to plain text. The platform's panel toggle
+    /// commands (the Home tab's "View" group) use the same path, so the ribbon and the panel
+    /// header show the same icon.
     pub icon: Option<String>,
     /// Script panel: gpui-rhai script file path (mounted and rendered by the gpui frontend).
     /// When set the panel content is fully defined by the script and `factory` is never called.

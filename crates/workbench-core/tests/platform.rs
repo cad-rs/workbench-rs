@@ -20,14 +20,17 @@ impl wb::Workbench for TestWb {
         reg.register_view(wb::ViewDef::new("test.view", "Test View", true, || {
             Box::new(TestView)
         }));
-        reg.register_panel(wb::PanelDef::new(
-            "test.panel",
-            "Test Panel",
-            wb::DockArea::Left,
-            200.0,
-            0,
-            || Box::new(TestView),
-        ));
+        reg.register_panel(
+            wb::PanelDef::new(
+                "test.panel",
+                "Test Panel",
+                wb::DockArea::Left,
+                200.0,
+                0,
+                || Box::new(TestView),
+            )
+            .icon("wb-std/test-panel.svg"),
+        );
         reg.register_document_type(wb::DocumentTypeDef {
             id: wb::DocumentTypeId::new("test.shapes"),
             title: "Shapes Document".to_string(),
@@ -129,6 +132,12 @@ fn assembly_registers_commands_and_panel_toggles() {
     assert!(a.command_title("test.cmd").is_some());
     // The platform registers a toggle command per panel
     assert!(a.command_title("app.toggle_panel.test.panel").is_some());
+    // The toggle command inherits the panel's icon (the panel owns the path; the platform
+    // only forwards it)
+    assert_eq!(
+        a.command_icon("app.toggle_panel.test.panel").as_deref(),
+        Some("wb-std/test-panel.svg")
+    );
     assert!(a.command_title("app.undo").is_some());
     assert_eq!(a.host.ws.work_mode, "A");
 }
