@@ -1515,25 +1515,44 @@ fn a_failed_refresh_keeps_the_answers_and_only_the_user_hears_of_it() {
     assert!(logged(&app, "The license is up to date"));
 }
 
-/// Signs in at once.
-struct InstantAccount;
+/// Answers every poll the same way.
+struct TestAccount {
+    user_code: Option<String>,
+    expires_in: u64,
+    answer: wb::PollResult,
+}
 
-impl wb::AccountService for InstantAccount {
+impl TestAccount {
+    /// Signs in at once.
+    fn instant() -> Arc<Self> {
+        Arc::new(Self {
+            user_code: Some("CODE".into()),
+            expires_in: 600,
+            answer: wb::PollResult::Success(wb::AccountUser {
+                id: "u1".into(),
+                name: "Test User".into(),
+                email: None,
+            }),
+        })
+    }
+
+    /// Waits on a page the platform has to open.
+    fn browser(expires_in: u64) -> Arc<Self> {
+        Arc::new(Self { user_code: None, expires_in, answer: wb::PollResult::Pending })
+    }
+}
+
+impl wb::AccountService for TestAccount {
     fn begin_login(&self) -> Result<wb::DeviceAuthRequest, String> {
         Ok(wb::DeviceAuthRequest {
-            user_code: Some("CODE".into()),
-            verification_uri: "https://example.test/device".into(),
-            verification_uri_complete: None,
-            expires_in: 600,
+            user_code: self.user_code.clone(),
+            verification_uri: "https://example.test/sign-in".into(),
+            expires_in: self.expires_in,
             interval: 0,
         })
     }
     fn poll(&self) -> Result<wb::PollResult, String> {
-        Ok(wb::PollResult::Success(wb::AccountUser {
-            id: "u1".into(),
-            name: "Test User".into(),
-            email: None,
-        }))
+        Ok(self.answer.clone())
     }
     fn logout(&self) {}
     fn current_user(&self) -> Option<wb::AccountUser> {
@@ -1541,23 +1560,28 @@ impl wb::AccountService for InstantAccount {
     }
 }
 
+/// Ticks until the sign-in reaches the phase `reached` looks for.
+fn wait_for_sign_in(app: &mut AppRuntime, reached: impl Fn(&wb::AccountPhase) -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !reached(&app.host.ws.account) {
+        assert!(std::time::Instant::now() < deadline, "the sign-in never got there");
+        app.frame_tick(0.0);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn signing_in_and_out_fetches_the_answers_for_the_new_user() {
     let subscription = Arc::new(Subscription::default());
     let mut app = gated_builder(subscription.clone())
-        .with_account(Arc::new(InstantAccount))
+        .with_account(TestAccount::instant())
         .build()
         .unwrap();
     settle(&mut app);
     let args = wb::CommandArgs::default();
 
     assert!(app.execute_command("app.account.login", &args).is_ok());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !matches!(app.host.ws.account, wb::AccountPhase::LoggedIn(_)) {
-        assert!(std::time::Instant::now() < deadline, "sign-in never finished");
-        app.frame_tick(0.0);
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for_sign_in(&mut app, |phase| matches!(phase, wb::AccountPhase::LoggedIn(_)));
     settle(&mut app);
     assert_eq!(subscription.checks(), 2);
 
@@ -1633,52 +1657,35 @@ fn offline_at_launch_keeps_the_cached_plan_for_the_session() {
     assert!(app.is_enabled("test.gated"), "the lapse is found mid-session");
 }
 
-/// Signs in through a page the platform has to open.
-struct BrowserAccount;
-
-impl wb::AccountService for BrowserAccount {
-    fn begin_login(&self) -> Result<wb::DeviceAuthRequest, String> {
-        Ok(wb::DeviceAuthRequest {
-            user_code: None,
-            verification_uri: "https://example.test/sign-in".into(),
-            verification_uri_complete: None,
-            expires_in: 600,
-            interval: 1,
-        })
-    }
-    fn poll(&self) -> Result<wb::PollResult, String> {
-        Ok(wb::PollResult::Pending)
-    }
-    fn logout(&self) {}
-    fn current_user(&self) -> Option<wb::AccountUser> {
-        None
-    }
-}
-
 /// Runs the sign-in command until the platform shows it as pending.
 fn pending_sign_in(service: Arc<dyn wb::AccountService>) -> AppRuntime {
     let mut app = builder().with_account(service).build().unwrap();
     assert!(app.execute_command("app.account.login", &wb::CommandArgs::default()).is_ok());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !matches!(app.host.ws.account, wb::AccountPhase::Pending(_)) {
-        assert!(std::time::Instant::now() < deadline, "sign-in never started");
-        app.frame_tick(0.0);
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
+    wait_for_sign_in(&mut app, |phase| matches!(phase, wb::AccountPhase::Pending(_)));
     app
 }
 
 #[test]
 fn a_sign_in_with_nothing_to_type_opens_the_browser() {
-    let mut app = pending_sign_in(Arc::new(BrowserAccount));
+    let mut app = pending_sign_in(TestAccount::browser(600));
     assert_eq!(app.host.ws.url_to_open.as_deref(), Some("https://example.test/sign-in"));
     assert!(app.execute_command("app.account.cancel_login", &wb::CommandArgs::default()).is_ok());
 }
 
 #[test]
 fn a_sign_in_with_a_code_to_type_leaves_the_browser_alone() {
-    let app = pending_sign_in(Arc::new(InstantAccount));
+    let app = pending_sign_in(TestAccount::instant());
     assert_eq!(app.host.ws.url_to_open, None);
+}
+
+#[test]
+fn a_sign_in_nobody_finishes_expires() {
+    let mut app = pending_sign_in(TestAccount::browser(0));
+    wait_for_sign_in(&mut app, |phase| matches!(phase, wb::AccountPhase::Failed(_)));
+    assert_eq!(
+        app.host.ws.account,
+        wb::AccountPhase::Failed("The sign-in request has expired".to_string())
+    );
 }
 
 #[test]
@@ -1686,7 +1693,7 @@ fn signing_out_ends_the_grace() {
     let subscription = Arc::new(Subscription::default());
     subscription.sell(&["pro.export"]);
     let mut app = gated_builder(subscription.clone())
-        .with_account(Arc::new(InstantAccount))
+        .with_account(TestAccount::instant())
         .build()
         .unwrap();
     settle(&mut app);

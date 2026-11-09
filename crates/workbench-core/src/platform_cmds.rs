@@ -306,16 +306,7 @@ pub fn register(registry: &mut Registry, ribbon_collapse: bool) {
             let Some(doc_id) = ctx.active_document() else {
                 return CommandResult::failed("No active document");
             };
-            let has_file = ctx
-                .host()
-                .docs
-                .get(doc_id)
-                .is_some_and(|d| d.location.is_some());
-            if has_file {
-                save_document(ctx, doc_id, None)
-            } else {
-                request_save_as_dialog(ctx, doc_id)
-            }
+            save_or_ask_then(ctx, doc_id, |_| {})
         })
         .icon(crate::assets::icons::SAVE)
         .hotkey(Hotkey::new(KeyCode::S).ctrl(true))
@@ -328,7 +319,7 @@ pub fn register(registry: &mut Registry, ribbon_collapse: bool) {
             let Some(doc_id) = ctx.active_document() else {
                 return CommandResult::failed("No active document");
             };
-            request_save_as_dialog(ctx, doc_id)
+            request_save_as_dialog_then(ctx, doc_id, |_| {})
         })
         .hotkey(Hotkey::new(KeyCode::S).ctrl(true).shift(true))
         .enabled_when(|snap| snap.active_document.is_some()),
@@ -669,15 +660,15 @@ pub fn save_document(
     doc_id: api::DocumentId,
     target: Option<api::Location>,
 ) -> CommandResult {
-    save_document_then(ctx, doc_id, target, |_, _| {})
+    save_document_then(ctx, doc_id, target, |_| {})
 }
 
-/// [`save_document`], then `then` on the UI thread with whether the file was written.
+/// [`save_document`], then `then` on the UI thread once the file is written.
 fn save_document_then(
     ctx: &mut CommandCtx,
     doc_id: api::DocumentId,
     target: Option<api::Location>,
-    then: impl FnOnce(&mut dyn api::AppServices, bool) + Send + 'static,
+    then: impl FnOnce(&mut dyn api::AppServices) + Send + 'static,
 ) -> CommandResult {
     let save_as = target.is_some();
     let (save, bytes) = match ctx.host().docs.begin_save(doc_id, target) {
@@ -686,7 +677,6 @@ fn save_document_then(
     };
     let kept = save.keep_old_at.clone();
     ctx.write_save(save, bytes, Box::new(move |app, saved| {
-        let written = saved.is_ok();
         let host = app.host();
         match saved {
             Ok(location) => {
@@ -695,12 +685,25 @@ fn save_document_then(
                 if let Some(kept) = kept {
                     host.log.info(format!("The file's older format is kept as {kept}"));
                 }
+                then(app);
             }
             Err(e) => host.log.error(e),
         }
-        then(app, written);
     }));
     CommandResult::done()
+}
+
+/// Save to the document's own file, asking where if it has none, then `then`.
+fn save_or_ask_then(
+    ctx: &mut CommandCtx,
+    doc_id: api::DocumentId,
+    then: impl FnOnce(&mut dyn api::AppServices) + Send + 'static,
+) -> CommandResult {
+    if ctx.host().docs.get(doc_id).is_some_and(|doc| doc.location.is_some()) {
+        save_document_then(ctx, doc_id, None, then)
+    } else {
+        request_save_as_dialog_then(ctx, doc_id, then)
+    }
 }
 
 /// Save every unsaved document, asking where for those without a file, then
@@ -724,18 +727,10 @@ fn save_next_then_close(ctx: &mut CommandCtx, mut remaining: std::vec::IntoIter<
         }
         return;
     };
-    let then = move |app: &mut dyn api::AppServices, written: bool| {
-        if written {
-            save_next_then_close(&mut CommandCtx::new(app), remaining);
-        }
+    let then = move |app: &mut dyn api::AppServices| {
+        save_next_then_close(&mut CommandCtx::new(app), remaining);
     };
-    let has_file = ctx.host().docs.get(doc_id).is_some_and(|doc| doc.location.is_some());
-    let started = if has_file {
-        save_document_then(ctx, doc_id, None, then)
-    } else {
-        request_save_as_dialog_then(ctx, doc_id, then)
-    };
-    if let CommandResult::Failed { error } = started {
+    if let CommandResult::Failed { error } = save_or_ask_then(ctx, doc_id, then) {
         ctx.host().log.error(error);
     }
 }
@@ -763,17 +758,12 @@ fn file_name_of(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> Option<(String
     Some((api::storage::with_extension(&doc.title, &exts), exts))
 }
 
-/// Ask the user where to save a document, then write it there.
-fn request_save_as_dialog(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> CommandResult {
-    request_save_as_dialog_then(ctx, doc_id, |_, _| {})
-}
-
-/// [`request_save_as_dialog`], then `then` once a file was written; cancelling
-/// the dialog never reaches it.
+/// Ask the user where to save a document, write it there, then `then`.
+/// Cancelling the dialog never reaches it.
 fn request_save_as_dialog_then(
     ctx: &mut CommandCtx,
     doc_id: api::DocumentId,
-    then: impl FnOnce(&mut dyn api::AppServices, bool) + Send + 'static,
+    then: impl FnOnce(&mut dyn api::AppServices) + Send + 'static,
 ) -> CommandResult {
     let Some((default_name, exts)) = file_name_of(ctx, doc_id) else {
         return CommandResult::failed("No such document");

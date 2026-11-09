@@ -6,15 +6,11 @@
 //! discovery document. Nothing is persisted: the session lasts until the app
 //! or the page closes.
 
-use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
-
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use web_time::Instant;
-use workbench_api::DeviceAuthRequest;
+use workbench_api::{DeviceAuthRequest, PollResult};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod loopback;
@@ -74,21 +70,11 @@ struct Login {
     redirect_uri: String,
     state: String,
     verifier: String,
-    deadline: Instant,
 }
 
 impl Login {
-    fn new(redirect_uri: String, config: &AuthCodeConfig) -> Result<Self, String> {
-        Ok(Self {
-            redirect_uri,
-            state: random_token()?,
-            verifier: random_token()?,
-            deadline: Instant::now() + Duration::from_secs(config.timeout_secs),
-        })
-    }
-
-    fn expired(&self) -> bool {
-        Instant::now() >= self.deadline
+    fn new(redirect_uri: String) -> Result<Self, String> {
+        Ok(Self { redirect_uri, state: random_token()?, verifier: random_token()? })
     }
 
     /// What the platform opens: the sign-in page, with nothing for the user to type.
@@ -106,7 +92,6 @@ impl Login {
         DeviceAuthRequest {
             user_code: None,
             verification_uri: format!("{}{separator}{query}", config.authorization_endpoint),
-            verification_uri_complete: None,
             expires_in: config.timeout_secs,
             interval: 1,
         }
@@ -131,8 +116,8 @@ impl Login {
 enum Callback {
     /// Not this sign-in's: only the browser it was sent to knows the state.
     Forged,
-    Denied,
-    Failed(String),
+    /// The sign-in ended at the page; what `poll` answers.
+    Over(Result<PollResult, String>),
     Code(String),
 }
 
@@ -146,10 +131,12 @@ fn read_callback(query: &str, state: &str) -> Callback {
         return Callback::Forged;
     }
     match (param("error"), param("code")) {
-        (Some(error), _) if error == "access_denied" => Callback::Denied,
-        (Some(error), _) => Callback::Failed(format!("The sign-in page returned an error: {error}")),
+        (Some(error), _) if error == "access_denied" => Callback::Over(Ok(PollResult::Denied)),
+        (Some(error), _) => {
+            Callback::Over(Err(format!("The sign-in page returned an error: {error}")))
+        }
         (None, Some(code)) => Callback::Code(code),
-        (None, None) => Callback::Failed("The sign-in page returned no code".to_string()),
+        (None, None) => Callback::Over(Err("The sign-in page returned no code".to_string())),
     }
 }
 
@@ -162,10 +149,6 @@ fn access_token(token_response: &Value) -> Result<String, String> {
             Err(format!("The token endpoint refused the code: {error}"))
         }
     }
-}
-
-fn lock<V>(mutex: &Mutex<V>) -> MutexGuard<'_, V> {
-    mutex.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// 256 random bits, URL-safe.
@@ -196,6 +179,26 @@ fn code_challenge(verifier: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn over(query: &str) -> Result<PollResult, String> {
+        match read_callback(query, "s") {
+            Callback::Over(answer) => answer,
+            _ => panic!("{query} should end the sign-in"),
+        }
+    }
+
+    #[test]
+    fn a_redirect_is_read_only_if_it_carries_this_sign_ins_state() {
+        assert!(matches!(read_callback("code=c&state=other", "s"), Callback::Forged));
+        assert!(matches!(read_callback("code=c", "s"), Callback::Forged));
+        assert!(matches!(read_callback("code=a%2Fb&state=s", "s"), Callback::Code(c) if c == "a/b"));
+        assert_eq!(over("error=access_denied&state=s"), Ok(PollResult::Denied));
+        assert_eq!(
+            over("error=server_error&state=s"),
+            Err("The sign-in page returned an error: server_error".to_string())
+        );
+        assert_eq!(over("state=s"), Err("The sign-in page returned no code".to_string()));
+    }
 
     /// RFC 7636 Appendix B.
     #[test]

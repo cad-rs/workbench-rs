@@ -13,8 +13,8 @@ use web_sys::{Headers, RequestInit, Response};
 use workbench_api::{AccountService, AccountUser, DeviceAuthRequest, PollResult};
 
 use super::redirect_flow::{RedirectFlow, Step};
-use super::{AuthCodeConfig, access_token, lock};
-use crate::account::user_from_claims;
+use super::{AuthCodeConfig, access_token};
+use crate::account::{lock, user_from_claims};
 use crate::js::{js_error, resolve};
 
 /// `auth-callback.html` stores the redirect's query under this plus its
@@ -82,22 +82,13 @@ fn take_callback(state: &str) -> Option<String> {
 
 /// Trade the authorization code for a token and the user it belongs to.
 async fn exchange(config: &AuthCodeConfig, form: &str) -> Result<(String, AccountUser), String> {
-    let headers = Headers::new().map_err(js_error)?;
-    headers.set("Content-Type", "application/x-www-form-urlencoded").map_err(js_error)?;
-    let init = RequestInit::new();
-    init.set_method("POST");
-    init.set_headers(&headers);
-    init.set_body(&JsValue::from_str(form));
-    let body = fetch_json(&config.token_endpoint, &init).await?;
+    let content_type = ("Content-Type", "application/x-www-form-urlencoded");
+    let body = fetch_json(&config.token_endpoint, content_type, Some(form)).await?;
     let token = access_token(&body)?;
-
     let user = match &config.userinfo_endpoint {
         Some(url) => {
-            let headers = Headers::new().map_err(js_error)?;
-            headers.set("Authorization", &format!("Bearer {token}")).map_err(js_error)?;
-            let init = RequestInit::new();
-            init.set_headers(&headers);
-            user_from_claims(&fetch_json(url, &init).await?)?
+            let bearer = format!("Bearer {token}");
+            user_from_claims(&fetch_json(url, ("Authorization", &bearer), None).await?)?
         }
         None => user_from_claims(&body)?,
     };
@@ -105,10 +96,18 @@ async fn exchange(config: &AuthCodeConfig, form: &str) -> Result<(String, Accoun
 }
 
 /// The parsed body of any response, error statuses included: a refused code
-/// comes back as a JSON `error` with a 400.
-async fn fetch_json(url: &str, init: &RequestInit) -> Result<Value, String> {
+/// comes back as a JSON `error` with a 400. A POST when there is a body to send.
+async fn fetch_json(url: &str, header: (&str, &str), post: Option<&str>) -> Result<Value, String> {
     let window = web_sys::window().ok_or("No page to sign in from")?;
-    let response: Response = resolve(window.fetch_with_str_and_init(url, init))
+    let headers = Headers::new().map_err(js_error)?;
+    headers.set(header.0, header.1).map_err(js_error)?;
+    let init = RequestInit::new();
+    init.set_headers(&headers);
+    if let Some(body) = post {
+        init.set_method("POST");
+        init.set_body(&JsValue::from_str(body));
+    }
+    let response: Response = resolve(window.fetch_with_str_and_init(url, &init))
         .await
         .map_err(|e| format!("Could not reach {url}: {e}"))?;
     let text: JsValue = resolve(response.text().map_err(js_error)?).await?;

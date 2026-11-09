@@ -10,7 +10,7 @@ use workbench_api as wb;
 use workbench_core::platform_cmds;
 
 use crate::dialog::{self, DialogFocus};
-use crate::{RootView, SharedCore, col, lock};
+use crate::{RootView, SharedCore, lock};
 
 pub(crate) fn overlay(
     core: &SharedCore,
@@ -31,9 +31,7 @@ pub(crate) fn overlay(
         )
     };
 
-    let names = titles
-        .into_iter()
-        .map(|title| div().text_size(px(12.)).text_color(col(wb::Color::GRAY)).child(title));
+    let names = titles.into_iter().map(dialog::row);
 
     let core_save = core.clone();
     let save = button("unsaved-save", save, cx, move || {

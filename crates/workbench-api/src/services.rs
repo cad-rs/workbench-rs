@@ -287,13 +287,19 @@ async fn sign_in(
         }
     };
     let mut interval = request.interval.max(1);
+    let (started, expires_in) = (web_time::Instant::now(), request.expires_in);
     let _ = tx.send(AccountPhase::Pending(request));
     loop {
         crate::asyncrt::sleep(std::time::Duration::from_secs(interval)).await;
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
-        let end = match service.poll() {
+        let answer = if started.elapsed().as_secs() >= expires_in {
+            Ok(PollResult::Expired)
+        } else {
+            service.poll()
+        };
+        let end = match answer {
             Ok(PollResult::Pending) => continue,
             Ok(PollResult::SlowDown) => {
                 interval += SLOW_DOWN_INTERVAL_SECS;

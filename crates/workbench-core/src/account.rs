@@ -11,7 +11,7 @@
 //! [`UreqTransport`]; tests drive the client with a scripted transport or a
 //! local mock server, with no external IdP involved.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use serde_json::Value;
 use workbench_api as api;
@@ -30,6 +30,11 @@ pub trait HttpTransport: Send + Sync {
     /// POST `url` as `application/x-www-form-urlencoded`; returns the parsed
     /// JSON body (including 4xx error bodies).
     fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<Value, String>;
+}
+
+/// A lock that survives a panic elsewhere: everything it guards stays valid.
+pub(crate) fn lock<V>(mutex: &Mutex<V>) -> MutexGuard<'_, V> {
+    mutex.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// Device-flow client over any [`HttpTransport`].
@@ -124,29 +129,18 @@ impl<T: HttpTransport> AccountService for DeviceFlowClient<T> {
                 .ok_or_else(|| format!("The device_authorization response is missing {key}"))
         };
         let device_code = str_field("device_code")?;
-        *self
-            .device_code
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Some(device_code);
+        *lock(&self.device_code) = Some(device_code);
         Ok(DeviceAuthRequest {
             user_code: Some(str_field("user_code")?),
             verification_uri: str_field("verification_uri")?,
-            verification_uri_complete: body
-                .get("verification_uri_complete")
-                .and_then(Value::as_str)
-                .map(str::to_string),
             expires_in: body.get("expires_in").and_then(Value::as_u64).unwrap_or(600),
             interval: body.get("interval").and_then(Value::as_u64).unwrap_or(5),
         })
     }
 
     fn poll(&self) -> Result<PollResult, String> {
-        let device_code = self
-            .device_code
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
-            .ok_or("Sign-in has not started (no device code)")?;
+        let device_code =
+            lock(&self.device_code).clone().ok_or("Sign-in has not started (no device code)")?;
         let eps = self.endpoints()?;
         let body = self.transport.post_form(
             &eps.token,
@@ -167,8 +161,7 @@ impl<T: HttpTransport> AccountService for DeviceFlowClient<T> {
                 }
                 None => user_from_claims(&body)?,
             };
-            *self.session.lock().unwrap_or_else(|p| p.into_inner()) =
-                Some((access_token.to_string(), user.clone()));
+            *lock(&self.session) = Some((access_token.to_string(), user.clone()));
             return Ok(PollResult::Success(user));
         }
 
@@ -184,15 +177,11 @@ impl<T: HttpTransport> AccountService for DeviceFlowClient<T> {
     }
 
     fn logout(&self) {
-        *self.session.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *lock(&self.session) = None;
     }
 
     fn current_user(&self) -> Option<AccountUser> {
-        self.session
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .map(|(_, user)| user.clone())
+        lock(&self.session).as_ref().map(|(_, user)| user.clone())
     }
 }
 

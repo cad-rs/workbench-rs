@@ -16,10 +16,17 @@ pub(super) enum Step {
 }
 
 #[derive(Default)]
+enum Phase {
+    #[default]
+    Idle,
+    Waiting(Login),
+    Exchanging,
+    Exchanged(Result<(String, AccountUser), String>),
+}
+
+#[derive(Default)]
 pub(super) struct RedirectFlow {
-    login: Option<Login>,
-    exchanging: bool,
-    outcome: Option<Result<(String, AccountUser), String>>,
+    phase: Phase,
     session: Option<(String, AccountUser)>,
 }
 
@@ -29,65 +36,62 @@ impl RedirectFlow {
         redirect_uri: String,
         config: &AuthCodeConfig,
     ) -> Result<DeviceAuthRequest, String> {
-        let login = Login::new(redirect_uri, config)?;
+        let login = Login::new(redirect_uri)?;
         let request = login.sign_in_request(config);
-        self.login = Some(login);
-        self.exchanging = false;
-        self.outcome = None;
+        self.phase = Phase::Waiting(login);
         Ok(request)
     }
 
     /// The state of the sign-in still waiting for its redirect.
     pub(super) fn waiting_for(&self) -> Option<&str> {
-        self.login.as_ref().filter(|_| !self.exchanging).map(|login| login.state.as_str())
+        match &self.phase {
+            Phase::Waiting(login) => Some(&login.state),
+            _ => None,
+        }
     }
 
-    /// One poll; `callback` is the redirect's query, if it has arrived.
+    /// One poll; `callback` is the redirect's query, if it has arrived. Any
+    /// phase not put back here is over, which leaves the flow idle.
     pub(super) fn advance(
         &mut self,
         config: &AuthCodeConfig,
         callback: Option<&str>,
     ) -> Result<Step, String> {
-        if let Some(outcome) = self.outcome.take() {
-            self.exchanging = false;
-            self.login = None;
-            let (token, user) = outcome?;
-            self.session = Some((token, user.clone()));
-            return Ok(Step::Answer(PollResult::Success(user)));
-        }
-        if self.exchanging {
-            return Ok(Step::Answer(PollResult::Pending));
-        }
-        let login = self.login.as_ref().ok_or("Sign-in has not started")?;
-        if login.expired() {
-            self.login = None;
-            return Ok(Step::Answer(PollResult::Expired));
-        }
-        let Some(query) = callback else {
-            return Ok(Step::Answer(PollResult::Pending));
-        };
-        match read_callback(query, &login.state) {
-            Callback::Forged => Ok(Step::Answer(PollResult::Pending)),
-            Callback::Denied => {
-                self.login = None;
-                Ok(Step::Answer(PollResult::Denied))
+        let pending = Ok(Step::Answer(PollResult::Pending));
+        match std::mem::take(&mut self.phase) {
+            Phase::Idle => Err("Sign-in has not started".to_string()),
+            Phase::Exchanging => {
+                self.phase = Phase::Exchanging;
+                pending
             }
-            Callback::Failed(error) => {
-                self.login = None;
-                Err(error)
+            Phase::Exchanged(outcome) => {
+                let (token, user) = outcome?;
+                self.session = Some((token, user.clone()));
+                Ok(Step::Answer(PollResult::Success(user)))
             }
-            Callback::Code(code) => {
-                let form = form_urlencoded::Serializer::new(String::new())
-                    .extend_pairs(login.token_form(config, &code))
-                    .finish();
-                self.exchanging = true;
-                Ok(Step::Exchange(form))
-            }
+            Phase::Waiting(login) => match callback.map(|q| read_callback(q, &login.state)) {
+                None | Some(Callback::Forged) => {
+                    self.phase = Phase::Waiting(login);
+                    pending
+                }
+                Some(Callback::Over(answer)) => answer.map(Step::Answer),
+                Some(Callback::Code(code)) => {
+                    let form = form_urlencoded::Serializer::new(String::new())
+                        .extend_pairs(login.token_form(config, &code))
+                        .finish();
+                    self.phase = Phase::Exchanging;
+                    Ok(Step::Exchange(form))
+                }
+            },
         }
     }
 
+    /// The answer to [`Step::Exchange`]. One from an attempt given up since
+    /// finds the flow doing something else and is dropped.
     pub(super) fn exchanged(&mut self, outcome: Result<(String, AccountUser), String>) {
-        self.outcome = Some(outcome);
+        if matches!(self.phase, Phase::Exchanging) {
+            self.phase = Phase::Exchanged(outcome);
+        }
     }
 
     pub(super) fn session(&self) -> Option<&(String, AccountUser)> {
@@ -197,33 +201,6 @@ mod tests {
     }
 
     #[test]
-    fn another_error_from_the_sign_in_page_is_reported() {
-        let config = config();
-        let (mut flow, sent) = started(&config);
-        let query = format!("error=server_error&state={}", sent["state"]);
-        assert_eq!(
-            flow.advance(&config, Some(&query)),
-            Err("The sign-in page returned an error: server_error".to_string())
-        );
-    }
-
-    #[test]
-    fn a_redirect_without_a_code_is_reported() {
-        let config = config();
-        let (mut flow, sent) = started(&config);
-        let query = format!("state={}", sent["state"]);
-        assert!(flow.advance(&config, Some(&query)).is_err());
-    }
-
-    #[test]
-    fn waiting_too_long_expires() {
-        let config = AuthCodeConfig { timeout_secs: 0, ..config() };
-        let (mut flow, _) = started(&config);
-        assert_eq!(flow.advance(&config, None), Ok(Step::Answer(PollResult::Expired)));
-        assert!(flow.advance(&config, None).is_err());
-    }
-
-    #[test]
     fn polling_before_starting_fails() {
         assert!(RedirectFlow::default().advance(&config(), None).is_err());
     }
@@ -239,6 +216,19 @@ mod tests {
         flow.begin(REDIRECT.to_string(), &config).unwrap();
         assert_eq!(flow.advance(&config, None), pending(), "the old answer is gone");
         assert_eq!(flow.advance(&config, Some(&query)), pending(), "and so is its state");
+    }
+
+    #[test]
+    fn the_exchange_of_an_abandoned_attempt_is_dropped() {
+        let config = config();
+        let (mut flow, first) = started(&config);
+        let query = format!("code=old&state={}", first["state"]);
+        assert!(matches!(flow.advance(&config, Some(&query)), Ok(Step::Exchange(_))));
+
+        flow.begin(REDIRECT.to_string(), &config).unwrap();
+        flow.exchanged(Ok(("old".to_string(), user())));
+        assert_eq!(flow.advance(&config, None), pending());
+        assert!(flow.session().is_none());
     }
 
     #[test]

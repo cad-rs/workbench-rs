@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use workbench_api::{AccountService, AccountUser, DeviceAuthRequest, PollResult};
 
-use super::{AuthCodeConfig, Callback, Login, access_token, lock, read_callback};
-use crate::account::{HttpTransport, user_from_claims};
+use super::{AuthCodeConfig, Callback, Login, access_token, read_callback};
+use crate::account::{HttpTransport, lock, user_from_claims};
 
 /// A sign-in waiting for the browser to come back.
 struct PendingLogin {
@@ -61,7 +61,7 @@ impl<T: HttpTransport> AccountService for AuthCodeClient<T> {
             .map_err(|e| format!("Could not listen for the browser: {e}"))?
             .port();
         let redirect_uri = format!("http://127.0.0.1:{port}{}", config.redirect_path);
-        let login = Login::new(redirect_uri, config)?;
+        let login = Login::new(redirect_uri)?;
         let request = login.sign_in_request(config);
         *lock(&self.pending) = Some(PendingLogin { listener, login });
         Ok(request)
@@ -70,10 +70,6 @@ impl<T: HttpTransport> AccountService for AuthCodeClient<T> {
     fn poll(&self) -> Result<PollResult, String> {
         let mut pending = lock(&self.pending);
         let current = pending.as_ref().ok_or("Sign-in has not started")?;
-        if current.login.expired() {
-            *pending = None;
-            return Ok(PollResult::Expired);
-        }
         let mut stream = match current.listener.accept() {
             Ok((stream, _)) => stream,
             Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(PollResult::Pending),
@@ -83,21 +79,15 @@ impl<T: HttpTransport> AccountService for AuthCodeClient<T> {
             respond(&mut stream, "404 Not Found", "Not found.");
             return Ok(PollResult::Pending);
         };
-        const INCOMPLETE: &str = "Sign-in did not complete. You can close this tab.";
         let code = match read_callback(&query, &current.login.state) {
             Callback::Forged => {
                 respond(&mut stream, "400 Bad Request", "This sign-in request is not valid.");
                 return Ok(PollResult::Pending);
             }
-            Callback::Denied => {
+            Callback::Over(answer) => {
                 *pending = None;
-                respond(&mut stream, "200 OK", INCOMPLETE);
-                return Ok(PollResult::Denied);
-            }
-            Callback::Failed(error) => {
-                *pending = None;
-                respond(&mut stream, "200 OK", INCOMPLETE);
-                return Err(error);
+                respond(&mut stream, "200 OK", "Sign-in did not complete. You can close this tab.");
+                return answer;
             }
             Callback::Code(code) => code,
         };

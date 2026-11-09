@@ -205,15 +205,6 @@ fn the_user_refusing_is_a_denial() {
 }
 
 #[test]
-fn another_error_from_the_sign_in_page_is_reported() {
-    let (client, _) = client();
-    let params = begin(&client);
-    let query = format!("error=server_error&state={}", params["state"]);
-    let (result, _) = poll_until(&client, callback(&params["redirect_uri"], &query));
-    assert_eq!(result, Err("The sign-in page returned an error: server_error".to_string()));
-}
-
-#[test]
 fn a_refused_code_fails_and_says_so_in_the_browser() {
     let (client, idp) = client();
     *idp.token_reply.lock().unwrap() = Some(json!({"error": "invalid_grant"}));
@@ -230,16 +221,18 @@ fn nothing_from_the_request_reaches_the_page() {
     let (client, _) = client();
     let params = begin(&client);
     let query = format!("error=%3Cscript%3Ealert(1)%3C%2Fscript%3E&state={}", params["state"]);
-    let (_, page) = poll_until(&client, callback(&params["redirect_uri"], &query));
+    let (result, page) = poll_until(&client, callback(&params["redirect_uri"], &query));
+    assert_eq!(
+        result,
+        Err("The sign-in page returned an error: <script>alert(1)</script>".to_string())
+    );
     assert!(!page.contains("script"), "{page}");
 }
 
 #[test]
-fn waiting_too_long_expires() {
-    let (client, _) = client_with(AuthCodeConfig { timeout_secs: 0, ..config() });
-    begin(&client);
-    assert_eq!(client.poll(), Ok(PollResult::Expired));
-    assert!(client.poll().is_err(), "the sign-in is over");
+fn the_platform_is_told_how_long_to_wait() {
+    let (client, _) = client_with(AuthCodeConfig { timeout_secs: 7, ..config() });
+    assert_eq!(client.begin_login().unwrap().expires_in, 7);
 }
 
 #[test]

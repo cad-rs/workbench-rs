@@ -27,9 +27,7 @@ pub struct DeviceAuthRequest {
     pub user_code: Option<String>,
     /// Where to enter it.
     pub verification_uri: String,
-    /// Prefilled link, when the IdP offers one.
-    pub verification_uri_complete: Option<String>,
-    /// Seconds until the device/user codes expire.
+    /// Seconds the platform waits for the user before giving up.
     pub expires_in: u64,
     /// Minimum seconds between token polls (server-provided).
     pub interval: u64,
@@ -78,35 +76,6 @@ pub trait AccountService: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A scripted service driving the platform state machine in tests.
-    pub(crate) struct ScriptedAccount;
-
-    impl AccountService for ScriptedAccount {
-        fn begin_login(&self) -> Result<DeviceAuthRequest, String> {
-            Ok(DeviceAuthRequest {
-                user_code: Some("TEST-CODE".into()),
-                verification_uri: "https://example.test/device".into(),
-                verification_uri_complete: None,
-                expires_in: 600,
-                interval: 0,
-            })
-        }
-
-        fn poll(&self) -> Result<PollResult, String> {
-            Ok(PollResult::Success(AccountUser {
-                id: "u1".into(),
-                name: "Test User".into(),
-                email: None,
-            }))
-        }
-
-        fn logout(&self) {}
-
-        fn current_user(&self) -> Option<AccountUser> {
-            None
-        }
-    }
 
     #[test]
     fn slow_down_constant_matches_rfc() {
