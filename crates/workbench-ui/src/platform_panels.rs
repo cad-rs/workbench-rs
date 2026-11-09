@@ -184,7 +184,7 @@ impl wb::ViewInstance for PluginsPanel {
                                 .px_2()
                                 .py_0p5()
                                 .rounded(px(3.))
-                                .bg(col(Color::rgb(0.30, 0.31, 0.36)))
+                                .bg(col(crate::theme::CONTROL_BG))
                                 .text_size(px(11.))
                                 .child(disable_label)
                                 .on_mouse_down(gpui::MouseButton::Left, move |_ev, _window, _cx| {

@@ -18,7 +18,7 @@ use ribbon::{
 use workbench_api as wb;
 use workbench_core::AppRuntime;
 
-use crate::{RootView, SharedCore, notify};
+use crate::{RootView, SharedCore, lock, notify};
 
 // ---- Model projection (pure; unit-testable without a window) ----
 
@@ -190,12 +190,12 @@ impl RibbonHost {
         }
         // Seed the collapsed runtime state from the persisted workspace value.
         let persisted_collapsed = {
-            let core = core.lock().unwrap_or_else(|p| p.into_inner());
+            let core = lock(&core);
             core.host.ws.ribbon_collapsed
         };
         self.collapsed.set(persisted_collapsed);
         let model = {
-            let core = core.lock().unwrap_or_else(|p| p.into_inner());
+            let core = lock(&core);
             build_model(&core, self.collapsed.get())
         };
         let core = core.clone();
@@ -216,7 +216,7 @@ impl RibbonHost {
         // toggled externally — the Ctrl+F1 command path — adopt it so the
         // runtime stays in sync) and the model projection.
         let model = {
-            let core = core.lock().unwrap_or_else(|p| p.into_inner());
+            let core = lock(&core);
             let ws_collapsed = core.host.ws.ribbon_collapsed;
             if ws_collapsed != self.collapsed.get() {
                 self.collapsed.set(ws_collapsed);
@@ -247,21 +247,17 @@ fn handle_event(
 ) {
     match event {
         RibbonEvent::Command { id, value } => {
-            let result = core
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
+            let result = lock(&core)
                 .execute_command(&id, &wb::CommandArgs { value, ..Default::default() });
             if let wb::CommandResult::Failed { error } = result {
-                core.lock()
-                    .unwrap_or_else(|p| p.into_inner())
+                lock(&core)
                     .host
                     .log
                     .error(error);
             }
         }
         RibbonEvent::ActiveTabChanged { id } => {
-            core.lock()
-                .unwrap_or_else(|p| p.into_inner())
+            lock(&core)
                 .host
                 .ws
                 .set_active_ribbon_tab(&id);
@@ -271,8 +267,7 @@ fn handle_event(
             // the request. Sync to the workspace so it persists across sessions.
             let new_collapsed = !state.model().collapsed;
             collapsed.set(new_collapsed);
-            core.lock()
-                .unwrap_or_else(|p| p.into_inner())
+            lock(&core)
                 .host
                 .ws
                 .ribbon_collapsed = new_collapsed;

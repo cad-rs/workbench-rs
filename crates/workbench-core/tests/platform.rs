@@ -3,6 +3,7 @@
 use workbench_api as wb;
 use wb::AppServices as _;
 use workbench_core::{AppRuntime, WorkbenchAppBuilder};
+use std::sync::Arc;
 
 /// A test Workbench: one command, one panel, one view, one document type.
 struct TestWb;
@@ -904,7 +905,7 @@ impl wb::StorageProvider for MemoryStorage {
 
 #[test]
 fn storage_save_through_provider_and_reopen() {
-    let memory = std::sync::Arc::new(MemoryStorage::default());
+    let memory = Arc::new(MemoryStorage::default());
     let mut app = builder().with_storage("mem", memory.clone()).build().expect("assembly failed");
     let doc = app.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), "Untitled").unwrap();
     app.host.docs.commit(doc, "edit", true, Box::new(TestDoc)).unwrap();
@@ -915,9 +916,9 @@ fn storage_save_through_provider_and_reopen() {
         doc,
         Some(location.clone()),
     );
-    assert!(!matches!(started, wb::CommandResult::Failed { .. }));
+    assert!(started.is_ok());
     assert!(app.host.docs.get(doc).unwrap().dirty, "still unsaved until the write completes");
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     assert!(memory.files.lock().unwrap().contains_key("projects/part.shapes"));
     let saved = app.host.docs.get(doc).unwrap();
     assert_eq!(saved.title, "part");
@@ -926,7 +927,7 @@ fn storage_save_through_provider_and_reopen() {
 
     let mut ctx = wb::CommandCtx::new(&mut app);
     workbench_core::platform_cmds::open_document(&mut ctx, location.clone());
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     let opened = app.host.docs.active().expect("the opened document becomes active");
     assert_ne!(opened.id, doc);
     assert_eq!(opened.location.as_ref(), Some(&location));
@@ -939,7 +940,7 @@ fn storage_unregistered_provider_logs_error() {
         &mut wb::CommandCtx::new(&mut app),
         wb::Location::new("nowhere", "a.shapes"),
     );
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     assert!(!app.host.docs.docs().any(|d| d.location.is_some()));
     assert!(app
         .host
@@ -1034,7 +1035,7 @@ fn empty_dir(test: &str) -> std::path::PathBuf {
 
 fn open_and_pump(app: &mut AppRuntime, location: &wb::Location) {
     workbench_core::platform_cmds::open_document(&mut wb::CommandCtx::new(app), location.clone());
-    assert!(pump(app, std::time::Duration::from_secs(5)));
+    settle(app);
 }
 
 fn save_and_pump(app: &mut AppRuntime, doc: wb::DocumentId) {
@@ -1043,8 +1044,8 @@ fn save_and_pump(app: &mut AppRuntime, doc: wb::DocumentId) {
         doc,
         None,
     );
-    assert!(!matches!(started, wb::CommandResult::Failed { .. }));
-    assert!(pump(app, std::time::Duration::from_secs(5)));
+    assert!(started.is_ok());
+    settle(app);
 }
 
 #[test]
@@ -1091,7 +1092,7 @@ fn saving_an_upgraded_local_file_keeps_the_original_beside_it() {
 
 #[test]
 fn a_file_is_not_replaced_when_its_old_version_cannot_be_kept() {
-    let memory = std::sync::Arc::new(MemoryStorage::default());
+    let memory = Arc::new(MemoryStorage::default());
     memory.files.lock().unwrap().insert("part.vers".to_string(), b"v1:data".to_vec());
     memory.refused.lock().unwrap().push("part.v1.vers".to_string());
     let mut app = builder()
@@ -1105,7 +1106,7 @@ fn a_file_is_not_replaced_when_its_old_version_cannot_be_kept() {
     save_and_pump(&mut app, id);
     assert_eq!(memory.files.lock().unwrap()["part.vers"], b"v1:data");
     assert_eq!(app.host.docs.get(id).unwrap().upgraded_from, Some(1));
-    assert!(app.host.log.entries().any(|e| e.message.contains("Failed to write mem:part.v1.vers")));
+    assert!(logged(&app, "Failed to write mem:part.v1.vers"));
 
     // Once the copy can be made, the same save goes through.
     memory.refused.lock().unwrap().clear();
@@ -1117,7 +1118,7 @@ fn a_file_is_not_replaced_when_its_old_version_cannot_be_kept() {
 
 #[test]
 fn a_file_from_a_newer_build_is_refused_and_left_alone() {
-    let memory = std::sync::Arc::new(MemoryStorage::default());
+    let memory = Arc::new(MemoryStorage::default());
     memory.files.lock().unwrap().insert("part.vers".to_string(), b"v9:data".to_vec());
     let mut app = builder()
         .with_workbench(VersionedWb)
@@ -1127,7 +1128,7 @@ fn a_file_from_a_newer_build_is_refused_and_left_alone() {
 
     open_and_pump(&mut app, &wb::Location::new("mem", "part.vers"));
     assert!(!app.host.docs.docs().any(|doc| doc.location.is_some()));
-    assert!(app.host.log.entries().any(|e| e.message.contains("update the application")));
+    assert!(logged(&app, "update the application"));
     assert_eq!(memory.files.lock().unwrap()["part.vers"], b"v9:data");
 }
 
@@ -1165,7 +1166,7 @@ fn autosaves_upgrade_on_recovery_and_unreadable_ones_are_kept() {
     assert!(recovered[0].dirty);
     let text = app.host.docs.read::<String, _>(recovered[0].id, Clone::clone);
     assert_eq!(text.as_deref(), Some("data (upgraded)"));
-    assert!(app.host.log.entries().any(|e| e.message.contains("update the application")));
+    assert!(logged(&app, "update the application"));
     assert_eq!(
         app.state().keys("autosave/"),
         ["autosave/newer_.json", "autosave/newer_.vers"],
@@ -1187,7 +1188,7 @@ fn a_layout_from_a_newer_build_falls_back_to_the_default() {
     layout["version"] = (wb::LAYOUT_VERSION + 1).into();
     app.state().write("layout.json", layout.to_string().as_bytes()).unwrap();
     assert!(app.load_layout().is_none());
-    assert!(app.host.log.entries().any(|e| e.message.contains("newer format")));
+    assert!(logged(&app, "newer format"));
     drop(app);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1250,10 +1251,8 @@ impl wb::Workbench for GatedWb {
 
 #[test]
 fn a_command_behind_a_feature_follows_the_product_answer() {
-    let switch = std::sync::Arc::new(FeatureSwitch::default());
-    let mut app = builder()
-        .with_workbench(GatedWb)
-        .with_entitlements(switch.clone())
+    let switch = Arc::new(FeatureSwitch::default());
+    let mut app = gated_builder(switch.clone())
         .build()
         .unwrap();
     let args = wb::CommandArgs::default();
@@ -1264,15 +1263,12 @@ fn a_command_behind_a_feature_follows_the_product_answer() {
         app.execute_command("test.gated", &args),
         wb::CommandResult::Failed { error } if error == "pro.export needs an upgrade"
     ));
-    assert!(app.host.log.entries().any(|e| e.message == "pro.export needs an upgrade"));
+    assert!(logged(&app, "pro.export needs an upgrade"));
 
     // An activation while the app runs takes effect without a restart.
     switch.set(&["pro.export"]);
     assert!(app.is_enabled("test.gated"));
-    assert!(!matches!(
-        app.execute_command("test.gated", &args),
-        wb::CommandResult::Failed { .. }
-    ));
+    assert!(app.execute_command("test.gated", &args).is_ok());
     assert!(app.host.allows("pro.export"));
     assert!(!app.host.allows("pro.import"));
 }
@@ -1283,19 +1279,18 @@ fn without_entitlements_every_feature_is_allowed() {
     assert!(panel_visible(&app, "test.gated_panel"));
     wb::CommandCtx::new(&mut app).open_view("test.gated_view", false).unwrap();
     assert!(app.is_enabled("test.gated"));
-    assert!(!matches!(
-        app.execute_command("test.gated", &wb::CommandArgs::default()),
-        wb::CommandResult::Failed { .. }
-    ));
+    assert!(app.execute_command("test.gated", &wb::CommandArgs::default()).is_ok());
     assert!(app.host.allows("anything"));
 }
 
+fn gated_builder(entitlements: Arc<dyn wb::Entitlements>) -> WorkbenchAppBuilder {
+    builder().with_workbench(GatedWb).with_entitlements(entitlements)
+}
+
 /// A runtime with the gated items, starting with the given features allowed.
-fn gated_app(switch: &std::sync::Arc<FeatureSwitch>, allowed: &[&str]) -> AppRuntime {
+fn gated_app(switch: &Arc<FeatureSwitch>, allowed: &[&str]) -> AppRuntime {
     switch.set(allowed);
-    let mut app = builder()
-        .with_workbench(GatedWb)
-        .with_entitlements(switch.clone())
+    let mut app = gated_builder(switch.clone())
         .build()
         .unwrap();
     settle(&mut app);
@@ -1320,7 +1315,7 @@ const TOGGLE_GATED_PANEL: &str = "app.toggle_panel.test.gated_panel";
 
 #[test]
 fn a_view_behind_a_feature_opens_only_when_allowed() {
-    let switch = std::sync::Arc::new(FeatureSwitch::default());
+    let switch = Arc::new(FeatureSwitch::default());
     let mut app = gated_app(&switch, &[]);
 
     let refused = wb::CommandCtx::new(&mut app).open_view("test.gated_view", false);
@@ -1334,7 +1329,7 @@ fn a_view_behind_a_feature_opens_only_when_allowed() {
 
 #[test]
 fn a_panel_behind_a_feature_starts_hidden_and_its_toggle_follows() {
-    let switch = std::sync::Arc::new(FeatureSwitch::default());
+    let switch = Arc::new(FeatureSwitch::default());
     let mut app = gated_app(&switch, &[]);
 
     assert!(!panel_visible(&app, "test.gated_panel"));
@@ -1355,23 +1350,21 @@ fn a_panel_behind_a_feature_starts_hidden_and_its_toggle_follows() {
 
 #[test]
 fn gaining_a_feature_asks_for_one_redraw() {
-    let switch = std::sync::Arc::new(FeatureSwitch::default());
+    let switch = Arc::new(FeatureSwitch::default());
     let mut app = gated_app(&switch, &[]);
     assert!(!app.frame_tick(0.0), "nothing changed");
 
     switch.set(&["pro.export"]);
     assert!(app.frame_tick(0.0), "the disabled controls need redrawing");
     assert!(!app.frame_tick(0.0), "once is enough");
-    assert!(app.host.log.entries().any(|e| e.message == "The available features changed"));
+    assert!(logged(&app, "The available features changed"));
 }
 
 #[test]
 fn a_feature_lost_before_the_first_check_ends_closes_what_it_gated() {
-    let switch = std::sync::Arc::new(FeatureSwitch::default());
+    let switch = Arc::new(FeatureSwitch::default());
     switch.set(&["pro.view", "pro.panel"]);
-    let mut app = builder()
-        .with_workbench(GatedWb)
-        .with_entitlements(switch.clone())
+    let mut app = gated_builder(switch.clone())
         .build()
         .unwrap();
     let doc = app.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), "Draft").unwrap();
@@ -1383,19 +1376,17 @@ fn a_feature_lost_before_the_first_check_ends_closes_what_it_gated() {
     assert!(app.frame_tick(0.0));
     assert!(!tab_open(&app, "test.gated_view"));
     assert!(!panel_visible(&app, "test.gated_panel"));
-    assert!(app.host.log.entries().any(|e| e.message == "pro.view needs an upgrade"));
-    assert!(app.host.log.entries().any(|e| e.message == "pro.panel needs an upgrade"));
+    assert!(logged(&app, "pro.view needs an upgrade"));
+    assert!(logged(&app, "pro.panel needs an upgrade"));
     assert!(app.host.docs.get(doc).is_some_and(|doc| doc.dirty), "the document is untouched");
 }
 
 #[test]
 fn a_restored_layout_cannot_bring_back_what_is_not_allowed() {
     let dir = empty_dir("entitlements-layout");
-    let switch = std::sync::Arc::new(FeatureSwitch::default());
+    let switch = Arc::new(FeatureSwitch::default());
     let session = || {
-        builder()
-            .with_workbench(GatedWb)
-            .with_entitlements(switch.clone())
+        gated_builder(switch.clone())
             .with_layout_path(dir.join("layout.json"))
             .build()
             .unwrap()
@@ -1444,7 +1435,7 @@ impl wb::Entitlements for Subscription {
     fn allows(&self, feature: &str) -> bool {
         self.active.lock().unwrap().iter().any(|active| active == feature)
     }
-    fn refresh(self: std::sync::Arc<Self>) -> wb::BoxFuture<Result<(), String>> {
+    fn refresh(self: Arc<Self>) -> wb::BoxFuture<Result<(), String>> {
         Box::pin(async move {
             self.checks.fetch_add(1, Ordering::SeqCst);
             if self.offline.load(Ordering::SeqCst) {
@@ -1456,18 +1447,14 @@ impl wb::Entitlements for Subscription {
     }
 }
 
-fn subscribed_builder(subscription: &std::sync::Arc<Subscription>) -> WorkbenchAppBuilder {
-    builder().with_workbench(GatedWb).with_entitlements(subscription.clone())
-}
-
 fn logged(app: &AppRuntime, text: &str) -> bool {
     app.host.log.entries().any(|entry| entry.message.contains(text))
 }
 
 #[test]
 fn a_plan_bought_in_the_browser_applies_when_the_user_comes_back() {
-    let subscription = std::sync::Arc::new(Subscription::default());
-    let mut app = subscribed_builder(&subscription).build().unwrap();
+    let subscription = Arc::new(Subscription::default());
+    let mut app = gated_builder(subscription.clone()).build().unwrap();
     settle(&mut app);
     assert_eq!(subscription.checks(), 1, "startup checks");
     assert!(!app.is_enabled("test.gated"));
@@ -1499,9 +1486,9 @@ fn a_plan_bought_in_the_browser_applies_when_the_user_comes_back() {
 
 #[test]
 fn a_failed_refresh_keeps_the_answers_and_only_the_user_hears_of_it() {
-    let subscription = std::sync::Arc::new(Subscription::default());
+    let subscription = Arc::new(Subscription::default());
     subscription.sell(&["pro.export"]);
-    let mut app = subscribed_builder(&subscription).build().unwrap();
+    let mut app = gated_builder(subscription.clone()).build().unwrap();
     settle(&mut app);
     assert!(app.is_enabled("test.gated"));
 
@@ -1556,9 +1543,9 @@ impl wb::AccountService for InstantAccount {
 
 #[test]
 fn signing_in_and_out_fetches_the_answers_for_the_new_user() {
-    let subscription = std::sync::Arc::new(Subscription::default());
-    let mut app = subscribed_builder(&subscription)
-        .with_account(std::sync::Arc::new(InstantAccount))
+    let subscription = Arc::new(Subscription::default());
+    let mut app = gated_builder(subscription.clone())
+        .with_account(Arc::new(InstantAccount))
         .build()
         .unwrap();
     settle(&mut app);
@@ -1582,11 +1569,11 @@ fn signing_in_and_out_fetches_the_answers_for_the_new_user() {
 #[test]
 fn a_lost_feature_stays_until_the_next_launch() {
     let dir = empty_dir("entitlements-grace");
-    let subscription = std::sync::Arc::new(Subscription::default());
+    let subscription = Arc::new(Subscription::default());
     subscription.remember(&["pro.view", "pro.panel", "pro.export"]);
     subscription.sell(&["pro.view", "pro.panel", "pro.export"]);
     let session = || {
-        subscribed_builder(&subscription)
+        gated_builder(subscription.clone())
             .with_layout_path(dir.join("layout.json"))
             .build()
             .unwrap()
@@ -1621,9 +1608,9 @@ fn a_lost_feature_stays_until_the_next_launch() {
 
 #[test]
 fn a_plan_that_lapsed_between_launches_ends_with_the_startup_check() {
-    let subscription = std::sync::Arc::new(Subscription::default());
+    let subscription = Arc::new(Subscription::default());
     subscription.remember(&["pro.export"]);
-    let mut app = subscribed_builder(&subscription).build().unwrap();
+    let mut app = gated_builder(subscription.clone()).build().unwrap();
     assert!(app.is_enabled("test.gated"), "the cached plan, until the check ends");
     settle(&mut app);
     assert!(!app.is_enabled("test.gated"));
@@ -1631,10 +1618,10 @@ fn a_plan_that_lapsed_between_launches_ends_with_the_startup_check() {
 
 #[test]
 fn offline_at_launch_keeps_the_cached_plan_for_the_session() {
-    let subscription = std::sync::Arc::new(Subscription::default());
+    let subscription = Arc::new(Subscription::default());
     subscription.remember(&["pro.export"]);
     subscription.offline.store(true, Ordering::SeqCst);
-    let mut app = subscribed_builder(&subscription).build().unwrap();
+    let mut app = gated_builder(subscription.clone()).build().unwrap();
     settle(&mut app);
     app.frame_tick(0.0);
     assert!(app.is_enabled("test.gated"));
@@ -1648,10 +1635,10 @@ fn offline_at_launch_keeps_the_cached_plan_for_the_session() {
 
 #[test]
 fn signing_out_ends_the_grace() {
-    let subscription = std::sync::Arc::new(Subscription::default());
+    let subscription = Arc::new(Subscription::default());
     subscription.sell(&["pro.export"]);
-    let mut app = subscribed_builder(&subscription)
-        .with_account(std::sync::Arc::new(InstantAccount))
+    let mut app = gated_builder(subscription.clone())
+        .with_account(Arc::new(InstantAccount))
         .build()
         .unwrap();
     settle(&mut app);
@@ -1667,11 +1654,7 @@ fn signing_out_ends_the_grace() {
 #[test]
 fn refresh_license_is_offered_only_when_the_product_limits_features() {
     let help_has_it = |app: &AppRuntime| {
-        app.host
-            .ws
-            .ribbon
-            .iter()
-            .flat_map(|tab| &tab.groups)
+        app.host.ws.ribbon_groups()
             .filter(|group| group.id.0 == "app.help")
             .flat_map(|group| &group.items)
             .any(|item| item.command.0 == "app.license.refresh")
@@ -1682,8 +1665,8 @@ fn refresh_license_is_offered_only_when_the_product_limits_features() {
     plain.window_activated();
     assert_eq!(plain.pending_io(), 0, "nothing to fetch");
 
-    let subscription = std::sync::Arc::new(Subscription::default());
-    let limited = subscribed_builder(&subscription).build().unwrap();
+    let subscription = Arc::new(Subscription::default());
+    let limited = gated_builder(subscription.clone()).build().unwrap();
     assert!(limited.is_enabled("app.license.refresh"));
     assert!(help_has_it(&limited));
 }
@@ -1693,20 +1676,12 @@ fn refresh_license_is_offered_only_when_the_product_limits_features() {
 #[test]
 fn settings_open_as_a_dialog_from_the_view_group() {
     let mut app = app();
-    assert!(!app.host.ws.settings_open);
+    assert_eq!(app.host.ws.dialog, None);
     assert!(app.is_enabled("app.settings.open"));
-    assert!(!matches!(
-        app.execute_command("app.settings.open", &wb::CommandArgs::default()),
-        wb::CommandResult::Failed { .. }
-    ));
-    assert!(app.host.ws.settings_open);
+    assert!(app.execute_command("app.settings.open", &wb::CommandArgs::default()).is_ok());
+    assert_eq!(app.host.ws.dialog, Some(wb::PlatformDialog::Settings));
 
-    let view_group = app
-        .host
-        .ws
-        .ribbon
-        .iter()
-        .flat_map(|tab| &tab.groups)
+    let view_group = app.host.ws.ribbon_groups()
         .find(|group| group.id.0 == "app.window")
         .expect("the View group");
     assert_eq!(view_group.items.last().unwrap().command.0, "app.settings.open");
@@ -1717,11 +1692,8 @@ fn settings_open_as_a_dialog_from_the_view_group() {
 #[test]
 fn the_command_listing_shows_what_the_user_can_run() {
     let mut app = app();
-    assert!(!matches!(
-        app.execute_command("app.shortcuts.open", &wb::CommandArgs::default()),
-        wb::CommandResult::Failed { .. }
-    ));
-    assert!(app.host.ws.shortcuts_open);
+    assert!(app.execute_command("app.shortcuts.open", &wb::CommandArgs::default()).is_ok());
+    assert_eq!(app.host.ws.dialog, Some(wb::PlatformDialog::Shortcuts));
 
     let mut tools = wb::ToolbarGroup::new("test.tools", "Tools");
     tools.items = vec![
@@ -1763,10 +1735,49 @@ fn the_command_listing_shows_what_the_user_can_run() {
         assert!(row(hidden).is_none(), "{hidden} is not listed");
     }
 
-    app.host.ws.ribbon_collapse_enabled = true;
-    let listing = app.command_listing();
+    let collapsible = builder().ribbon_collapse_enabled(true).build().unwrap();
+    let listing = collapsible.command_listing();
     let collapse = listing.iter().find(|row| row.label == "Collapse/Expand Ribbon");
     assert_eq!(collapse.unwrap().hotkey.as_deref(), Some("Ctrl+F1"));
+}
+
+#[test]
+fn hotkeys_wait_while_a_modal_overlay_is_open() {
+    let mut app = app();
+    let hotkey = wb::Hotkey::parse("Ctrl+T").unwrap();
+    assert!(app.press_hotkey(hotkey));
+    assert!(!app.press_hotkey(wb::Hotkey::parse("Ctrl+Shift+T").unwrap()), "bound to nothing");
+
+    assert!(app.execute_command("app.about", &wb::CommandArgs::default()).is_ok());
+    assert_eq!(app.host.ws.dialog, Some(wb::PlatformDialog::About));
+    assert!(!app.press_hotkey(hotkey));
+
+    app.host.ws.dialog = None;
+    assert!(app.press_hotkey(hotkey));
+}
+
+#[test]
+fn autosave_writes_a_document_only_when_it_changed() {
+    let dir = empty_dir("autosave-unchanged");
+    let mut app = builder().with_layout_path(dir.join("layout.json")).build().unwrap();
+    let doc = app.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), "Draft").unwrap();
+    app.host.docs.commit(doc, "edit", true, Box::new(TestDoc)).unwrap();
+    let written = |app: &AppRuntime| app.state().keys("autosave/");
+
+    assert_eq!(app.autosave_now(), Ok(1));
+    assert!(!written(&app).is_empty());
+
+    for key in written(&app) {
+        app.state().remove(&key);
+    }
+    assert_eq!(app.autosave_now(), Ok(1), "it still counts");
+    assert!(written(&app).is_empty(), "nothing new to write");
+
+    app.host.docs.commit(doc, "edit", true, Box::new(TestDoc)).unwrap();
+    assert_eq!(app.autosave_now(), Ok(1));
+    assert!(!written(&app).is_empty());
+    drop(app);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- Diagnostics ----
@@ -1786,7 +1797,7 @@ impl wb::CrashReporter for RecordingReporter {
 #[test]
 fn crash_reports_are_sent_only_once_the_user_agrees() {
     let dir = empty_dir("crash-consent");
-    let reporter = std::sync::Arc::new(RecordingReporter::default());
+    let reporter = Arc::new(RecordingReporter::default());
     let session = || {
         builder()
             .with_layout_path(dir.join("layout.json"))
@@ -1802,14 +1813,14 @@ fn crash_reports_are_sent_only_once_the_user_agrees() {
     drop(app);
 
     let mut app = session();
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     assert!(reporter.0.lock().unwrap().is_empty(), "nothing leaves without consent");
     app.host.settings.set(SEND_CRASH_REPORTS, serde_json::json!(true)).unwrap();
     state.write("crashes/crash-2.txt", b"second").unwrap();
     drop(app);
 
     let mut app = session();
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     assert_eq!(
         *reporter.0.lock().unwrap(),
         [("crash-2.txt".to_string(), "second".to_string())],
@@ -1862,13 +1873,13 @@ fn the_diagnostics_report_gathers_what_support_needs() {
 
 #[test]
 fn export_diagnostics_writes_the_report_where_the_user_picks() {
-    let memory = std::sync::Arc::new(MemoryStorage::default());
+    let memory = Arc::new(MemoryStorage::default());
     let mut app = builder().with_storage("mem", memory.clone()).build().unwrap();
     app.execute_command("app.export_diagnostics", &wb::CommandArgs::default());
     assert!(app.host.ws.file_picker.is_some(), "the save dialog asks where");
 
     app.finish_file_dialog(Some(wb::Location::new("mem", "support/diagnostics.txt")));
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     let text = memory.files.lock().unwrap()["support/diagnostics.txt"].clone();
     assert!(String::from_utf8(text).unwrap().starts_with("Test Product"));
 }
@@ -1887,7 +1898,7 @@ fn listing(app: &AppRuntime) -> Vec<String> {
 fn storage_in_app_picker_open_and_save_as() {
     use workbench_core::file_picker;
 
-    let memory = std::sync::Arc::new(MemoryStorage::with_files(&[
+    let memory = Arc::new(MemoryStorage::with_files(&[
         "projects/part.shapes",
         "projects/notes.txt",
         "top.shapes",
@@ -1897,17 +1908,17 @@ fn storage_in_app_picker_open_and_save_as() {
 
     // Open: the picker lists the root, folders first, files filtered by type.
     app.execute_command("app.open_document", &wb::CommandArgs::default());
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     assert_eq!(listing(&app), ["projects/", "top.shapes"]);
     let picker = app.host.ws.file_picker.as_ref().unwrap();
     assert_eq!(picker.sources, [("mem".to_string(), "Memory".to_string())]);
     let folder = picker.listing.as_ref().unwrap().as_ref().unwrap()[0].clone();
     file_picker::navigate(&mut wb::CommandCtx::new(&mut app), |p| p.enter(&folder));
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     assert_eq!(listing(&app), ["part.shapes"], "notes.txt is filtered out");
     let part = wb::Location::new("mem", "projects/part.shapes");
     app.finish_file_dialog(Some(part.clone()));
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     assert!(app.host.ws.file_picker.is_none());
     let opened = app.host.docs.active().expect("opened");
     assert_eq!((opened.title.as_str(), opened.location.as_ref()), ("part", Some(&part)));
@@ -1915,29 +1926,29 @@ fn storage_in_app_picker_open_and_save_as() {
     // Save as: a new folder through the picker's prompt command, then a
     // typed name, completed with the type's extension.
     app.execute_command("app.save_document_as", &wb::CommandArgs::default());
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     let picker = app.host.ws.file_picker.as_ref().expect("save picker");
     assert_eq!(picker.save.as_deref(), Some("part.shapes"));
     let created = app.execute_command(
         file_picker::NEW_FOLDER,
         &wb::CommandArgs::new().with("value", "copies"),
     );
-    assert!(!matches!(created, wb::CommandResult::Failed { .. }), "{created:?}");
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    assert!(created.is_ok(), "{created:?}");
+    settle(&mut app);
     assert_eq!(listing(&app), ["copies/", "projects/", "top.shapes"]);
     let target = app.host.ws.file_picker.as_ref().unwrap().target("copy").unwrap();
     assert_eq!(target, wb::Location::new("mem", "copy.shapes"));
     app.finish_file_dialog(Some(target.clone()));
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     assert!(memory.files.lock().unwrap().contains_key("copy.shapes"));
     assert_eq!(app.host.docs.active().unwrap().location.as_ref(), Some(&target));
 
     // Cancel closes the picker and runs nothing.
     app.execute_command("app.open_document", &wb::CommandArgs::default());
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     let docs = app.host.docs.docs().count();
     app.finish_file_dialog(None);
-    assert!(pump(&mut app, std::time::Duration::from_secs(5)));
+    settle(&mut app);
     assert!(app.host.ws.file_picker.is_none());
     assert_eq!(app.host.docs.docs().count(), docs);
 }

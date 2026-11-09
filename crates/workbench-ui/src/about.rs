@@ -1,33 +1,28 @@
 //! About dialog overlay: logo + product name + version + copyright + links.
 //!
-//! Rendered by the root view while `ws.about_open` is set (the `app.about`
-//! platform command sets it; the dialog's close button clears it). A plain
-//! overlay div keeps the dialog independent of gpui-component's Root-hosted
-//! Modal.
+//! A plain overlay div keeps the dialog independent of gpui-component's
+//! Root-hosted Modal.
 
 use gpui::{
     ClickEvent, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Icon, Sizable as _, Size};
 use workbench_api as wb;
 
-use crate::{SharedCore, col, dialog};
+use crate::dialog::{self, DialogFocus};
+use crate::{SharedCore, col, lock};
 
-/// Renders the About overlay for the current product profile. Returns `None`
-/// when the dialog is not open (the common per-frame case).
-pub(crate) fn maybe_about_overlay(
+/// Renders the About overlay for the current product profile.
+pub(crate) fn overlay(
     core: &SharedCore,
+    focus: &DialogFocus,
     cx: &mut Context<crate::RootView>,
-) -> Option<gpui::AnyElement> {
+) -> gpui::AnyElement {
     // Snapshot everything the dialog needs while holding the lock: the
     // profile, the product name and the handful of translated labels.
     let snap = {
-        let guard = core.lock().unwrap_or_else(|p| p.into_inner());
-        if !guard.host.ws.about_open {
-            return None;
-        }
+        let guard = lock(core);
         AboutSnap {
             profile: guard.profile().clone(),
             product_name: guard.product_name().to_string(),
@@ -37,7 +32,7 @@ pub(crate) fn maybe_about_overlay(
             close_label: guard.host.tr("Close"),
         }
     };
-    Some(render_about(&snap, core, cx).into_any_element())
+    render_about(&snap, core, focus, cx).into_any_element()
 }
 
 /// Everything the About overlay renders, snapshotted under the runtime lock.
@@ -53,15 +48,13 @@ struct AboutSnap {
 fn render_about(
     snap: &AboutSnap,
     core: &SharedCore,
+    focus: &DialogFocus,
     cx: &mut Context<crate::RootView>,
 ) -> gpui::Stateful<Div> {
     let profile = &snap.profile;
     let version = format!("{} {}", snap.version_label, profile.display_version());
 
-    // Backdrop: click closes the dialog (same as the close button).
-    let core_bg = core.clone();
-    let (overlay, card) =
-        dialog::centered("about", 360.0, move || set_about_open(&core_bg, false), cx);
+    let (overlay, card) = dialog::platform_shell("about", 360.0, core, focus, cx);
     let mut card = card.p(px(24.0)).gap(px(12.0));
 
     // Header: logo (when the product ships one) + name + version.
@@ -116,20 +109,7 @@ fn render_about(
             footer = footer.child(link_label(label, url, cx));
         }
     }
-    let core_btn = core.clone();
-    let close_label = snap.close_label.clone();
-    footer = footer.child(
-        Button::new("about-close")
-            .primary()
-            .small()
-            .child(close_label)
-            .on_click(cx.listener(
-                move |_: &mut crate::RootView, _: &ClickEvent, _: &mut Window, cx| {
-                    set_about_open(&core_btn, false);
-                    cx.notify();
-                },
-            )),
-    );
+    footer = footer.child(dialog::close_button("about", snap.close_label.clone(), core, cx));
     card = card.child(footer);
 
     overlay.child(card)
@@ -152,10 +132,4 @@ fn link_label(label: &str, url: &str, cx: &mut Context<crate::RootView>) -> gpui
                 cx.open_url(&url);
             },
         ))
-}
-
-fn set_about_open(core: &SharedCore, open: bool) {
-    if let Ok(mut guard) = core.lock() {
-        guard.host.ws.about_open = open;
-    }
 }

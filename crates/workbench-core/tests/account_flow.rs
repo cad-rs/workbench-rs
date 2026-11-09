@@ -36,20 +36,6 @@ impl MockState {
     }
 }
 
-/// Start a mock OIDC server on an ephemeral port; returns the issuer URL.
-fn start_mock(state: Arc<MockState>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
-    let issuer = format!("http://{}", listener.local_addr().unwrap());
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { return };
-            let state = state.clone();
-            std::thread::spawn(move || serve_one(stream, &state));
-        }
-    });
-    issuer
-}
-
 /// Serve one HTTP/1.1 request on `stream` (connection-per-request; ureq is
 /// fine with `Connection: close`).
 fn serve_one(mut stream: TcpStream, state: &MockState) {

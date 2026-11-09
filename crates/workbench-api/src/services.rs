@@ -116,7 +116,7 @@ impl ServiceHost {
     /// Platform uptime (seconds).
     /// Whether the user may use `feature` (see [`crate::Entitlements`]).
     pub fn allows(&self, feature: &str) -> bool {
-        self.refusal(feature).is_none()
+        self.entitlements.as_ref().map_or(true, |entitlements| entitlements.allows(feature))
     }
 
     /// Why the user may not use `feature`; None when they may.

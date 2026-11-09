@@ -35,6 +35,14 @@ impl DockArea {
 // ---- Toolbar (RibbonBar: Tab → Group → Items, stable IDs + command binding + button kinds,
 // ribbon-bar.md §2.4/§6) ----
 
+/// The platform's modal dialogs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlatformDialog {
+    About,
+    Settings,
+    Shortcuts,
+}
+
 /// Ribbon item kind (ribbon-bar.md §2.4). Defaults (`Default` and serde) to
 /// [`RibbonItemKind::Command`], so old data and old registration code keep working unchanged.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -539,15 +547,8 @@ pub struct WorkspaceState {
     /// product turns it on through the builder. Gates rendering the collapse button, tab
     /// double-click and the Ctrl+F1 hotkey.
     pub ribbon_collapse_enabled: bool,
-    /// About dialog open flag (set by the `app.about` command; the frontend renders the dialog
-    /// and closes it).
-    pub about_open: bool,
-    /// Settings dialog open flag (set by the `app.settings.open` command; the frontend renders
-    /// the dialog and closes it).
-    pub settings_open: bool,
-    /// Commands & Shortcuts dialog open flag (set by the `app.shortcuts.open` command; the
-    /// frontend renders the dialog and closes it).
-    pub shortcuts_open: bool,
+    /// The open dialog (set by its command; the frontend renders it and closes it).
+    pub dialog: Option<PlatformDialog>,
     /// A page for the frontend to open in the browser, which then clears this.
     pub url_to_open: Option<String>,
     /// Active settings text edit (`app.settings.edit_begin`): the key being
@@ -586,9 +587,7 @@ impl WorkspaceState {
             qat: Vec::new(),
             ribbon_collapsed: false,
             ribbon_collapse_enabled: false,
-            about_open: false,
-            settings_open: false,
-            shortcuts_open: false,
+            dialog: None,
             url_to_open: None,
             text_edit: None,
             file_picker: None,
@@ -668,6 +667,17 @@ impl WorkspaceState {
         if self.ribbon.iter().any(|t| t.id.0 == id) {
             self.active_ribbon_tab = id.to_string();
         }
+    }
+
+    /// Whether a modal overlay is open. Hotkeys wait meanwhile, so a key typed into a text
+    /// field does not also fire as a shortcut.
+    pub fn is_modal(&self) -> bool {
+        self.dialog.is_some() || self.text_edit.is_some() || self.file_picker.is_some()
+    }
+
+    /// Every group of every ribbon tab.
+    pub fn ribbon_groups(&self) -> impl Iterator<Item = &ToolbarGroup> {
+        self.ribbon.iter().flat_map(|tab| &tab.groups)
     }
 
     /// The active tab's group list; empty when there are no tabs.

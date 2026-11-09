@@ -162,7 +162,6 @@ impl wb::Workbench for PluginWb {
 #[test]
 fn disabling_a_plugin_removes_its_module_contributions() {
     let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counter = served.clone();
     let mut app = WorkbenchAppBuilder::new("test.disable", "Disable")
         .with_plugin_stage(workbench_rhai::plugin_stage(vec![fixture("with-modules")
             .parent()

@@ -84,7 +84,8 @@ pub use tasks::{
 pub use view::ViewInstance;
 pub use workbench::{boxed, Workbench};
 pub use workspace::{
-    AccountPhase, DockArea, ItemSize, LayoutFile, PanelDef, PanelSlot, RibbonItemKind, RibbonTab,
+    AccountPhase, DockArea, ItemSize, LayoutFile, PanelDef, PanelSlot, PlatformDialog,
+    RibbonItemKind, RibbonTab,
     SavedPanel, SavedTab, TabSlot, TextEdit, ToolbarGroup, ToolbarItem, ViewDef, ViewFactory,
     WorkspaceState, LAYOUT_VERSION,
 };

@@ -1,5 +1,5 @@
-//! The shell shared by the centered modal dialogs (About, Settings, Commands
-//! & Shortcuts).
+//! The shell of the modal overlays, and the platform's dialogs (About,
+//! Settings, Commands & Shortcuts), one open at a time in `ws.dialog`.
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, FocusHandle, KeyDownEvent, Stateful, Window, div,
@@ -10,7 +10,31 @@ use gpui_component::Sizable as _;
 use gpui_component::scroll::ScrollableElement as _;
 use workbench_api as wb;
 
-use crate::{col, theme};
+use crate::{RootView, SharedCore, col, lock, theme};
+
+/// The open platform dialog, while there is one.
+pub(crate) fn overlay(
+    core: &SharedCore,
+    focus: &mut DialogFocus,
+    window: &mut Window,
+    cx: &mut Context<RootView>,
+) -> Option<AnyElement> {
+    let (open, on_top) = {
+        let guard = lock(core);
+        let ws = &guard.host.ws;
+        (ws.dialog, ws.text_edit.is_none() && ws.file_picker.is_none())
+    };
+    focus.sync(open.is_some(), on_top, window, cx);
+    Some(match open? {
+        wb::PlatformDialog::About => crate::about::overlay(core, focus, cx),
+        wb::PlatformDialog::Settings => crate::settings::overlay(core, focus, cx),
+        wb::PlatformDialog::Shortcuts => crate::shortcuts::overlay(core, focus, cx),
+    })
+}
+
+fn close(core: &SharedCore) {
+    lock(core).host.ws.dialog = None;
+}
 
 /// A dimmed backdrop over the window and an empty card centered on it; the
 /// caller fills the card and puts it in the backdrop. Clicking the backdrop
@@ -19,9 +43,10 @@ pub(crate) fn centered(
     id: &str,
     width: f32,
     close: impl Fn() + 'static,
-    cx: &mut Context<crate::RootView>,
+    cx: &mut Context<RootView>,
 ) -> (Stateful<Div>, Stateful<Div>) {
     let theme = theme::ui_theme();
+    let edge = theme.placeholder;
     let backdrop = div()
         .id(format!("{id}-backdrop"))
         .occlude()
@@ -31,12 +56,10 @@ pub(crate) fn centered(
         .items_center()
         .justify_center()
         .bg(gpui::rgba(0x000000_40))
-        .on_click(cx.listener(
-            move |_: &mut crate::RootView, _: &ClickEvent, _: &mut Window, cx| {
-                close();
-                cx.notify();
-            },
-        ));
+        .on_click(cx.listener(move |_: &mut RootView, _: &ClickEvent, _: &mut Window, cx| {
+            close();
+            cx.notify();
+        }));
     let card = div()
         .id(format!("{id}-card"))
         .flex()
@@ -44,39 +67,65 @@ pub(crate) fn centered(
         .w(px(width))
         .rounded(px(8.0))
         .border_1()
-        .border_color(col(dim(theme.placeholder, 0.4)))
+        .border_color(col(wb::Color::rgb(edge.r * 0.4, edge.g * 0.4, edge.b * 0.4)))
         .bg(col(theme.bg))
         .text_color(col(wb::Color::LIGHT_GRAY))
-        .on_click(cx.listener(
-            |_: &mut crate::RootView, _: &ClickEvent, _: &mut Window, cx| {
-                cx.stop_propagation();
-            },
-        ));
+        .on_click(cx.listener(|_: &mut RootView, _: &ClickEvent, _: &mut Window, cx| {
+            cx.stop_propagation();
+        }));
     (backdrop, card)
 }
 
-/// A dialog of `rows` that scroll under a title, with a Close button. Escape,
-/// the button and the backdrop all call `close`.
-pub(crate) fn list(
+/// [`centered`], for a platform dialog: it holds the keyboard, and the
+/// backdrop or Escape closes it.
+pub(crate) fn platform_shell(
     id: &str,
-    title: String,
-    close_label: String,
-    rows: Vec<Div>,
+    width: f32,
+    core: &SharedCore,
     focus: &DialogFocus,
-    close: impl Fn() + Clone + 'static,
-    cx: &mut Context<crate::RootView>,
-) -> AnyElement {
-    let (backdrop, card) = centered(id, 520.0, close.clone(), cx);
-    let on_escape = close.clone();
+    cx: &mut Context<RootView>,
+) -> (Stateful<Div>, Stateful<Div>) {
+    let core_backdrop = core.clone();
+    let (backdrop, card) = centered(id, width, move || close(&core_backdrop), cx);
+    let core = core.clone();
     let backdrop = backdrop.track_focus(&focus.handle).on_key_down(cx.listener(
-        move |_: &mut crate::RootView, event: &KeyDownEvent, _: &mut Window, cx| {
+        move |_: &mut RootView, event: &KeyDownEvent, _: &mut Window, cx| {
             if event.keystroke.key == "escape" {
-                on_escape();
+                close(&core);
                 cx.notify();
                 cx.stop_propagation();
             }
         },
     ));
+    (backdrop, card)
+}
+
+pub(crate) fn close_button(
+    id: &str,
+    label: String,
+    core: &SharedCore,
+    cx: &mut Context<RootView>,
+) -> Button {
+    let core = core.clone();
+    Button::new(format!("{id}-close")).primary().small().child(label).on_click(cx.listener(
+        move |_: &mut RootView, _: &ClickEvent, _: &mut Window, cx| {
+            close(&core);
+            cx.notify();
+        },
+    ))
+}
+
+/// A platform dialog of `rows` that scroll under a title, with a Close button.
+pub(crate) fn list(
+    id: &str,
+    title: String,
+    close_label: String,
+    rows: Vec<Div>,
+    core: &SharedCore,
+    focus: &DialogFocus,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let (backdrop, card) = platform_shell(id, 520.0, core, focus, cx);
     let card = card
         .h(px(480.0))
         .max_h(relative(0.85))
@@ -93,21 +142,30 @@ pub(crate) fn list(
                 div().size_full().flex().flex_col().gap_1().children(rows).overflow_y_scrollbar(),
             ),
         )
-        .child(
-            div().flex().justify_end().child(
-                Button::new(format!("{id}-close"))
-                    .primary()
-                    .small()
-                    .child(close_label)
-                    .on_click(cx.listener(
-                        move |_: &mut crate::RootView, _: &ClickEvent, _: &mut Window, cx| {
-                            close();
-                            cx.notify();
-                        },
-                    )),
-            ),
-        );
+        .child(div().flex().justify_end().child(close_button(id, close_label, core, cx)));
     backdrop.child(card).into_any_element()
+}
+
+/// A row of a list dialog: `label` on the left, what the caller adds on the right.
+pub(crate) fn row(label: String) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .px_1()
+        .py_0p5()
+        .child(div().text_size(px(12.)).text_color(col(wb::Color::GRAY)).child(label))
+}
+
+/// The rounded background of a small value in a row: a button or a key.
+pub(crate) fn chip() -> Div {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded(px(3.))
+        .bg(col(theme::CONTROL_BG))
+        .text_size(px(12.))
+        .text_color(col(wb::Color::LIGHT_GRAY))
 }
 
 /// Keeps the keyboard on a dialog while it is open and hands it back after.
@@ -130,7 +188,7 @@ impl DialogFocus {
 
     /// `on_top` is false while an overlay above the dialog needs the keyboard;
     /// the dialog takes it back when that overlay closes.
-    pub(crate) fn sync(&mut self, open: bool, on_top: bool, window: &mut Window, cx: &mut App) {
+    fn sync(&mut self, open: bool, on_top: bool, window: &mut Window, cx: &mut App) {
         if open != self.open {
             self.open = open;
             if open {
@@ -143,9 +201,4 @@ impl DialogFocus {
             window.focus(&self.handle, cx);
         }
     }
-}
-
-/// Dim a shell color toward black by `factor`.
-fn dim(c: wb::Color, factor: f32) -> wb::Color {
-    wb::Color::rgb(c.r * factor, c.g * factor, c.b * factor)
 }

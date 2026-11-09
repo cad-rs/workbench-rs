@@ -1,7 +1,7 @@
 //! The platform runtime: product assembly, command execution, the task event pump, context
 //! snapshots and layout persistence.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -9,8 +9,8 @@ use std::sync::Arc;
 use workbench_api as api;
 use api::{
     ComboState, CommandArgs, CommandCtx, CommandExecution, CommandInvocation, CommandKind,
-    CommandResult, CtxSnapshot, DocSummary, Hotkey, InvocationRecord, InvocationStatus, PanelId,
-    Registry, ServiceHost, TaskEvent, ViewTypeId, Workbench,
+    CommandResult, CtxSnapshot, DocSummary, Entitlements as _, Hotkey, InvocationRecord,
+    InvocationStatus, PanelId, Registry, ServiceHost, TaskEvent, ViewTypeId, Workbench,
 };
 
 use crate::entitlement_refresh::{RefreshSchedule, SessionEntitlements};
@@ -19,6 +19,15 @@ use crate::platform_cmds;
 
 /// Capacity of the invocation history ring buffer.
 const INVOCATION_HISTORY: usize = 100;
+
+/// What the runtime keeps for a product that limits features.
+struct EntitlementState {
+    /// What `host.entitlements` answers from.
+    session: Arc<SessionEntitlements>,
+    schedule: RefreshSchedule,
+    /// The features named by `requires`, and the last answer for each.
+    gated: Vec<(String, bool)>,
+}
 
 /// One row of the Commands & Shortcuts dialog. `group` and `label` are i18n keys.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,16 +94,10 @@ pub struct AppRuntime {
     layout_key: String,
     /// The layout as last loaded or saved, so an unchanged one isn't rewritten.
     saved_layout: Option<String>,
-    /// Where crash reports go if the user agrees.
-    crash_reporter: Option<Arc<dyn api::CrashReporter>>,
-    /// The features named by `requires`, and the product's last answer for each (empty when
-    /// the product limits nothing).
-    gated_features: Vec<String>,
-    last_answers: Vec<bool>,
-    /// When to fetch the latest answers; None when the product limits nothing.
-    entitlement_checks: Option<RefreshSchedule>,
-    /// The answers `host.entitlements` gives; None when the product limits nothing.
-    session_entitlements: Option<Arc<SessionEntitlements>>,
+    /// None when the product limits nothing.
+    entitlements: Option<EntitlementState>,
+    /// Each document's revision and title as last autosaved.
+    autosaved: HashMap<api::DocumentId, (u64, String)>,
     /// Seconds accumulated since the last autosave.
     autosave_accum: f32,
     dispatch_depth: u32,
@@ -230,12 +233,22 @@ impl AppRuntime {
         }
     }
 
-    /// All registered hotkeys (the frontend dispatches key presses).
-    pub fn hotkeys(&self) -> Vec<(Hotkey, String)> {
-        self.registry
+    /// Run what `hotkey` is bound to, unless a modal overlay is open. Returns whether anything
+    /// ran.
+    pub fn press_hotkey(&mut self, hotkey: Hotkey) -> bool {
+        if self.host.ws.is_modal() {
+            return false;
+        }
+        let bound: Vec<String> = self
+            .registry
             .commands()
-            .filter_map(|c| c.hotkey.map(|h| (h, c.id.0.clone())))
-            .collect()
+            .filter(|def| def.hotkey == Some(hotkey))
+            .map(|def| def.id.0.clone())
+            .collect();
+        for id in &bound {
+            let _ = self.execute_command(id, &CommandArgs::default());
+        }
+        !bound.is_empty()
     }
 
     /// What the Commands & Shortcuts dialog lists, each command once: the ribbon's commands
@@ -243,7 +256,7 @@ impl AppRuntime {
     pub fn command_listing(&self) -> Vec<CommandListing> {
         let mut listed = std::collections::HashSet::new();
         let mut rows = Vec::new();
-        for group in self.host.ws.ribbon.iter().flat_map(|tab| &tab.groups) {
+        for group in self.host.ws.ribbon_groups() {
             let mut items = Vec::new();
             runnable_items(&group.items, &mut items);
             for item in items {
@@ -259,12 +272,10 @@ impl AppRuntime {
                 }
             }
         }
-        let collapsible = self.host.ws.ribbon_collapse_enabled;
-        let hotkey_only = self.registry.commands().filter(|def| {
-            def.hotkey.is_some()
-                && !listed.contains(def.id.0.as_str())
-                && (collapsible || def.id.0 != platform_cmds::TOGGLE_RIBBON_COLLAPSE)
-        });
+        let hotkey_only = self
+            .registry
+            .commands()
+            .filter(|def| def.hotkey.is_some() && !listed.contains(def.id.0.as_str()));
         rows.extend(hotkey_only.map(|def| CommandListing {
             group: "Other".to_string(),
             label: def.title.clone(),
@@ -482,11 +493,16 @@ impl AppRuntime {
                     .type_of(&d.type_id)
                     .and_then(|t| t.extensions.first().cloned())
                     .unwrap_or_else(|| "dat".to_string());
-                (d.id, d.title.clone(), d.type_id.clone(), ext)
+                (d.id, d.revision, d.title.clone(), d.type_id.clone(), ext)
             })
             .collect();
         let mut saved = 0;
-        for (id, title, type_id, ext) in dirty {
+        for (id, revision, title, type_id, ext) in dirty {
+            saved += 1;
+            // An idle document has nothing new to write, and every write syncs to disk.
+            if self.autosaved.get(&id).is_some_and(|last| last.0 == revision && last.1 == title) {
+                continue;
+            }
             let bytes = self.host.docs.encode(id)?;
             let stem = autosave_stem(&title);
             self.state.write(&format!("{stem}.{ext}"), &bytes)?;
@@ -494,7 +510,7 @@ impl AppRuntime {
             // diagnostics)
             let meta = serde_json::json!({ "doc_id": id.0, "type_id": type_id.0, "title": title });
             let _ = self.state.write(&format!("{stem}.json"), meta.to_string().as_bytes());
-            saved += 1;
+            self.autosaved.insert(id, (revision, title));
         }
         self.host.stats.autosaves += 1;
         if saved > 0 {
@@ -555,21 +571,22 @@ impl AppRuntime {
         refusals
     }
 
-    fn current_answers(&self) -> Vec<bool> {
-        self.gated_features.iter().map(|feature| self.host.allows(feature)).collect()
-    }
-
     /// Whether the product's answers changed since the last tick (an activation, an expiry),
     /// so disabled controls are redrawn; what is no longer allowed is withdrawn.
     fn entitlements_changed(&mut self) -> bool {
-        let answers = self.current_answers();
-        if answers == self.last_answers {
+        let Some(state) = &mut self.entitlements else {
+            return false;
+        };
+        let mut changed = false;
+        for (feature, last) in &mut state.gated {
+            let allowed = state.session.allows(feature);
+            changed |= allowed != *last;
+            *last = allowed;
+        }
+        if !changed {
             return false;
         }
-        self.last_answers = answers;
-        if let Some(checks) = &mut self.entitlement_checks {
-            checks.answers_changed();
-        }
+        state.schedule.answers_changed();
         self.host.log.info("The available features changed");
         for refusal in self.withdraw_refused() {
             self.host.log.warn(refusal);
@@ -586,25 +603,26 @@ impl AppRuntime {
 
     /// Someone else is signed in, so what the last user could use doesn't carry over.
     fn account_changed(&mut self) {
-        if let Some(session) = &self.session_entitlements {
-            session.forget();
+        if let Some(state) = &self.entitlements {
+            state.session.forget();
         }
         self.schedule_entitlement_check(RefreshSchedule::asked);
     }
 
     fn schedule_entitlement_check(&mut self, decide: impl FnOnce(&mut RefreshSchedule) -> bool) {
-        if self.entitlement_checks.as_mut().is_some_and(decide) {
-            self.start_entitlement_check();
+        let Some(state) = &mut self.entitlements else {
+            return;
+        };
+        if decide(&mut state.schedule) {
+            let session = state.session.clone();
+            self.start_entitlement_check(session);
         }
     }
 
-    fn start_entitlement_check(&mut self) {
+    fn start_entitlement_check(&mut self, session: Arc<SessionEntitlements>) {
         use api::AppServices as _;
-        let Some(entitlements) = self.host.entitlements.clone() else {
-            return;
-        };
         self.spawn_io(Box::pin(async move {
-            let result = entitlements.refresh().await;
+            let result = session.refresh().await;
             Box::new(move |app: &mut dyn api::AppServices| app.finish_entitlements_refresh(result))
                 as api::UiThen
         }));
@@ -612,7 +630,7 @@ impl AppRuntime {
 
     /// At startup: say so once if crash reports were written since the last launch, send them
     /// if the user agreed, and drop the oldest ones past the limit.
-    fn handle_crash_reports(&mut self) {
+    fn handle_crash_reports(&mut self, reporter: Option<Arc<dyn api::CrashReporter>>) {
         use crate::diagnostics::{crash_reports, KEPT_REPORTS, SEND_CRASH_REPORTS};
 
         let reports = crash_reports(self.state.as_ref());
@@ -634,7 +652,7 @@ impl AppRuntime {
             new.len()
         ));
 
-        let Some(reporter) = self.crash_reporter.clone() else {
+        let Some(reporter) = reporter else {
             return;
         };
         if !self.host.settings.get_bool(SEND_CRASH_REPORTS, false) {
@@ -848,7 +866,7 @@ impl AppRuntime {
             return CommandResult::failed(msg);
         }
         // Account commands run on the host directly (they manage the
-        // background login thread; same interception pattern as dialogs).
+        // background login thread).
         match id {
             crate::platform_cmds::ACCOUNT_LOGIN => {
                 let result = match self.host.begin_account_login() {
@@ -1197,12 +1215,13 @@ impl api::AppServices for AppRuntime {
 
     fn finish_entitlements_refresh(&mut self, result: Result<(), String>) {
         let changed = self.entitlements_changed();
-        let Some(checks) = self.entitlement_checks.as_mut() else {
+        let Some(state) = &mut self.entitlements else {
             return;
         };
-        let again = checks.finished();
-        let report = checks.take_report();
-        if let (false, Some(session)) = (again, &self.session_entitlements) {
+        let again = state.schedule.finished();
+        let report = state.schedule.take_report();
+        let session = state.session.clone();
+        if !again {
             session.settle();
         }
         match result {
@@ -1212,14 +1231,14 @@ impl api::AppServices for AppRuntime {
             Ok(()) => {}
         }
         if again {
-            self.start_entitlement_check();
+            self.start_entitlement_check(session);
         }
     }
 
     fn open_purchase_page(&mut self, url: &str) {
         self.host.ws.url_to_open = Some(url.to_string());
-        if let Some(checks) = &mut self.entitlement_checks {
-            checks.purchase_page_opened();
+        if let Some(state) = &mut self.entitlements {
+            state.schedule.purchase_page_opened();
         }
     }
 }
@@ -1651,7 +1670,7 @@ impl WorkbenchAppBuilder {
                 scope: api::SettingScope::User,
             });
         }
-        platform_cmds::register(&mut registry);
+        platform_cmds::register(&mut registry, self.ribbon_collapse_enabled);
 
         // Registry → runtime
         for def in std::mem::take(&mut registry.doc_types) {
@@ -1819,11 +1838,8 @@ impl WorkbenchAppBuilder {
             io_done_tx,
             io_done_rx,
             io_pending: 0,
-            crash_reporter: self.crash_reporter.clone(),
-            gated_features: Vec::new(),
-            last_answers: Vec::new(),
-            entitlement_checks: self.entitlements.is_some().then(RefreshSchedule::default),
-            session_entitlements,
+            entitlements: None,
+            autosaved: HashMap::new(),
         };
         runtime.snapshot = runtime.make_snapshot();
 
@@ -1832,7 +1848,7 @@ impl WorkbenchAppBuilder {
         if AUTOSAVE {
             runtime.restore_session();
         }
-        runtime.handle_crash_reports();
+        runtime.handle_crash_reports(self.crash_reporter.clone());
 
         // Default document
         if self.create_default_document {
@@ -1877,7 +1893,7 @@ impl WorkbenchAppBuilder {
                 }
             }
         }
-        if runtime.host.entitlements.is_some() {
+        if let Some(session) = session_entitlements {
             let ws = &runtime.host.ws;
             let views = ws.view_type_ids().filter_map(|id| ws.view_def(id)?.requires.clone());
             let panels = ws.panels.iter().filter_map(|p| ws.panel_def(&p.id)?.requires.clone());
@@ -1885,8 +1901,15 @@ impl WorkbenchAppBuilder {
             let mut features: Vec<String> = views.chain(panels).chain(commands).collect();
             features.sort();
             features.dedup();
-            runtime.gated_features = features;
-            runtime.last_answers = runtime.current_answers();
+            let gated = features
+                .into_iter()
+                .map(|feature| {
+                    let allowed = session.allows(&feature);
+                    (feature, allowed)
+                })
+                .collect();
+            runtime.entitlements =
+                Some(EntitlementState { session, schedule: RefreshSchedule::default(), gated });
             runtime.withdraw_refused();
         }
         Ok(runtime)

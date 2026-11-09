@@ -1,42 +1,25 @@
 //! The Settings dialog: a centered modal with one row per registered
-//! [`wb::SettingSpec`], grouped by `spec.group`.
-//!
-//! Rendered by the root view while `ws.settings_open` is set (the
-//! `app.settings.open` platform command sets it). Changes apply as they are
+//! [`wb::SettingSpec`], grouped by `spec.group`. Changes apply as they are
 //! made, so the dialog only has a way to close. A string row opens the
 //! text-edit overlay, which draws above this dialog.
 
-use gpui::{AnyElement, Context, Div, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Div, div, prelude::*, px};
 use workbench_api as wb;
 use wb::Color;
+use workbench_core::platform_cmds::{SETTINGS_EDIT_BEGIN, SETTINGS_SET};
 
+use crate::dialog::{self, DialogFocus};
 use crate::platform_panels::section;
-use crate::{SharedCore, col, dialog};
+use crate::{SharedCore, col, lock, theme};
 
-pub(crate) fn is_open(core: &SharedCore) -> bool {
-    core.lock().unwrap_or_else(|p| p.into_inner()).host.ws.settings_open
-}
-
-fn close(core: &SharedCore) {
-    core.lock().unwrap_or_else(|p| p.into_inner()).host.ws.settings_open = false;
-}
-
-/// The dialog, while it is open.
 pub(crate) fn overlay(
     core: &SharedCore,
-    focus: &mut dialog::DialogFocus,
-    window: &mut Window,
+    focus: &DialogFocus,
     cx: &mut Context<crate::RootView>,
-) -> Option<AnyElement> {
-    let on_top = !crate::text_edit::is_active(core) && !crate::file_picker::is_open(core);
-    focus.sync(is_open(core), on_top, window, cx);
-
+) -> AnyElement {
     let (title, close_label, rows) = {
-        let guard = core.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = lock(core);
         let host = &guard.host;
-        if !host.ws.settings_open {
-            return None;
-        }
         let tr = |key: &str| host.tr(key);
         let mut rows: Vec<Div> = Vec::new();
         let mut group = String::new();
@@ -49,9 +32,7 @@ pub(crate) fn overlay(
         }
         (tr("Settings"), tr("Close"), rows)
     };
-
-    let core = core.clone();
-    Some(dialog::list("settings", title, close_label, rows, focus, move || close(&core), cx))
+    dialog::list("settings", title, close_label, rows, core, focus, cx)
 }
 
 /// One `label  control` row for a setting spec. `tr` translates display
@@ -110,110 +91,69 @@ fn setting_row(
         }
         wb::SettingKind::Str => {
             let s = value.as_str().unwrap_or_default().to_string();
-            // String settings are hand-edited: clicking the value opens the
-            // root-level Input overlay (app.settings.edit_begin).
-            let edit_key = spec.key.clone();
-            let mut value_row = if spec.key == "ui.accent" {
-                // Brand accent: swatch + hex value.
-                div().flex().items_center().gap_2().child(
-                    div()
-                        .w(px(14.))
-                        .h(px(14.))
-                        .rounded(px(3.))
-                        .bg(col(parse_hex_color(&s).unwrap_or(Color::GRAY)))
-                        .border_1()
-                        .border_color(col(Color::GRAY)),
-                ).child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(col(Color::LIGHT_GRAY))
-                        .child(s),
-                )
-            } else {
+            // The brand accent shows its color next to the hex value.
+            let swatch = (spec.key == "ui.accent").then(|| {
+                let color = theme::parse_hex_rgb(&s)
+                    .map_or(col(Color::GRAY), |rgba| gpui::rgba(rgba).into());
                 div()
-                    .text_size(px(12.))
-                    .text_color(col(Color::LIGHT_GRAY))
-                    .child(s)
-            };
-            value_row = value_row.cursor_pointer().on_mouse_down(
-                gpui::MouseButton::Left,
-                move |_ev, _window, _cx| {
+                    .w(px(14.))
+                    .h(px(14.))
+                    .rounded(px(3.))
+                    .bg(color)
+                    .border_1()
+                    .border_color(col(Color::GRAY))
+            });
+            // String settings are hand-edited: clicking the value opens the
+            // root-level Input overlay.
+            let edit_key = spec.key.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .children(swatch)
+                .child(div().text_size(px(12.)).text_color(col(Color::LIGHT_GRAY)).child(s))
+                .cursor_pointer()
+                .on_mouse_down(gpui::MouseButton::Left, move |_ev, _window, _cx| {
                     wb::dispatch(
-                        "app.settings.edit_begin",
+                        SETTINGS_EDIT_BEGIN,
                         wb::CommandArgs::new().with("key", edit_key.clone()),
                     );
-                },
-            );
-            value_row
+                })
         }
     };
 
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .px_1()
-        .py_0p5()
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(col(Color::GRAY))
-                .child(tr(&spec.label)),
-        )
-        .child(control)
+    dialog::row(tr(&spec.label)).child(control)
 }
 
-/// A small clickable button that dispatches `app.settings.set`.
+/// Pressing `element` sets the setting `key` to `value`.
+fn sets_on_press(element: Div, key: String, value: String) -> Div {
+    element.on_mouse_down(gpui::MouseButton::Left, move |_ev, _window, _cx| {
+        wb::dispatch(
+            SETTINGS_SET,
+            wb::CommandArgs::new().with("key", key.clone()).with("value", value.clone()),
+        );
+    })
+}
+
 fn cycle_button(label: String, key: String, value: String) -> Div {
-    div()
-        .px_2()
-        .py_0p5()
-        .rounded(px(3.))
-        .bg(col(Color::rgb(0.30, 0.31, 0.36)))
-        .text_size(px(12.))
-        .text_color(col(Color::LIGHT_GRAY))
-        .child(label)
-        .on_mouse_down(gpui::MouseButton::Left, move |_ev, _window, _cx| {
-            wb::dispatch(
-                "app.settings.set",
-                wb::CommandArgs::new()
-                    .with("key", key.clone())
-                    .with("value", value.clone()),
-            );
-        })
+    sets_on_press(dialog::chip().child(label), key, value)
 }
 
 /// Stepper `−`/`+` button for int settings.
 fn step_button(label: &str, key: String, value: i64) -> Div {
-    div()
-        .w(px(20.))
-        .h(px(18.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(3.))
-        .bg(col(Color::rgb(0.30, 0.31, 0.36)))
-        .text_size(px(12.))
-        .text_color(col(Color::LIGHT_GRAY))
-        .child(label.to_string())
-        .on_mouse_down(gpui::MouseButton::Left, move |_ev, _window, _cx| {
-            wb::dispatch(
-                "app.settings.set",
-                wb::CommandArgs::new()
-                    .with("key", key.clone())
-                    .with("value", value.to_string()),
-            );
-        })
-}
-
-/// Parse `#RRGGBB` (or `RRGGBB`) into a shell color; None on malformed input.
-fn parse_hex_color(s: &str) -> Option<Color> {
-    let hex = s.strip_prefix('#').unwrap_or(s);
-    if hex.len() != 6 {
-        return None;
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
-    let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
-    let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
-    Some(Color::rgb(r, g, b))
+    sets_on_press(
+        div()
+            .w(px(20.))
+            .h(px(18.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.))
+            .bg(col(theme::CONTROL_BG))
+            .text_size(px(12.))
+            .text_color(col(Color::LIGHT_GRAY))
+            .child(label.to_string()),
+        key,
+        value.to_string(),
+    )
 }

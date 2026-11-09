@@ -8,31 +8,18 @@
 //! the edit buffer), focus it, commit on `InputEvent::PressEnter` through the
 //! edit's commit command (`app.settings.set` for settings), discard on the
 //! `Escape` action (which the Input propagates to its parent) or the close
-//! button. Hotkeys stay suppressed while an edit is open (see [`is_active`]).
+//! button. Hotkeys wait while an edit is open (`WorkspaceState::is_modal`).
 
 use gpui::{
     AppContext as _, ClickEvent, Context, Div, Entity, InteractiveElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, div, px,
+    ParentElement as _, SharedString, Styled as _, Subscription, Window, div, px,
 };
 use gpui_component::button::Button;
 use gpui_component::input::{Escape, InputEvent, InputState};
 use gpui_component::Sizable as _;
 use workbench_api as wb;
 
-use crate::{SharedCore, col, theme};
-
-/// Whether a text edit is currently open (the root view suppresses hotkeys
-/// while true so typing a key that is also a shortcut does not fire the
-/// shortcut).
-pub(crate) fn is_active(core: &SharedCore) -> bool {
-    core.lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .host
-        .ws
-        .text_edit
-        .is_some()
-}
+use crate::{SharedCore, col, dialog, lock, theme};
 
 /// What the overlay needs to mount (or re-mount) the Input for the open edit.
 pub(crate) struct EditMount {
@@ -44,7 +31,7 @@ pub(crate) struct EditMount {
 
 /// Snapshot the open edit, if any and not yet mounted under `mounted_key`.
 pub(crate) fn mount_for(core: &SharedCore, mounted_key: Option<&str>) -> Option<EditMount> {
-    let guard = core.lock().unwrap_or_else(|p| p.into_inner());
+    let guard = lock(&core);
     let edit = guard.host.ws.text_edit.as_ref()?;
     if mounted_key == Some(edit.key.as_str()) {
         return None;
@@ -58,8 +45,7 @@ pub(crate) fn mount_for(core: &SharedCore, mounted_key: Option<&str>) -> Option<
 
 /// The caption of the open edit (shown above the input).
 pub(crate) fn caption(core: &SharedCore) -> String {
-    core.lock()
-        .unwrap_or_else(|p| p.into_inner())
+    lock(&core)
         .host
         .ws
         .text_edit
@@ -138,22 +124,11 @@ pub(crate) fn overlay_shell(
 
     let core_bg = core.clone();
     let core_esc = core.clone();
-    let overlay = div()
-        .id("text-edit-backdrop")
-        .occlude()
-        .absolute()
-        .size_full()
-        .flex()
+    let (backdrop, card) = dialog::centered("text-edit", 420.0, move || close(&core_bg), cx);
+    let overlay = backdrop
         .items_start()
-        .justify_center()
         .pt(px(120.0))
         .bg(gpui::rgba(0x000000_30))
-        .on_click(cx.listener(
-            move |_: &mut crate::RootView, _: &ClickEvent, _window: &mut Window, cx: &mut Context<'_, crate::RootView>| {
-                close(&core_bg);
-                cx.notify();
-            },
-        ))
         // Escape propagates out of the Input; catch it here (and only here:
         // the backdrop click covers the pointer case).
         .on_action(cx.listener(
@@ -163,24 +138,7 @@ pub(crate) fn overlay_shell(
             },
         ));
 
-    let mut card = div()
-        .id("text-edit-card")
-        .flex()
-        .flex_col()
-        .w(px(420.0))
-        .p(px(16.0))
-        .gap(px(8.0))
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(col(theme.placeholder))
-        .bg(col(theme.bg))
-        .text_color(col(wb::Color::LIGHT_GRAY))
-        // Swallow clicks so clicking the card does not discard.
-        .on_click(cx.listener(
-            |_: &mut crate::RootView, _: &ClickEvent, _: &mut Window, cx: &mut Context<'_, crate::RootView>| {
-                cx.stop_propagation();
-            },
-        ));
+    let mut card = card.p(px(16.0)).gap(px(8.0)).border_color(col(theme.placeholder));
 
     card = card.child(
         div()
@@ -193,7 +151,7 @@ pub(crate) fn overlay_shell(
 
     // Hints + close.
     let (hint, cancel) = {
-        let guard = core.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = lock(&core);
         (guard.host.tr("Enter to save · Esc to cancel"), guard.host.tr("Cancel"))
     };
     let core_btn = core.clone();

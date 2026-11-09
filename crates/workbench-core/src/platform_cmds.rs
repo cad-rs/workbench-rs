@@ -203,7 +203,7 @@ fn preferred_view_of(ctx: &mut CommandCtx, doc_id: api::DocumentId) -> Option<ap
 /// Register the platform commands. A panel's toggle command inherits its icon,
 /// so the Home tab's "View" group shows the same glyph the panel header does,
 /// and the feature it requires, so the toggle is disabled with the panel.
-pub fn register(registry: &mut Registry) {
+pub fn register(registry: &mut Registry, ribbon_collapse: bool) {
     // The built-in platform panels (diagnostics / plugins) are view
     // implementations, so the frontend registers them before this runs; their
     // ids therefore already appear in `registry.panels` below.
@@ -231,8 +231,7 @@ pub fn register(registry: &mut Registry) {
                     Err(e) => CommandResult::failed(e),
                 }
             },
-        )
-        .enabled_when(|_| true),
+        ),
     );
 
     // ---- Autosave command ----
@@ -405,26 +404,25 @@ pub fn register(registry: &mut Registry) {
         .hotkey(Hotkey::new(KeyCode::W).ctrl(true)),
     );
 
-    // Ribbon collapse toggle (Ctrl+F1, only when enabled, ribbon-bar.md §4.5)
-    registry.register_command(
-        CommandDef::sync(
-            TOGGLE_RIBBON_COLLAPSE,
-            "Collapse/Expand Ribbon",
-            |ctx: &mut CommandCtx, _args: &CommandArgs| {
-                let host = ctx.host();
-                if !host.ws.ribbon_collapse_enabled {
-                    return CommandResult::failed("Ribbon collapsing is not enabled");
-                }
-                host.ws.ribbon_collapsed = !host.ws.ribbon_collapsed;
-                CommandResult::done_with(if host.ws.ribbon_collapsed {
-                    "Collapsed"
-                } else {
-                    "Expanded"
-                })
-            },
-        )
-        .hotkey(Hotkey::new(KeyCode::F1).ctrl(true)),
-    );
+    // Ribbon collapse toggle (Ctrl+F1, ribbon-bar.md §4.5)
+    if ribbon_collapse {
+        registry.register_command(
+            CommandDef::sync(
+                TOGGLE_RIBBON_COLLAPSE,
+                "Collapse/Expand Ribbon",
+                |ctx: &mut CommandCtx, _args: &CommandArgs| {
+                    let host = ctx.host();
+                    host.ws.ribbon_collapsed = !host.ws.ribbon_collapsed;
+                    CommandResult::done_with(if host.ws.ribbon_collapsed {
+                        "Collapsed"
+                    } else {
+                        "Expanded"
+                    })
+                },
+            )
+            .hotkey(Hotkey::new(KeyCode::F1).ctrl(true)),
+        );
+    }
 
     // Settings writes: type-checked and range-clamped against the registered spec, written and
     // persisted at once. CommandArgs is a string table; the string is parsed into a Value by
@@ -471,8 +469,7 @@ pub fn register(registry: &mut Registry) {
                     Err(e) => CommandResult::failed(e),
                 }
             },
-        )
-        .enabled_when(|_| true),
+        ),
     );
 
     // Settings text edit: seed the buffer from the current value and open
@@ -505,43 +502,23 @@ pub fn register(registry: &mut Registry) {
                 host.ws.text_edit = Some(api::TextEdit::setting(spec.key.clone(), buffer));
                 CommandResult::done()
             },
-        )
-        .enabled_when(|_| true),
+        ),
     );
 
-    // The About dialog: sets a workspace flag; the frontend (workbench-ui) renders the dialog.
-    registry.register_command(
-        CommandDef::sync(ABOUT, "About", |ctx: &mut CommandCtx, _args: &CommandArgs| {
-            ctx.host().ws.about_open = true;
-            CommandResult::done()
-        })
-        .icon(crate::assets::icons::ABOUT)
-        .enabled_when(|_| true),
-    );
-
-    // The Settings dialog: likewise a workspace flag the frontend renders from.
-    registry.register_command(
-        CommandDef::sync(OPEN_SETTINGS, "Settings", |ctx: &mut CommandCtx, _args: &CommandArgs| {
-            ctx.host().ws.settings_open = true;
-            CommandResult::done()
-        })
-        .icon(crate::assets::icons::SETTINGS)
-        .enabled_when(|_| true),
-    );
-
-    // The Commands & Shortcuts dialog: a workspace flag too.
-    registry.register_command(
-        CommandDef::sync(
-            OPEN_SHORTCUTS,
-            "Commands & Shortcuts",
-            |ctx: &mut CommandCtx, _args: &CommandArgs| {
-                ctx.host().ws.shortcuts_open = true;
-                CommandResult::done()
-            },
-        )
-        .icon(crate::assets::icons::KEYBOARD)
-        .enabled_when(|_| true),
-    );
+    use crate::assets::icons;
+    registry.register_command(dialog_command(ABOUT, "About", icons::ABOUT, api::PlatformDialog::About));
+    registry.register_command(dialog_command(
+        OPEN_SETTINGS,
+        "Settings",
+        icons::SETTINGS,
+        api::PlatformDialog::Settings,
+    ));
+    registry.register_command(dialog_command(
+        OPEN_SHORTCUTS,
+        "Commands & Shortcuts",
+        icons::KEYBOARD,
+        api::PlatformDialog::Shortcuts,
+    ));
 
     // Refresh License: only for a product that limits features.
     let limits_features = registry.entitlements.is_some();
@@ -555,8 +532,7 @@ pub fn register(registry: &mut Registry) {
                     CommandResult::done()
                 },
             )
-            .icon(crate::assets::icons::REFRESH)
-            .enabled_when(|_| true),
+            .icon(crate::assets::icons::REFRESH),
         );
     }
 
@@ -570,8 +546,7 @@ pub fn register(registry: &mut Registry) {
                 })
             },
         )
-        .icon(crate::assets::icons::DIAGNOSTICS)
-        .enabled_when(|_| true),
+        .icon(crate::assets::icons::DIAGNOSTICS),
     );
 
     // A show/hide command per panel + the "View" toolbar group (including the platform's own
@@ -582,51 +557,48 @@ pub fn register(registry: &mut Registry) {
         .map(|p| (p.id.0.clone(), p.title.clone(), p.icon.clone(), p.requires.clone()))
         .collect();
     let mut window_group = api::ToolbarGroup::new("app.window", "View");
-    for (id, title, icon, requires) in &panels {
-        let panel_id = id.clone();
-        let pid = panel_id.clone();
-        let title = title.clone();
+    for (id, title, icon, requires) in panels {
+        let command = format!("{TOGGLE_PANEL_PREFIX}{id}");
         let mut def = CommandDef::sync(
-            format!("{TOGGLE_PANEL_PREFIX}{id}"),
+            command.clone(),
             format!("Show/Hide {title}"),
-            move |ctx: &mut CommandCtx, _args: &CommandArgs| match ctx.toggle_panel(&pid) {
+            move |ctx: &mut CommandCtx, _args: &CommandArgs| match ctx.toggle_panel(&id) {
                 Ok(_) => CommandResult::done(),
                 Err(e) => CommandResult::failed(e),
             },
         );
         // The panel's own icon (wb-std/* for the platform panels, the owning
         // workbench's path for theirs) — the ribbon toggle shows it too.
-        if let Some(icon) = icon.clone() {
+        if let Some(icon) = icon {
             def = def.icon(icon);
         }
-        if let Some(feature) = requires.clone() {
+        if let Some(feature) = requires {
             def = def.requires(feature);
         }
         registry.register_command(def);
-        window_group
-            .items
-            .push(api::ToolbarItem::labeled(format!("{TOGGLE_PANEL_PREFIX}{id}"), title));
+        window_group.items.push(api::ToolbarItem::labeled(command, title));
     }
-    window_group.items.push(api::ToolbarItem::labeled(OPEN_SETTINGS, "Settings"));
+    window_group.items.push(api::ToolbarItem::command(OPEN_SETTINGS));
     registry.add_toolbar_group(window_group);
 
     // The "Help" toolbar group: the About dialog (product branding info) and what support needs.
     let mut help_group = api::ToolbarGroup::new("app.help", "Help");
     help_group
         .items
-        .push(api::ToolbarItem::labeled(OPEN_SHORTCUTS, "Commands & Shortcuts"));
-    help_group
-        .items
-        .push(api::ToolbarItem::labeled(ABOUT, "About"));
-    help_group
-        .items
-        .push(api::ToolbarItem::labeled(EXPORT_DIAGNOSTICS, "Export Diagnostics…"));
+        .extend([OPEN_SHORTCUTS, ABOUT, EXPORT_DIAGNOSTICS].map(api::ToolbarItem::command));
     if limits_features {
-        help_group
-            .items
-            .push(api::ToolbarItem::labeled(REFRESH_LICENSE, "Refresh License"));
+        help_group.items.push(api::ToolbarItem::command(REFRESH_LICENSE));
     }
     registry.add_toolbar_group(help_group);
+}
+
+/// A command that opens a platform dialog, which the frontend renders.
+fn dialog_command(id: &str, title: &str, icon: &str, dialog: api::PlatformDialog) -> CommandDef {
+    CommandDef::sync(id, title, move |ctx: &mut CommandCtx, _args: &CommandArgs| {
+        ctx.host().ws.dialog = Some(dialog);
+        CommandResult::done()
+    })
+    .icon(icon)
 }
 
 /// Open the document at `location`: its storage provider reads the file off

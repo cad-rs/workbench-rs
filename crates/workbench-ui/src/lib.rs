@@ -57,6 +57,11 @@ pub mod theme;
 /// hence `Rc`.
 type SharedCore = std::rc::Rc<Mutex<AppRuntime>>;
 
+/// The runtime, even if a panic poisoned its lock: the UI keeps going.
+fn lock(core: &SharedCore) -> std::sync::MutexGuard<'_, AppRuntime> {
+    core.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Base Latin font (IBM Plex Sans, OFL licensed, committed together with license.txt).
 /// gpui_web ships no fonts, so the web must inject them explicitly before the first frame.
 #[cfg(target_arch = "wasm32")]
@@ -139,8 +144,7 @@ struct RootView {
     mirror: dock_panel::SharedMirror,
     /// Ribbon mount point (a ribbon crate entity; built lazily on the first frame, like the dock).
     ribbon: ribbon_bridge::RibbonHost,
-    settings_focus: dialog::DialogFocus,
-    shortcuts_focus: dialog::DialogFocus,
+    dialog_focus: dialog::DialogFocus,
     /// Where the keyboard rests when nothing else holds it. GPUI sends keys along the focus
     /// path, so with no holder the hotkeys never hear them.
     keyboard_home: gpui::FocusHandle,
@@ -170,7 +174,7 @@ impl RootView {
         // Seed the applied-theme trackers from the current settings so the
         // first frame does not re-apply what launch_app already applied.
         let (applied_theme, applied_accent) = {
-            let guard = core.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = lock(&core);
             (
                 guard.host.settings.get_str("ui.theme", "dark"),
                 guard.host.settings.get_str("ui.accent", "#338CF2"),
@@ -189,8 +193,7 @@ impl RootView {
                 dock_panel::DockMirror::default(),
             )),
             ribbon: ribbon_bridge::RibbonHost::new(),
-            settings_focus: dialog::DialogFocus::new(cx),
-            shortcuts_focus: dialog::DialogFocus::new(cx),
+            dialog_focus: dialog::DialogFocus::new(cx),
             keyboard_home: cx.focus_handle(),
             applied_theme,
             applied_accent,
@@ -229,7 +232,7 @@ fn publish_runtime_dispatcher(core: &SharedCore) {
 /// a failure (read-only directory, full browser storage) is logged.
 fn save_layout(core: &SharedCore, root: &gpui::Entity<RootView>, cx: &App) -> bool {
     let dock = root.read(cx).dock.as_ref().and_then(|shell| shell.dump(cx));
-    let mut core = core.lock().unwrap_or_else(|p| p.into_inner());
+    let mut core = lock(&core);
     match core.save_layout(serde_json::Value::Null, dock) {
         Ok(written) => written,
         Err(e) => {
@@ -443,7 +446,7 @@ fn view_canvas(
 impl RootView {
     fn on_window_activation(&mut self, window: &mut Window, _: &mut Context<Self>) {
         if window.is_window_active() {
-            self.core.lock().unwrap_or_else(|p| p.into_inner()).window_activated();
+            lock(&self.core).window_activated();
         }
     }
 }
@@ -455,7 +458,7 @@ impl Render for RootView {
         // from rendering: gpui only redraws on invalidation, so a render-driven pump stalls while
         // the UI is idle and task results sit unclaimed in their channel.
         {
-            let mut core = self.core.lock().unwrap_or_else(|p| p.into_inner());
+            let mut core = lock(&self.core);
             let now = web_time::Instant::now();
             let dt_ms = (now - self.last_render).as_secs_f32() * 1000.0;
             self.last_render = now;
@@ -468,7 +471,7 @@ impl Render for RootView {
         // `app.settings.set`; re-apply whichever surface diverged. ----
         {
             let (theme_now, accent_now) = {
-                let guard = self.core.lock().unwrap_or_else(|p| p.into_inner());
+                let guard = lock(&self.core);
                 (
                     guard.host.settings.get_str("ui.theme", "dark"),
                     guard.host.settings.get_str("ui.accent", "#338CF2"),
@@ -486,7 +489,7 @@ impl Render for RootView {
 
         // ---- Core state read (once) ----
         let (shell_snap, status) = {
-            let core = self.core.lock().unwrap_or_else(|p| p.into_inner());
+            let core = lock(&self.core);
             let area_of = |a: wb::DockArea| -> dock_panel::AreaSnapshot {
                 let slots: Vec<&wb::PanelSlot> = core
                     .host
@@ -637,54 +640,23 @@ impl Render for RootView {
                 let weak_k = weak.clone();
                 move |ev: &KeyDownEvent, _w: &mut Window, cx: &mut App| {
                     let ks = &ev.keystroke;
-                    // While a text edit is open the Input owns the
-                    // keystrokes; hotkeys stay disabled so typing a key that
-                    // is also a shortcut does not fire the shortcut.
-                    if text_edit::is_active(&core_k)
-                        || file_picker::is_open(&core_k)
-                        || settings::is_open(&core_k)
-                        || shortcuts::is_open(&core_k)
-                    {
-                        return;
-                    }
-                    let Some(code) = wb::KeyCode::from_name(&ks.key) else {
+                    let Some(key) = wb::KeyCode::from_name(&ks.key) else {
                         return;
                     };
-                    let hk = wb::Hotkey {
+                    let hotkey = wb::Hotkey {
                         ctrl: ks.modifiers.control,
                         alt: ks.modifiers.alt,
                         shift: ks.modifiers.shift,
-                        key: code,
+                        key,
                     };
-                    let matched: Vec<String> = core_k
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .hotkeys()
-                        .into_iter()
-                        .filter(|(registered, _)| *registered == hk)
-                        .map(|(_, cmd)| cmd)
-                        .collect();
-                    for cmd in matched {
-                        let _ = core_k
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .execute_command(&cmd, &wb::CommandArgs::default());
+                    if lock(&core_k).press_hotkey(hotkey) {
+                        notify(&weak_k, cx);
                     }
-                    notify(&weak_k, cx);
                 }
             });
 
-        // ---- About dialog overlay (rendered while the app.about command has it set) ----
-        if let Some(overlay) = about::maybe_about_overlay(&core, cx) {
-            root_col = root_col.child(modal_overlay(overlay));
-        }
-
-        // ---- Settings dialog: below the text-edit overlay its string rows open ----
-        if let Some(overlay) = settings::overlay(&core, &mut self.settings_focus, window, cx) {
-            root_col = root_col.child(modal_overlay(overlay));
-        }
-
-        if let Some(overlay) = shortcuts::overlay(&core, &mut self.shortcuts_focus, window, cx) {
+        // ---- The open dialog: below the text-edit overlay Settings' string rows open ----
+        if let Some(overlay) = dialog::overlay(&core, &mut self.dialog_focus, window, cx) {
             root_col = root_col.child(modal_overlay(overlay));
         }
 
@@ -724,9 +696,7 @@ impl Render for RootView {
             self.edit_subscription = Some(sub);
             self.edit_key = Some(mount.key);
         } else if self.edit_key.is_some()
-            && core
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
+            && lock(&core)
                 .host
                 .ws
                 .text_edit
@@ -854,11 +824,9 @@ fn render_status_bar(
                         .cursor_pointer()
                         .bg(col(theme::ui_theme().cancel_rest))
                         .hover(|s| s.bg(col(wb::Color::RED)))
-                        .child(core.lock().unwrap_or_else(|p| p.into_inner()).host.tr("Cancel"))
+                        .child(lock(&core).host.tr("Cancel"))
                         .on_click(move |_ev: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
-                            core_c
-                                .lock()
-                                .unwrap_or_else(|p| p.into_inner())
+                            lock(&core_c)
                                 .host
                                 .tasks
                                 .request_cancel(tid);
@@ -896,7 +864,7 @@ fn render_status_bar(
                         .text_color(col(wb::Color::GRAY))
                         .child(format!(
                             "{}{}",
-                            core.lock().unwrap_or_else(|p| p.into_inner()).host.tr("Mode: "),
+                            lock(&core).host.tr("Mode: "),
                             data.mode
                         )),
                 ),
@@ -927,7 +895,7 @@ fn render_account_chip(
             .text_size(px(11.0))
             .text_color(col(wb::Color::LIGHT_GRAY))
             .bg(col(theme::ui_theme().toolbar))
-            .hover(|s| s.bg(col(wb::Color::rgb(0.30, 0.31, 0.36))))
+            .hover(|s| s.bg(col(theme::CONTROL_BG)))
             .child(label)
             .on_click(move |_ev: &gpui::ClickEvent, _w: &mut Window, cx: &mut App| {
                 wb::dispatch(command, wb::CommandArgs::default());
@@ -1009,14 +977,14 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
     // Theme from settings (builder default already seeded): applied after
     // gpui_component::init in launch_app, before any window opens.
     let theme_name = {
-        let core = core.lock().unwrap_or_else(|p| p.into_inner());
+        let core = lock(&core);
         core.host.settings.get_str("ui.theme", "dark")
     };
     // Restore the last layout (model + the dock areas' physical layout): the model lands first,
     // and the dock layout is laid over it on the first frame after the window opens. With no
     // layout file (first launch) or a parse failure this returns None → the default layout.
     let dock = {
-        let mut core = core.lock().unwrap_or_else(|p| p.into_inner());
+        let mut core = lock(&core);
         core.load_layout()
             .and_then(|restored| restored.dock)
             .and_then(|dock| serde_json::from_value(dock).ok())
@@ -1024,9 +992,7 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
     // Window/taskbar icon from the product profile (`window_icon` PNG asset).
     // Decode failure is non-fatal: the exe's embedded icon stays the fallback.
     let window_icon = {
-        let path = core
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let path = lock(&core)
             .profile()
             .window_icon
             .clone();
@@ -1151,9 +1117,7 @@ fn launch_app(
         // the same time.
         theme::apply_theme(&theme_name, cx);
         {
-            let accent = core
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
+            let accent = lock(&core)
                 .host
                 .settings
                 .get_str("ui.accent", "#338CF2");
@@ -1207,7 +1171,7 @@ fn launch_app(
             // A failed save is only logged; it doesn't block exit.
             if let Some(root) = &root_entity {
                 if save_layout(&core_save, root, cx) {
-                    let mut core = core_save.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut core = lock(&core_save);
                     core.host.log.info("Layout saved");
                 }
             }
@@ -1245,7 +1209,7 @@ fn launch_app(
             // the moment a task finished and the terminal event never got pumped; the Diagnostics
             // panel's "Background tasks running/total" then lagged until the next input.
             let (needs_repaint, url_to_open) = {
-                let mut core = core_loop.lock().unwrap_or_else(|p| p.into_inner());
+                let mut core = lock(&core_loop);
                 let needs_repaint = core.frame_tick(0.1);
                 (needs_repaint, core.host.ws.url_to_open.take())
             };
@@ -1327,7 +1291,7 @@ mod tests {
         let core: SharedCore = std::rc::Rc::new(Mutex::new(runtime));
 
         let snap = {
-            let core = core.lock().unwrap_or_else(|p| p.into_inner());
+            let core = lock(&core);
             let area_of = |a: wb::DockArea| -> dock_panel::AreaSnapshot {
                 let slots: Vec<&wb::PanelSlot> = core
                     .host

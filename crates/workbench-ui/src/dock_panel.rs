@@ -257,7 +257,7 @@ impl WbPanel {
 /// Titles are i18n keys (source string = key): translated here, the single
 /// place dock tabs read them.
 fn model_title(r: &PanelRef, core: &SharedCore) -> (String, Option<String>) {
-    let core = core.lock().unwrap_or_else(|p| p.into_inner());
+    let core = crate::lock(&core);
     match r {
         PanelRef::Area { panel_id, .. } => core
             .host
@@ -284,7 +284,7 @@ fn model_title(r: &PanelRef, core: &SharedCore) -> (String, Option<String>) {
 /// active (one notification per edge).
 fn mirror_active(r: &PanelRef, core: &SharedCore, mirror: &SharedMirror) {
     {
-        let mut core = core.lock().unwrap_or_else(|p| p.into_inner());
+        let mut core = crate::lock(&core);
         match r {
             PanelRef::Area { area, panel_id } => {
                 core.host
@@ -317,7 +317,7 @@ fn write_back_removed(r: &PanelRef, core: &SharedCore, mirror: &SharedMirror) {
     if mirror.borrow().suppress_removal {
         return;
     }
-    let mut core = core.lock().unwrap_or_else(|p| p.into_inner());
+    let mut core = crate::lock(&core);
     match r {
         PanelRef::Central { instance_id } => {
             core.host
@@ -410,10 +410,7 @@ impl Render for WbPanel {
                     .justify_center()
                     .text_color(col(wb::Color::GRAY))
                     .child(
-                        self.ctx
-                            .core
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
+                        crate::lock(&self.ctx.core)
                             .host
                             .tr(EMPTY_CENTER_TITLE),
                     )
@@ -1102,7 +1099,7 @@ mod tests {
             .expect("runtime builds");
         let core: SharedCore = std::rc::Rc::new(Mutex::new(runtime));
         let instance = {
-            let core = core.lock().unwrap_or_else(|p| p.into_inner());
+            let core = crate::lock(&core);
             core.host.ws.tabs.first().expect("the welcome tab").instance_id.0
         };
         let mirror: SharedMirror = std::rc::Rc::new(RefCell::new(DockMirror::default()));
@@ -1119,13 +1116,13 @@ mod tests {
 
         write_back_removed(&r, &core, &mirror);
         assert!(
-            core.lock().unwrap_or_else(|p| p.into_inner()).host.ws.tabs.is_empty(),
+            crate::lock(&core).host.ws.tabs.is_empty(),
             "the dock's close closed the tab"
         );
 
         write_back_removed(&r, &core, &mirror);
         assert!(
-            core.lock().unwrap_or_else(|p| p.into_inner()).host.ws.tabs.is_empty(),
+            crate::lock(&core).host.ws.tabs.is_empty(),
             "closing twice is a no-op, not a reopen"
         );
     }
@@ -1141,7 +1138,7 @@ mod tests {
         write_back_removed(&PanelRef::Central { instance_id: instance }, &core, &mirror);
 
         assert_eq!(
-            core.lock().unwrap_or_else(|p| p.into_inner()).host.ws.tabs.len(),
+            crate::lock(&core).host.ws.tabs.len(),
             1,
             "a panel displaced by the rebuild keeps its tab"
         );
@@ -1158,8 +1155,7 @@ mod tests {
             panel_id: "example.panel.explorer".to_string(),
         };
         let visible = |core: &SharedCore| {
-            core.lock()
-                .unwrap_or_else(|p| p.into_inner())
+            crate::lock(&core)
                 .host
                 .ws
                 .panels
@@ -1191,7 +1187,7 @@ mod tests {
         );
         assert_eq!(mirror.borrow().center, Some(instance));
         {
-            let core = core.lock().unwrap_or_else(|p| p.into_inner());
+            let core = crate::lock(&core);
             assert_eq!(core.host.ws.active_tab().map(|t| t.instance_id.0), Some(instance));
         }
 
@@ -1208,7 +1204,7 @@ mod tests {
             Some("example.panel.properties")
         );
         {
-            let core = core.lock().unwrap_or_else(|p| p.into_inner());
+            let core = crate::lock(&core);
             let active = core.host.ws.area_active.get(&wb::DockArea::Right);
             assert_eq!(active.map(|id| id.0.as_str()), Some("example.panel.properties"));
         }
@@ -1219,12 +1215,12 @@ mod tests {
     #[test]
     fn the_empty_placeholder_never_touches_the_model() {
         let (core, mirror, _) = tabbed_core();
-        let tabs_before = core.lock().unwrap_or_else(|p| p.into_inner()).host.ws.tabs.len();
+        let tabs_before = crate::lock(&core).host.ws.tabs.len();
 
         mirror_active(&PanelRef::Empty, &core, &mirror);
         write_back_removed(&PanelRef::Empty, &core, &mirror);
 
-        let core = core.lock().unwrap_or_else(|p| p.into_inner());
+        let core = crate::lock(&core);
         assert_eq!(core.host.ws.tabs.len(), tabs_before);
         assert_eq!(core.host.ws.active_tab().map(|t| t.instance_id.0), Some(1));
     }

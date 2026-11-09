@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use gpui::App;
 use workbench_api as wb;
 
+/// Behind small controls: toggles, steppers, keys.
+pub(crate) const CONTROL_BG: wb::Color = wb::Color::rgb(0.30, 0.31, 0.36);
+
 /// Shell palette: the colors the gpui frontend paints outside the ribbon.
 #[derive(Clone, Copy)]
 pub struct UiTheme {

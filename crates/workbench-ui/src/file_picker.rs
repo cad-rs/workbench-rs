@@ -19,9 +19,9 @@ use gpui_component::{Icon, Sizable as _};
 use workbench_api::{self as wb, AppServices as _};
 use workbench_core::file_picker;
 
-use crate::{RootView, SharedCore, col, theme};
+use crate::{RootView, SharedCore, col, dialog, lock, theme};
 
-/// Whether the picker is open (the root view suppresses hotkeys meanwhile).
+/// Whether the picker is open.
 pub(crate) fn is_open(core: &SharedCore) -> bool {
     lock(core).host.ws.file_picker.is_some()
 }
@@ -111,10 +111,6 @@ struct Snap {
     open_hint: String,
 }
 
-fn lock(core: &SharedCore) -> std::sync::MutexGuard<'_, workbench_core::AppRuntime> {
-    core.lock().unwrap_or_else(|p| p.into_inner())
-}
-
 fn navigate(core: &SharedCore, step: impl FnOnce(&mut wb::FilePicker)) {
     file_picker::navigate(&mut wb::CommandCtx::new(&mut *lock(core)), step);
 }
@@ -144,23 +140,13 @@ fn render(
     let hover = col(theme.toolbar);
 
     // Backdrop: a click outside the card or Escape cancels.
-    let backdrop = div()
-        .id("file-picker-backdrop")
-        .occlude()
-        .absolute()
-        .size_full()
-        .flex()
+    let core_cancel = core.clone();
+    let (backdrop, card) =
+        dialog::centered("file-picker", 640.0, move || pick(&core_cancel, None), cx);
+    let backdrop = backdrop
         .items_start()
-        .justify_center()
         .pt(px(80.0))
         .bg(gpui::rgba(0x000000_30))
-        .on_click(cx.listener({
-            let core = core.clone();
-            move |_, _: &ClickEvent, _, cx| {
-                pick(&core, None);
-                cx.notify();
-            }
-        }))
         .on_action(cx.listener({
             let core = core.clone();
             move |_, _: &Escape, _, cx| {
@@ -311,22 +297,12 @@ fn render(
         .gap(px(6.0))
         .child(toolbar)
         .child(rows);
-    let card = div()
-        .id("file-picker-card")
-        .flex()
-        .flex_col()
-        .w(px(640.0))
+    let card = card
         .h(px(420.0))
         .p(px(12.0))
         .gap(px(8.0))
-        .rounded(px(8.0))
-        .border_1()
         .border_color(col(theme.placeholder))
-        .bg(col(theme.bg))
-        .text_color(col(wb::Color::LIGHT_GRAY))
         .text_size(px(13.0))
-        // Swallow clicks so clicking the card does not cancel.
-        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.stop_propagation()))
         .child(div().text_size(px(14.0)).child(snap.title.clone()))
         .child(
             div()
