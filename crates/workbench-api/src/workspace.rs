@@ -41,6 +41,8 @@ pub enum PlatformDialog {
     About,
     Settings,
     Shortcuts,
+    /// Asks what to do with the unsaved documents as the window closes.
+    UnsavedChanges,
 }
 
 /// Ribbon item kind (ribbon-bar.md §2.4). Defaults (`Default` and serde) to
@@ -549,6 +551,8 @@ pub struct WorkspaceState {
     pub ribbon_collapse_enabled: bool,
     /// The open dialog (set by its command; the frontend renders it and closes it).
     pub dialog: Option<PlatformDialog>,
+    /// Unsaved work is settled, so the frontend should close the window, then clear this.
+    pub close_approved: bool,
     /// A page for the frontend to open in the browser, which then clears this.
     pub url_to_open: Option<String>,
     /// Active settings text edit (`app.settings.edit_begin`): the key being
@@ -588,6 +592,7 @@ impl WorkspaceState {
             ribbon_collapsed: false,
             ribbon_collapse_enabled: false,
             dialog: None,
+            close_approved: false,
             url_to_open: None,
             text_edit: None,
             file_picker: None,

@@ -34,5 +34,7 @@ mod state;
 mod web_files;
 
 pub use app::{AppRuntime, PluginStage, WorkbenchAppBuilder};
+#[cfg(target_arch = "wasm32")]
+pub use js::confirm_leaving_while;
 pub use executor::AsyncExecutor;
 pub use product::{discover as discover_product, load_from_dirs as load_product_from};

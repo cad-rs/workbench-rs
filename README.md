@@ -93,7 +93,9 @@ Documents live in the browser's private file system (OPFS), browsed by an
 in-app picker; Import and Export move copies to and from the device through the
 browser's chooser and downloads. Settings and the layout are kept in
 localStorage. There is no autosave, crash recovery or log file, and the
-device-flow login's HTTP client is desktop-only.
+device-flow login's HTTP client is desktop-only. Closing the desktop window
+with unsaved documents asks whether to save them; on the web, where a page
+cannot save as it closes, the browser asks whether to leave.
 
 ## Integration guide
 

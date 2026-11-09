@@ -29,10 +29,11 @@ pub(crate) fn overlay(
         wb::PlatformDialog::About => crate::about::overlay(core, focus, cx),
         wb::PlatformDialog::Settings => crate::settings::overlay(core, focus, cx),
         wb::PlatformDialog::Shortcuts => crate::shortcuts::overlay(core, focus, cx),
+        wb::PlatformDialog::UnsavedChanges => crate::unsaved::overlay(core, focus, cx),
     })
 }
 
-fn close(core: &SharedCore) {
+pub(crate) fn close(core: &SharedCore) {
     lock(core).host.ws.dialog = None;
 }
 

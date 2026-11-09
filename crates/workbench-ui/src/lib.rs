@@ -39,6 +39,9 @@ mod settings;
 /// Commands & Shortcuts dialog.
 mod shortcuts;
 
+/// The question about unsaved documents as the window closes.
+mod unsaved;
+
 /// Settings text-edit overlay (gpui-component Input hosted at root level).
 pub(crate) mod text_edit;
 
@@ -1140,13 +1143,18 @@ fn launch_app(
         let dock_window = dock.clone();
         let handle = cx
             .open_window(options, |window, cx| {
+                let core_close = core_window.clone();
+                window.on_window_should_close(cx, move |window, _| {
+                    let may_close = lock(&core_close).request_close();
+                    window.refresh();
+                    may_close
+                });
                 cx.new(|cx| {
                     cx.observe_window_activation(window, RootView::on_window_activation).detach();
                     RootView::new(core_window, dock_window, cx)
                 })
             })
             .expect("failed to open the window");
-        let _ = handle;
         cx.activate(true);
 
         // Platform tick timer: pumps task events, drives autosave, refreshes the context snapshot,
@@ -1181,6 +1189,16 @@ fn launch_app(
         })
         .detach();
 
+        // A browser tab closes without asking the app, so the browser's own
+        // prompt stands in for the dialog about unsaved documents.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let core_unsaved = core.clone();
+            workbench_core::confirm_leaving_while(move || {
+                core_unsaved.try_lock().map_or(true, |core| core.host.docs.has_unsaved())
+            });
+        }
+
         // A browser tab closes without a window-closed event, so the web
         // saves the layout as it goes; an unchanged layout isn't rewritten.
         #[cfg(target_arch = "wasm32")]
@@ -1208,11 +1226,15 @@ fn launch_app(
             // The old implementation only looked at `running > 0`, so the predicate turned false
             // the moment a task finished and the terminal event never got pumped; the Diagnostics
             // panel's "Background tasks running/total" then lagged until the next input.
-            let (needs_repaint, url_to_open) = {
+            let (needs_repaint, url_to_open, close_approved) = {
                 let mut core = lock(&core_loop);
                 let needs_repaint = core.frame_tick(0.1);
-                (needs_repaint, core.host.ws.url_to_open.take())
+                let ws = &mut core.host.ws;
+                (needs_repaint, ws.url_to_open.take(), std::mem::take(&mut ws.close_approved))
             };
+            if close_approved {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
             if let Some(url) = url_to_open {
                 cx.update(|cx| cx.open_url(&url));
             }

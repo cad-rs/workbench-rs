@@ -16,6 +16,25 @@ pub(crate) async fn blob_bytes(blob: &web_sys::Blob) -> Result<Vec<u8>, String> 
     Ok(Uint8Array::new(&buffer).to_vec())
 }
 
+/// Have the browser confirm leaving the page while `unsaved` says so. The page
+/// cannot save anything at that point, so this only keeps the user on it.
+pub fn confirm_leaving_while(unsaved: impl Fn() -> bool + 'static) {
+    let listener = wasm_bindgen::closure::Closure::<dyn Fn(web_sys::BeforeUnloadEvent)>::new(
+        move |event: web_sys::BeforeUnloadEvent| {
+            if unsaved() {
+                event.prevent_default();
+                event.set_return_value("");
+            }
+        },
+    );
+    if let Some(window) = web_sys::window() {
+        let _ = window
+            .add_event_listener_with_callback("beforeunload", listener.as_ref().unchecked_ref());
+    }
+    // The listener lives as long as the page.
+    listener.forget();
+}
+
 /// A user-readable message for a rejected promise or a thrown JS error.
 pub(crate) fn js_error(error: JsValue) -> String {
     let Some(error) = error.dyn_ref::<web_sys::DomException>() else {

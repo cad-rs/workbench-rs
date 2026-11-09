@@ -1780,6 +1780,120 @@ fn autosave_writes_a_document_only_when_it_changed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---- Closing with unsaved work ----
+
+fn unsaved_doc(app: &mut AppRuntime, title: &str) -> wb::DocumentId {
+    let doc = app.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), title).unwrap();
+    app.host.docs.commit(doc, "edit", true, Box::new(TestDoc)).unwrap();
+    doc
+}
+
+fn app_on(memory: &Arc<MemoryStorage>) -> AppRuntime {
+    builder().with_storage("mem", memory.clone()).build().unwrap()
+}
+
+fn tie_to_file(app: &mut AppRuntime, doc: wb::DocumentId, key: &str) {
+    app.host.docs.get_mut(doc).unwrap().location = Some(wb::Location::new("mem", key));
+}
+
+fn save_all(app: &mut AppRuntime) {
+    workbench_core::platform_cmds::save_all_and_close(&mut wb::CommandCtx::new(app));
+    settle(app);
+}
+
+#[test]
+fn a_window_with_nothing_unsaved_closes_without_asking() {
+    let mut app = app();
+    assert!(app.request_close());
+    assert_eq!(app.host.ws.dialog, None);
+}
+
+#[test]
+fn closing_with_unsaved_work_asks_first() {
+    let mut app = app();
+    unsaved_doc(&mut app, "Draft");
+    app.host.ws.text_edit = Some(wb::TextEdit::setting("ui.accent".to_string(), String::new()));
+    assert!(!app.request_close());
+    assert_eq!(app.host.ws.dialog, Some(wb::PlatformDialog::UnsavedChanges));
+    assert!(app.host.ws.text_edit.is_none(), "nothing hides the question");
+}
+
+#[test]
+fn save_all_writes_every_document_then_lets_the_window_close() {
+    let memory = Arc::new(MemoryStorage::default());
+    let mut app = app_on(&memory);
+    let tied = unsaved_doc(&mut app, "Tied");
+    tie_to_file(&mut app, tied, "tied.shapes");
+    let draft = unsaved_doc(&mut app, "Draft");
+    app.host.ws.dialog = Some(wb::PlatformDialog::UnsavedChanges);
+
+    save_all(&mut app);
+    assert_eq!(app.host.ws.dialog, None);
+    assert!(!app.host.docs.get(tied).unwrap().dirty, "the one with a file is written first");
+    assert!(app.host.ws.file_picker.is_some(), "and the draft asks where to go");
+    assert!(!app.host.ws.close_approved);
+
+    app.finish_file_dialog(Some(wb::Location::new("mem", "draft.shapes")));
+    settle(&mut app);
+    assert!(!app.host.docs.get(draft).unwrap().dirty);
+    assert!(app.host.ws.close_approved);
+    assert!(memory.files.lock().unwrap().contains_key("tied.shapes"));
+    assert!(memory.files.lock().unwrap().contains_key("draft.shapes"));
+}
+
+#[test]
+fn cancelling_the_file_dialog_keeps_the_app_open() {
+    let memory = Arc::new(MemoryStorage::default());
+    let mut app = app_on(&memory);
+    let draft = unsaved_doc(&mut app, "Draft");
+    save_all(&mut app);
+    app.finish_file_dialog(None);
+    settle(&mut app);
+    assert!(!app.host.ws.close_approved);
+    assert!(app.host.docs.get(draft).unwrap().dirty);
+}
+
+#[test]
+fn a_failed_save_keeps_the_app_open_and_stops_there() {
+    let memory = Arc::new(MemoryStorage::default());
+    memory.refused.lock().unwrap().push("first.shapes".to_string());
+    let mut app = app_on(&memory);
+    let first = unsaved_doc(&mut app, "First");
+    tie_to_file(&mut app, first, "first.shapes");
+    let second = unsaved_doc(&mut app, "Second");
+    tie_to_file(&mut app, second, "second.shapes");
+
+    save_all(&mut app);
+    assert!(!app.host.ws.close_approved);
+    assert!(app.host.docs.get(first).unwrap().dirty);
+    assert!(app.host.docs.get(second).unwrap().dirty, "it stopped at the failure");
+    assert!(logged(&app, "Refused"));
+}
+
+#[test]
+fn an_edit_during_the_saves_is_asked_about_again() {
+    let memory = Arc::new(MemoryStorage::default());
+    let mut app = app_on(&memory);
+    let draft = unsaved_doc(&mut app, "Draft");
+    save_all(&mut app);
+    app.finish_file_dialog(Some(wb::Location::new("mem", "draft.shapes")));
+    app.host.docs.commit(draft, "edit", true, Box::new(TestDoc)).unwrap();
+    settle(&mut app);
+    assert!(!app.host.ws.close_approved);
+    assert_eq!(app.host.ws.dialog, Some(wb::PlatformDialog::UnsavedChanges));
+}
+
+#[test]
+fn closing_waits_for_a_file_dialog_in_flight() {
+    let memory = Arc::new(MemoryStorage::default());
+    let mut app = app_on(&memory);
+    unsaved_doc(&mut app, "Draft");
+    save_all(&mut app);
+    assert!(app.host.ws.file_picker.is_some());
+    assert!(!app.request_close());
+    assert_eq!(app.host.ws.dialog, None);
+}
+
 // ---- Diagnostics ----
 
 const SEND_CRASH_REPORTS: &str = "diagnostics.send_crash_reports";

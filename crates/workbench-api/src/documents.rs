@@ -253,6 +253,10 @@ impl DocumentService {
         self.docs.iter()
     }
 
+    pub fn has_unsaved(&self) -> bool {
+        self.docs.iter().any(|doc| doc.dirty)
+    }
+
     pub fn active_id(&self) -> Option<DocumentId> {
         self.active
     }

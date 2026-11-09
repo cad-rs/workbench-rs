@@ -595,6 +595,20 @@ impl AppRuntime {
         true
     }
 
+    /// The user asked to close the window. True when it can close now; otherwise the user is
+    /// asked about the unsaved documents, and `ws.close_approved` says when it may.
+    pub fn request_close(&mut self) -> bool {
+        if !self.host.docs.has_unsaved() {
+            return true;
+        }
+        // A file dialog in flight is a choice the user has to finish first.
+        if self.dialog_in_flight.is_none() {
+            self.host.ws.text_edit = None;
+            self.host.ws.dialog = Some(api::PlatformDialog::UnsavedChanges);
+        }
+        false
+    }
+
     /// The app's window came back to the foreground, which is when a plan bought elsewhere
     /// should show up.
     pub fn window_activated(&mut self) {

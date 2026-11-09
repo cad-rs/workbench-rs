@@ -65,4 +65,6 @@ web-sys = { workspace = true, features = [
     "Blob",
     "Url",
     "EventTarget",
+    # asking before leaving with unsaved work
+    "BeforeUnloadEvent",
 ] }
