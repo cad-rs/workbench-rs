@@ -18,12 +18,13 @@ pub struct AccountUser {
     pub email: Option<String>,
 }
 
-/// The device-authorization response the user acts on in a browser
-/// ([RFC 8628] §3.2).
+/// What the user does in a browser to sign in: the device-authorization
+/// response ([RFC 8628] §3.2), or a sign-in page with nothing to type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceAuthRequest {
     /// Short code the user types at the verification URI (e.g. `ABCD-EFGH`).
-    pub user_code: String,
+    /// None: there is nothing to type, so the platform opens the URI itself.
+    pub user_code: Option<String>,
     /// Where to enter it.
     pub verification_uri: String,
     /// Prefilled link, when the IdP offers one.
@@ -57,12 +58,11 @@ pub const SLOW_DOWN_INTERVAL_SECS: u64 = 5;
 /// I/O — the platform invokes them from background threads, never the UI
 /// thread.
 pub trait AccountService: Send + Sync {
-    /// Start the device-authorization flow (discovers endpoints, requests a
-    /// device code). The returned request is what the UI shows the user; the
-    /// service remembers the paired device code for [`AccountService::poll`].
+    /// Start signing in. The returned request is what the user acts on; the
+    /// service remembers what it needs for [`AccountService::poll`].
     fn begin_login(&self) -> Result<DeviceAuthRequest, String>;
 
-    /// One token poll for the flow started by [`AccountService::begin_login`].
+    /// One check on the flow started by [`AccountService::begin_login`].
     /// Pure network: no sleeping, no retry loops — pacing belongs to the
     /// caller.
     fn poll(&self) -> Result<PollResult, String>;
@@ -85,7 +85,7 @@ mod tests {
     impl AccountService for ScriptedAccount {
         fn begin_login(&self) -> Result<DeviceAuthRequest, String> {
             Ok(DeviceAuthRequest {
-                user_code: "TEST-CODE".into(),
+                user_code: Some("TEST-CODE".into()),
                 verification_uri: "https://example.test/device".into(),
                 verification_uri_complete: None,
                 expires_in: 600,

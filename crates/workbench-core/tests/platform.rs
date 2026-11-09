@@ -1521,7 +1521,7 @@ struct InstantAccount;
 impl wb::AccountService for InstantAccount {
     fn begin_login(&self) -> Result<wb::DeviceAuthRequest, String> {
         Ok(wb::DeviceAuthRequest {
-            user_code: "CODE".into(),
+            user_code: Some("CODE".into()),
             verification_uri: "https://example.test/device".into(),
             verification_uri_complete: None,
             expires_in: 600,
@@ -1631,6 +1631,54 @@ fn offline_at_launch_keeps_the_cached_plan_for_the_session() {
     settle(&mut app);
     assert_eq!(subscription.checks(), 2);
     assert!(app.is_enabled("test.gated"), "the lapse is found mid-session");
+}
+
+/// Signs in through a page the platform has to open.
+struct BrowserAccount;
+
+impl wb::AccountService for BrowserAccount {
+    fn begin_login(&self) -> Result<wb::DeviceAuthRequest, String> {
+        Ok(wb::DeviceAuthRequest {
+            user_code: None,
+            verification_uri: "https://example.test/sign-in".into(),
+            verification_uri_complete: None,
+            expires_in: 600,
+            interval: 1,
+        })
+    }
+    fn poll(&self) -> Result<wb::PollResult, String> {
+        Ok(wb::PollResult::Pending)
+    }
+    fn logout(&self) {}
+    fn current_user(&self) -> Option<wb::AccountUser> {
+        None
+    }
+}
+
+/// Runs the sign-in command until the platform shows it as pending.
+fn pending_sign_in(service: Arc<dyn wb::AccountService>) -> AppRuntime {
+    let mut app = builder().with_account(service).build().unwrap();
+    assert!(app.execute_command("app.account.login", &wb::CommandArgs::default()).is_ok());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !matches!(app.host.ws.account, wb::AccountPhase::Pending(_)) {
+        assert!(std::time::Instant::now() < deadline, "sign-in never started");
+        app.frame_tick(0.0);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    app
+}
+
+#[test]
+fn a_sign_in_with_nothing_to_type_opens_the_browser() {
+    let mut app = pending_sign_in(Arc::new(BrowserAccount));
+    assert_eq!(app.host.ws.url_to_open.as_deref(), Some("https://example.test/sign-in"));
+    assert!(app.execute_command("app.account.cancel_login", &wb::CommandArgs::default()).is_ok());
+}
+
+#[test]
+fn a_sign_in_with_a_code_to_type_leaves_the_browser_alone() {
+    let app = pending_sign_in(Arc::new(InstantAccount));
+    assert_eq!(app.host.ws.url_to_open, None);
 }
 
 #[test]

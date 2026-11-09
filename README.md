@@ -143,7 +143,7 @@ A complete runnable version lives in `products/product-demo/src/main.rs`
 | Builder call | What it adds |
 |---|---|
 | `with_storage(id, provider)` | Another place documents can live (a cloud store, …), offered in the in-app file picker |
-| `with_account(service)` | Sign-in; `account::DeviceFlowClient` is a ready OAuth 2.0 device-flow client (its session lasts until the app exits) |
+| `with_account(service)` | Sign-in; `auth_code::AuthCodeClient` signs in through the system browser (authorization code + PKCE + loopback redirect, desktop only), configured with `AuthCodeConfig`; `account::DeviceFlowClient` is a ready OAuth 2.0 device-flow client (its session lasts until the app exits) |
 | `with_entitlements(e)` | Which features the user may use (below) |
 | `with_crash_reporter(r)` | Where crash reports go; adds a setting that is off by default |
 | `with_profile(p)` | Identity and branding from `product.toml` (`product::discover()` finds one) |

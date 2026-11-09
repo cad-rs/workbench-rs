@@ -214,7 +214,7 @@ impl ServiceHost {
                         }
                         Ok(crate::account::PollResult::Expired) => {
                             let _ = tx.send(crate::workspace::AccountPhase::Failed(
-                                "The sign-in code has expired".to_string(),
+                                "The sign-in request has expired".to_string(),
                             ));
                             return;
                         }

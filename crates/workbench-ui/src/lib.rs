@@ -569,8 +569,10 @@ impl Render for RootView {
                             login_label: tr("Sign in"),
                         },
                         wb::AccountPhase::Pending(req) => AccountChip::Pending {
-                            user_code: req.user_code.clone(),
-                            uri: req.verification_uri.clone(),
+                            prompt: match &req.user_code {
+                                Some(code) => format!("{code} · {}", req.verification_uri),
+                                None => tr("Waiting for the browser…"),
+                            },
                             cancel_label: tr("Cancel"),
                         },
                         wb::AccountPhase::LoggedIn(user) => AccountChip::LoggedIn {
@@ -750,8 +752,7 @@ enum AccountChip {
         login_label: String,
     },
     Pending {
-        user_code: String,
-        uri: String,
+        prompt: String,
         cancel_label: String,
     },
     LoggedIn {
@@ -913,8 +914,7 @@ fn render_account_chip(
             &weak,
         )),
         AccountChip::Pending {
-            user_code,
-            uri,
+            prompt,
             cancel_label,
         } => div()
             .flex()
@@ -922,7 +922,7 @@ fn render_account_chip(
             .gap(px(4.0))
             .text_size(px(11.0))
             .text_color(col(wb::Color::YELLOW))
-            .child(div().child(format!("{user_code} · {uri}")))
+            .child(div().child(prompt.clone()))
             .child(chip_button(
                 cancel_label.clone(),
                 "app.account.cancel_login",

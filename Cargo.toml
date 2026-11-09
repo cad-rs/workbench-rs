@@ -40,6 +40,11 @@ chrono = "0.4"
 env_logger = "0.11"
 # OAuth device-flow HTTP client (account integration; desktop targets).
 ureq = "3"
+# OAuth authorization code + PKCE
+base64 = "0.23"
+form_urlencoded = "1"
+getrandom = "0.3"
+sha2 = "0.10"
 
 # Platform async executor (phase 2: Async commands)
 async-executor = "1"

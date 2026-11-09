@@ -525,7 +525,7 @@ pub enum AccountPhase {
     /// No session.
     #[default]
     LoggedOut,
-    /// Device auth in progress: show the user code + verification URI.
+    /// Sign-in in progress: show the user code + verification URI, if there is a code.
     Pending(crate::account::DeviceAuthRequest),
     /// Logged in.
     LoggedIn(crate::account::AccountUser),

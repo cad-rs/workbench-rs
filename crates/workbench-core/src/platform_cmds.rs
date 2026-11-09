@@ -127,6 +127,7 @@ fn register_builtin_locales(registry: &mut Registry) {
             // Account chip.
             ("Sign in", "登录"),
             ("Sign out", "登出"),
+            ("Waiting for the browser…", "等待浏览器登录…"),
             // File picker.
             ("Open", "打开"),
             ("Overwrite", "覆盖"),

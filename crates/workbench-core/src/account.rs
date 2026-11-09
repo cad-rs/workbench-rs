@@ -62,25 +62,26 @@ impl<T: HttpTransport> DeviceFlowClient<T> {
         let doc = self.transport.get_json(&url, None)?;
         DeviceEndpoints::from_discovery(&doc)
     }
+}
 
-    fn user_from_claims(claims: &Value) -> Result<AccountUser, String> {
-        let id = claims
-            .get("sub")
-            .and_then(Value::as_str)
-            .ok_or("The userinfo response is missing sub")?
-            .to_string();
-        let name = claims
-            .get("name")
-            .or_else(|| claims.get("preferred_username"))
-            .and_then(Value::as_str)
-            .unwrap_or(&id)
-            .to_string();
-        let email = claims
-            .get("email")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        Ok(AccountUser { id, name, email })
-    }
+/// The user an OIDC claims object describes.
+pub(crate) fn user_from_claims(claims: &Value) -> Result<AccountUser, String> {
+    let id = claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .ok_or("The userinfo response is missing sub")?
+        .to_string();
+    let name = claims
+        .get("name")
+        .or_else(|| claims.get("preferred_username"))
+        .and_then(Value::as_str)
+        .unwrap_or(&id)
+        .to_string();
+    let email = claims
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(AccountUser { id, name, email })
 }
 
 /// OIDC endpoints the device flow needs, from the discovery document.
@@ -128,7 +129,7 @@ impl<T: HttpTransport> AccountService for DeviceFlowClient<T> {
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = Some(device_code);
         Ok(DeviceAuthRequest {
-            user_code: str_field("user_code")?,
+            user_code: Some(str_field("user_code")?),
             verification_uri: str_field("verification_uri")?,
             verification_uri_complete: body
                 .get("verification_uri_complete")
@@ -162,9 +163,9 @@ impl<T: HttpTransport> AccountService for DeviceFlowClient<T> {
             let user = match &eps.userinfo {
                 Some(url) => {
                     let claims = self.transport.get_json(url, Some(access_token))?;
-                    Self::user_from_claims(&claims)?
+                    user_from_claims(&claims)?
                 }
-                None => Self::user_from_claims(&body)?,
+                None => user_from_claims(&body)?,
             };
             *self.session.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some((access_token.to_string(), user.clone()));

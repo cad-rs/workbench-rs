@@ -132,7 +132,7 @@ fn device_flow_success_after_pending_polls() {
     let mock = spawn_mock(2);
     let client = DeviceFlowClient::new(&mock.issuer, "test-client", UreqTransport::new());
     let req = client.begin_login().expect("begin_login");
-    assert_eq!(req.user_code, "ABCD-EFGH");
+    assert_eq!(req.user_code.as_deref(), Some("ABCD-EFGH"));
     assert!(req.verification_uri.contains("/activate"));
     assert!(req.interval >= 1);
 

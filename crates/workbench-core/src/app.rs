@@ -374,9 +374,15 @@ impl AppRuntime {
             self.host.account_login_cancel = None;
         }
         if let Some(phase) = updates.pop() {
-            if let api::AccountPhase::LoggedIn(user) = &phase {
-                self.host.log.info(format!("Signed in as {}", user.name));
-                self.account_changed();
+            match &phase {
+                api::AccountPhase::LoggedIn(user) => {
+                    self.host.log.info(format!("Signed in as {}", user.name));
+                    self.account_changed();
+                }
+                api::AccountPhase::Pending(request) if request.user_code.is_none() => {
+                    self.host.ws.url_to_open = Some(request.verification_uri.clone());
+                }
+                _ => {}
             }
             self.host.ws.account = phase;
         }
@@ -1435,7 +1441,7 @@ impl WorkbenchAppBuilder {
 
     /// Inject the account capability (Phase 3). None (the default) hides the
     /// login surface; the reference implementation is
-    /// [`crate::account::DeviceFlowClient`].
+    /// [`crate::account::DeviceFlowClient`] and `auth_code::AuthCodeClient`.
     pub fn with_account(mut self, service: Arc<dyn api::AccountService>) -> Self {
         self.account = Some(service);
         self
