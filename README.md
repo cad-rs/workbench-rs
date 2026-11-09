@@ -93,7 +93,10 @@ Documents live in the browser's private file system (OPFS), browsed by an
 in-app picker; Import and Export move copies to and from the device through the
 browser's chooser and downloads. Settings and the layout are kept in
 localStorage. There is no autosave, crash recovery or log file, and the
-device-flow login's HTTP client is desktop-only. Closing the desktop window
+device-flow login's HTTP client is desktop-only. Browser sign-in opens the
+sign-in page in another tab and needs `auth-callback.html` served on the app's
+origin, that URL accepted as a redirect, and CORS on the token and userinfo
+endpoints. Closing the desktop window
 with unsaved documents asks whether to save them; on the web, where a page
 cannot save as it closes, the browser asks whether to leave.
 
@@ -143,7 +146,7 @@ A complete runnable version lives in `products/product-demo/src/main.rs`
 | Builder call | What it adds |
 |---|---|
 | `with_storage(id, provider)` | Another place documents can live (a cloud store, …), offered in the in-app file picker |
-| `with_account(service)` | Sign-in; `auth_code::AuthCodeClient` signs in through the system browser (authorization code + PKCE + loopback redirect, desktop only), configured with `AuthCodeConfig`; `account::DeviceFlowClient` is a ready OAuth 2.0 device-flow client (its session lasts until the app exits) |
+| `with_account(service)` | Sign-in; `auth_code::AuthCodeClient` (desktop, loopback redirect) and `auth_code::WebAuthCodeClient` (web, callback page) sign in through the browser with the authorization code + PKCE, configured with `AuthCodeConfig`; `account::DeviceFlowClient` is a ready OAuth 2.0 device-flow client (its session lasts until the app exits) |
 | `with_entitlements(e)` | Which features the user may use (below) |
 | `with_crash_reporter(r)` | Where crash reports go; adds a setting that is off by default |
 | `with_profile(p)` | Identity and branding from `product.toml` (`product::discover()` finds one) |

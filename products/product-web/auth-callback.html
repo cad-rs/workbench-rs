@@ -1,0 +1,11 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Sign-in</title>
+<p>You can close this tab and return to the app.</p>
+<script>
+    // The redirect target of WebAuthCodeClient: hands the query to the app's
+    // tab, which checks it. The key is this sign-in's own.
+    const state = new URLSearchParams(location.search).get("state");
+    if (state) localStorage.setItem("workbench.sign_in." + state, location.search.slice(1));
+    window.close();
+</script>

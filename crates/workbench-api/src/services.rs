@@ -146,10 +146,9 @@ impl ServiceHost {
 
     // ---- Account (Phase 3: device flow, polled on a background thread) ----
 
-    /// Start the device login: `begin_login` + token polling run on a
-    /// background thread (network I/O must never touch the UI thread); phase
-    /// updates arrive via the channel and land in `ws.account` each frame
-    /// (drained by the runtime).
+    /// Start signing in. Phase updates arrive via the channel and land in `ws.account` each
+    /// tick (drained by the runtime). The desktop's network calls block, so they get a thread;
+    /// on the web they are written not to.
     pub fn begin_account_login(&mut self) -> Result<(), String> {
         let Some(service) = self.account.clone() else {
             return Err("The product has no account service configured".to_string());
@@ -157,78 +156,15 @@ impl ServiceHost {
         if self.account_login_rx.is_some() {
             return Err("A sign-in is already in progress".to_string());
         }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = service;
-            Err("The web sign-in flow is not implemented yet".to_string())
-        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.account_login_rx = Some(rx);
+        self.account_login_cancel = Some(cancel.clone());
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            use std::sync::atomic::AtomicBool;
-            use std::sync::Arc;
-
-            let (tx, rx) = std::sync::mpsc::channel();
-            let cancel = Arc::new(AtomicBool::new(false));
-            self.account_login_rx = Some(rx);
-            self.account_login_cancel = Some(cancel.clone());
-
-            std::thread::spawn(move || {
-                let req = match service.begin_login() {
-                    Ok(req) => req,
-                    Err(e) => {
-                        let _ = tx.send(crate::workspace::AccountPhase::Failed(format!(
-                            "Could not start signing in: {e}"
-                        )));
-                        return;
-                    }
-                };
-                let mut interval = req.interval.max(1);
-                let _ = tx.send(crate::workspace::AccountPhase::Pending(req));
-                loop {
-                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        return;
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(interval));
-                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        return;
-                    }
-                    // RFC 8628: the token endpoint wants the device code,
-                    // which the service remembers from begin_login — poll()
-                    // takes no argument so a user_code can never be sent by
-                    // mistake.
-                    match service.poll() {
-                        Ok(crate::account::PollResult::Pending) => continue,
-                        Ok(crate::account::PollResult::SlowDown) => {
-                            interval += crate::account::SLOW_DOWN_INTERVAL_SECS;
-                            continue;
-                        }
-                        Ok(crate::account::PollResult::Success(user)) => {
-                            let _ = tx.send(crate::workspace::AccountPhase::LoggedIn(user));
-                            return;
-                        }
-                        Ok(crate::account::PollResult::Denied) => {
-                            let _ = tx.send(crate::workspace::AccountPhase::Failed(
-                                "Sign-in was denied".to_string(),
-                            ));
-                            return;
-                        }
-                        Ok(crate::account::PollResult::Expired) => {
-                            let _ = tx.send(crate::workspace::AccountPhase::Failed(
-                                "The sign-in request has expired".to_string(),
-                            ));
-                            return;
-                        }
-                        Err(e) => {
-                            let _ = tx.send(crate::workspace::AccountPhase::Failed(format!(
-                                "Sign-in failed: {e}"
-                            )));
-                            return;
-                        }
-                    }
-                }
-            });
-            Ok(())
-        }
+        std::thread::spawn(move || async_io::block_on(sign_in(service, tx, cancel)));
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(sign_in(service, tx, cancel));
+        Ok(())
     }
 
     /// Abort an in-flight device login (the poll thread exits on the flag;
@@ -332,6 +268,47 @@ pub trait AppServices {
     /// When they come back to the app the platform keeps checking for a while,
     /// since the payment can take a moment to reach the product's server.
     fn open_purchase_page(&mut self, url: &str);
+}
+
+/// One sign-in from start to finish, reporting each phase.
+async fn sign_in(
+    service: Arc<dyn crate::account::AccountService>,
+    tx: std::sync::mpsc::Sender<crate::workspace::AccountPhase>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use crate::account::{PollResult, SLOW_DOWN_INTERVAL_SECS};
+    use crate::workspace::AccountPhase;
+
+    let request = match service.begin_login() {
+        Ok(request) => request,
+        Err(e) => {
+            let _ = tx.send(AccountPhase::Failed(format!("Could not start signing in: {e}")));
+            return;
+        }
+    };
+    let mut interval = request.interval.max(1);
+    let _ = tx.send(AccountPhase::Pending(request));
+    loop {
+        crate::asyncrt::sleep(std::time::Duration::from_secs(interval)).await;
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let end = match service.poll() {
+            Ok(PollResult::Pending) => continue,
+            Ok(PollResult::SlowDown) => {
+                interval += SLOW_DOWN_INTERVAL_SECS;
+                continue;
+            }
+            Ok(PollResult::Success(user)) => AccountPhase::LoggedIn(user),
+            Ok(PollResult::Denied) => AccountPhase::Failed("Sign-in was denied".to_string()),
+            Ok(PollResult::Expired) => {
+                AccountPhase::Failed("The sign-in request has expired".to_string())
+            }
+            Err(e) => AccountPhase::Failed(format!("Sign-in failed: {e}")),
+        };
+        let _ = tx.send(end);
+        return;
+    }
 }
 
 /// Where crash reports go once the user has agreed to send them

@@ -11,7 +11,6 @@
 pub mod account;
 pub mod app;
 pub mod assets;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod auth_code;
 pub mod cli;
 pub mod diagnostics;

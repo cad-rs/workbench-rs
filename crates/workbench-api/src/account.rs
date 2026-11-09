@@ -54,9 +54,9 @@ pub enum PollResult {
 /// RFC 8628: seconds to add to the polling interval on `slow_down`.
 pub const SLOW_DOWN_INTERVAL_SECS: u64 = 5;
 
-/// The account capability a product may inject. All calls may perform network
-/// I/O — the platform invokes them from background threads, never the UI
-/// thread.
+/// The account capability a product may inject. On the desktop the platform
+/// invokes these from a background thread, so they may block on the network.
+/// On the web they run on the page's only thread and must not block.
 pub trait AccountService: Send + Sync {
     /// Start signing in. The returned request is what the user acts on; the
     /// service remembers what it needs for [`AccountService::poll`].

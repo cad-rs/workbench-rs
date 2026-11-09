@@ -15,6 +15,11 @@ workbench-api = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+# Browser sign-in
+base64 = { workspace = true }
+form_urlencoded = { workspace = true }
+sha2 = { workspace = true }
+web-time = { workspace = true }
 
 # Desktop only: native file dialogs and local file storage (none on the web), and the async-io
 # timer driving the shared executor (async-io 2.6's rustix/errno chain does not support
@@ -31,11 +36,7 @@ env_logger = { workspace = true }
 # OAuth device-flow HTTP (account integration; desktop only — the web build
 # gets a stub AccountService from its product, if any).
 ureq = { workspace = true }
-# Browser sign-in: PKCE and the loopback redirect
-base64 = { workspace = true }
-form_urlencoded = { workspace = true }
 getrandom = { workspace = true }
-sha2 = { workspace = true }
 
 # Web (wasm32): async executor drives futures on the main thread; app state
 # (settings, layout) lives in localStorage; documents in OPFS; import/export
@@ -72,4 +73,11 @@ web-sys = { workspace = true, features = [
     "EventTarget",
     # asking before leaving with unsaved work
     "BeforeUnloadEvent",
+    # browser sign-in
+    "Crypto",
+    "Headers",
+    "Location",
+    "Request",
+    "RequestInit",
+    "Response",
 ] }
