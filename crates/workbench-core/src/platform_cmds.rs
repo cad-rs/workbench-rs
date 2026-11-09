@@ -22,6 +22,8 @@ pub const TOGGLE_PANEL_PREFIX: &str = "app.toggle_panel.";
 pub const ABOUT: &str = "app.about";
 pub const EXPORT_DIAGNOSTICS: &str = "app.export_diagnostics";
 pub const OPEN_SETTINGS: &str = "app.settings.open";
+pub const OPEN_SHORTCUTS: &str = "app.shortcuts.open";
+pub const TOGGLE_RIBBON_COLLAPSE: &str = "app.toggle_ribbon_collapse";
 pub const SETTINGS_SET: &str = "app.settings.set";
 pub const SETTINGS_EDIT_BEGIN: &str = "app.settings.edit_begin";
 pub const ACCOUNT_LOGIN: &str = "app.account.login";
@@ -55,6 +57,8 @@ fn register_builtin_locales(registry: &mut Registry) {
             ("Autosave Now", "立即自动保存"),
             ("Change Setting", "修改设置"),
             ("About", "关于"),
+            ("Commands & Shortcuts", "快捷键命令表"),
+            ("Other", "其他"),
             ("Show/Hide ", "显示/隐藏 "),
             // Ribbon groups & tabs.
             ("View", "窗口"),
@@ -402,7 +406,7 @@ pub fn register(registry: &mut Registry) {
     // Ribbon collapse toggle (Ctrl+F1, only when enabled, ribbon-bar.md §4.5)
     registry.register_command(
         CommandDef::sync(
-            "app.toggle_ribbon_collapse",
+            TOGGLE_RIBBON_COLLAPSE,
             "Collapse/Expand Ribbon",
             |ctx: &mut CommandCtx, _args: &CommandArgs| {
                 let host = ctx.host();
@@ -523,6 +527,20 @@ pub fn register(registry: &mut Registry) {
         .enabled_when(|_| true),
     );
 
+    // The Commands & Shortcuts dialog: a workspace flag too.
+    registry.register_command(
+        CommandDef::sync(
+            OPEN_SHORTCUTS,
+            "Commands & Shortcuts",
+            |ctx: &mut CommandCtx, _args: &CommandArgs| {
+                ctx.host().ws.shortcuts_open = true;
+                CommandResult::done()
+            },
+        )
+        .icon(crate::assets::icons::KEYBOARD)
+        .enabled_when(|_| true),
+    );
+
     registry.register_command(
         CommandDef::sync(
             EXPORT_DIAGNOSTICS,
@@ -575,6 +593,9 @@ pub fn register(registry: &mut Registry) {
 
     // The "Help" toolbar group: the About dialog (product branding info) and what support needs.
     let mut help_group = api::ToolbarGroup::new("app.help", "Help");
+    help_group
+        .items
+        .push(api::ToolbarItem::labeled(OPEN_SHORTCUTS, "Commands & Shortcuts"));
     help_group
         .items
         .push(api::ToolbarItem::labeled(ABOUT, "About"));

@@ -12,8 +12,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    div, prelude::*, px, relative, size, AnyElement, App, Bounds, Context, Div, Hsla, KeyDownEvent,
-    Pixels, Render, Rgba, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, relative, size, AnyElement, App, Bounds, Context, Div, Focusable as _,
+    Hsla, KeyDownEvent, Pixels, Render, Rgba, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 
 use workbench_api as wb;
@@ -35,6 +35,9 @@ mod file_picker;
 
 /// Settings dialog.
 mod settings;
+
+/// Commands & Shortcuts dialog.
+mod shortcuts;
 
 /// Settings text-edit overlay (gpui-component Input hosted at root level).
 pub(crate) mod text_edit;
@@ -136,7 +139,11 @@ struct RootView {
     mirror: dock_panel::SharedMirror,
     /// Ribbon mount point (a ribbon crate entity; built lazily on the first frame, like the dock).
     ribbon: ribbon_bridge::RibbonHost,
-    settings_focus: settings::DialogFocus,
+    settings_focus: dialog::DialogFocus,
+    shortcuts_focus: dialog::DialogFocus,
+    /// Where the keyboard rests when nothing else holds it. GPUI sends keys along the focus
+    /// path, so with no holder the hotkeys never hear them.
+    keyboard_home: gpui::FocusHandle,
     /// Last-applied `ui.theme` / `ui.accent` settings: the render loop
     /// re-applies the theme when either diverges from what is on screen
     /// (settings dialog writes land live).
@@ -182,7 +189,9 @@ impl RootView {
                 dock_panel::DockMirror::default(),
             )),
             ribbon: ribbon_bridge::RibbonHost::new(),
-            settings_focus: settings::DialogFocus::new(cx),
+            settings_focus: dialog::DialogFocus::new(cx),
+            shortcuts_focus: dialog::DialogFocus::new(cx),
+            keyboard_home: cx.focus_handle(),
             applied_theme,
             applied_accent,
             edit_input: None,
@@ -261,7 +270,7 @@ pub(crate) fn paint_placeholder(window: &mut Window, bounds: Bounds<Pixels>) {
     window.paint_quad(gpui::fill(bounds, col(theme::ui_theme().placeholder)));
 }
 
-/// A modal overlay (About, Settings, text edit), drawn deferred: on GPUI's overlay
+/// A modal overlay (a dialog or text edit), drawn deferred: on GPUI's overlay
 /// layer, above everything else — including native viewport surfaces, which
 /// window composition stacks between the base content and the overlays.
 fn modal_overlay(overlay: impl IntoElement) -> gpui::Deferred {
@@ -626,6 +635,7 @@ impl Render for RootView {
                     if text_edit::is_active(&core_k)
                         || file_picker::is_open(&core_k)
                         || settings::is_open(&core_k)
+                        || shortcuts::is_open(&core_k)
                     {
                         return;
                     }
@@ -666,13 +676,22 @@ impl Render for RootView {
             root_col = root_col.child(modal_overlay(overlay));
         }
 
+        if let Some(overlay) = shortcuts::overlay(&core, &mut self.shortcuts_focus, window, cx) {
+            root_col = root_col.child(modal_overlay(overlay));
+        }
+
         // ---- In-app file picker (open/save for OPFS and cloud stores):
         // mount a save picker's file-name input when it opens, drop it when
         // the picker closes. Drawn below the text-edit overlay, which hosts
         // its "new folder" prompt.
+        let mut closed_input = None;
         let picker_open = file_picker::is_open(&core);
         if picker_open != self.picker_mounted {
             self.picker_mounted = picker_open;
+            closed_input = self
+                .picker_input
+                .as_ref()
+                .map(|(input, _)| input.read(cx).focus_handle(cx));
             self.picker_input = file_picker::save_name(&core)
                 .map(|seed| file_picker::create_name_input(&core, &seed, window, cx));
         }
@@ -705,7 +724,7 @@ impl Render for RootView {
                 .text_edit
                 .is_none()
         {
-            self.edit_input = None;
+            closed_input = self.edit_input.take().map(|input| input.read(cx).focus_handle(cx));
             self.edit_subscription = None;
             self.edit_key = None;
         }
@@ -720,7 +739,15 @@ impl Render for RootView {
             root_col = root_col.child(modal_overlay(overlay));
         }
 
-        root_col
+        // A dialog under a closed input has taken the keyboard back by now; only an input
+        // that still holds it leaves it stranded.
+        if closed_input.is_some_and(|input| input.is_focused(window)) || window.focused(cx).is_none()
+        {
+            window.focus(&self.keyboard_home, cx);
+        }
+        // Sizeless on purpose: `track_focus` takes the focus on any click that lands on its
+        // element, and this one must never pull it away from a panel or an input.
+        root_col.child(div().absolute().size_0().track_focus(&self.keyboard_home))
     }
 }
 

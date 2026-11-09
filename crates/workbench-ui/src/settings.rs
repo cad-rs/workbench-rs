@@ -6,13 +6,7 @@
 //! made, so the dialog only has a way to close. A string row opens the
 //! text-edit overlay, which draws above this dialog.
 
-use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, FocusHandle, IntoElement, KeyDownEvent,
-    ParentElement as _, Styled as _, Window, div, prelude::*, px, relative,
-};
-use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::Sizable as _;
-use gpui_component::scroll::ScrollableElement as _;
+use gpui::{AnyElement, Context, Div, Window, div, prelude::*, px};
 use workbench_api as wb;
 use wb::Color;
 
@@ -23,49 +17,14 @@ pub(crate) fn is_open(core: &SharedCore) -> bool {
     core.lock().unwrap_or_else(|p| p.into_inner()).host.ws.settings_open
 }
 
-pub(crate) fn close(core: &SharedCore) {
+fn close(core: &SharedCore) {
     core.lock().unwrap_or_else(|p| p.into_inner()).host.ws.settings_open = false;
-}
-
-/// Keeps the keyboard on the dialog while it is open and hands it back after.
-/// GPUI sends keys along the focus path, so Escape only reaches a focused
-/// dialog.
-pub(crate) struct DialogFocus {
-    handle: FocusHandle,
-    previous: Option<FocusHandle>,
-    open: bool,
-}
-
-impl DialogFocus {
-    pub(crate) fn new(cx: &mut App) -> Self {
-        Self {
-            handle: cx.focus_handle(),
-            previous: None,
-            open: false,
-        }
-    }
-
-    /// `on_top` is false while an overlay above the dialog needs the keyboard;
-    /// the dialog takes it back when that overlay closes.
-    fn sync(&mut self, open: bool, on_top: bool, window: &mut Window, cx: &mut App) {
-        if open != self.open {
-            self.open = open;
-            if open {
-                self.previous = window.focused(cx);
-            } else if let Some(previous) = self.previous.take() {
-                window.focus(&previous, cx);
-            }
-        }
-        if open && on_top && !self.handle.is_focused(window) {
-            window.focus(&self.handle, cx);
-        }
-    }
 }
 
 /// The dialog, while it is open.
 pub(crate) fn overlay(
     core: &SharedCore,
-    focus: &mut DialogFocus,
+    focus: &mut dialog::DialogFocus,
     window: &mut Window,
     cx: &mut Context<crate::RootView>,
 ) -> Option<AnyElement> {
@@ -91,50 +50,8 @@ pub(crate) fn overlay(
         (tr("Settings"), tr("Close"), rows)
     };
 
-    let core_backdrop = core.clone();
-    let (backdrop, card) = dialog::centered("settings", 520.0, move || close(&core_backdrop), cx);
-    let core_escape = core.clone();
-    let backdrop = backdrop.track_focus(&focus.handle).on_key_down(cx.listener(
-        move |_: &mut crate::RootView, event: &KeyDownEvent, _: &mut Window, cx| {
-            if event.keystroke.key == "escape" {
-                close(&core_escape);
-                cx.notify();
-                cx.stop_propagation();
-            }
-        },
-    ));
-    let core_button = core.clone();
-    let card = card
-        .h(px(480.0))
-        .max_h(relative(0.85))
-        .p(px(20.0))
-        .gap(px(12.0))
-        .child(
-            div()
-                .text_size(px(16.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(title),
-        )
-        .child(
-            div().flex_1().min_h_0().child(
-                div().size_full().flex().flex_col().gap_1().children(rows).overflow_y_scrollbar(),
-            ),
-        )
-        .child(
-            div().flex().justify_end().child(
-                Button::new("settings-close")
-                    .primary()
-                    .small()
-                    .child(close_label)
-                    .on_click(cx.listener(
-                        move |_: &mut crate::RootView, _: &ClickEvent, _: &mut Window, cx| {
-                            close(&core_button);
-                            cx.notify();
-                        },
-                    )),
-            ),
-        );
-    Some(backdrop.child(card).into_any_element())
+    let core = core.clone();
+    Some(dialog::list("settings", title, close_label, rows, focus, move || close(&core), cx))
 }
 
 /// One `label  control` row for a setting spec. `tr` translates display

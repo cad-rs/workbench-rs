@@ -146,6 +146,7 @@ fn render(
     // Backdrop: a click outside the card or Escape cancels.
     let backdrop = div()
         .id("file-picker-backdrop")
+        .occlude()
         .absolute()
         .size_full()
         .flex()

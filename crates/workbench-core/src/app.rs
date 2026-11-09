@@ -19,6 +19,30 @@ use crate::platform_cmds;
 /// Capacity of the invocation history ring buffer.
 const INVOCATION_HISTORY: usize = 100;
 
+/// One row of the Commands & Shortcuts dialog. `group` and `label` are i18n keys.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandListing {
+    pub group: String,
+    pub label: String,
+    pub hotkey: Option<String>,
+}
+
+/// The items of a ribbon group that run a command when used on their own: a pure menu button
+/// only opens its entries, and a combo needs a value.
+fn runnable_items<'a>(items: &'a [api::ToolbarItem], out: &mut Vec<&'a api::ToolbarItem>) {
+    for item in items {
+        match &item.kind {
+            api::RibbonItemKind::Command | api::RibbonItemKind::Toggle => out.push(item),
+            api::RibbonItemKind::Split { items } => {
+                out.push(item);
+                runnable_items(items, out);
+            }
+            api::RibbonItemKind::Menu { items } => runnable_items(items, out),
+            api::RibbonItemKind::Combo => {}
+        }
+    }
+}
+
 /// Autosave and crash recovery run on the desktop only: a web page has no
 /// clean exit to tell a crash from a closed tab, and its state store
 /// (localStorage) holds little, and only text.
@@ -207,6 +231,41 @@ impl AppRuntime {
             .commands()
             .filter_map(|c| c.hotkey.map(|h| (h, c.id.0.clone())))
             .collect()
+    }
+
+    /// What the Commands & Shortcuts dialog lists, each command once: the ribbon's commands
+    /// in ribbon order, then the ones only a hotkey reaches.
+    pub fn command_listing(&self) -> Vec<CommandListing> {
+        let mut listed = std::collections::HashSet::new();
+        let mut rows = Vec::new();
+        for group in self.host.ws.ribbon.iter().flat_map(|tab| &tab.groups) {
+            let mut items = Vec::new();
+            runnable_items(&group.items, &mut items);
+            for item in items {
+                let Some(def) = self.registry.command(&item.command.0) else {
+                    continue;
+                };
+                if listed.insert(item.command.0.as_str()) {
+                    rows.push(CommandListing {
+                        group: group.title.clone(),
+                        label: item.label.clone().unwrap_or_else(|| def.title.clone()),
+                        hotkey: def.hotkey.map(|h| h.to_string()),
+                    });
+                }
+            }
+        }
+        let collapsible = self.host.ws.ribbon_collapse_enabled;
+        let hotkey_only = self.registry.commands().filter(|def| {
+            def.hotkey.is_some()
+                && !listed.contains(def.id.0.as_str())
+                && (collapsible || def.id.0 != platform_cmds::TOGGLE_RIBBON_COLLAPSE)
+        });
+        rows.extend(hotkey_only.map(|def| CommandListing {
+            group: "Other".to_string(),
+            label: def.title.clone(),
+            hotkey: def.hotkey.map(|h| h.to_string()),
+        }));
+        rows
     }
 
     /// Where the app's own state lives (settings, layout, autosaves).

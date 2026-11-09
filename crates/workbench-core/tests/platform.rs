@@ -1430,6 +1430,63 @@ fn settings_open_as_a_dialog_from_the_view_group() {
     assert_eq!(view_group.items.last().unwrap().command.0, "app.settings.open");
 }
 
+// ---- Commands & Shortcuts ----
+
+#[test]
+fn the_command_listing_shows_what_the_user_can_run() {
+    let mut app = app();
+    assert!(!matches!(
+        app.execute_command("app.shortcuts.open", &wb::CommandArgs::default()),
+        wb::CommandResult::Failed { .. }
+    ));
+    assert!(app.host.ws.shortcuts_open);
+
+    let mut tools = wb::ToolbarGroup::new("test.tools", "Tools");
+    tools.items = vec![
+        wb::ToolbarItem::labeled("test.counter", "Split Main")
+            .split(vec![wb::ToolbarItem::labeled("app.undo", "Split Entry")]),
+        wb::ToolbarItem::labeled("app.redo", "Menu Button")
+            .menu(vec![wb::ToolbarItem::labeled("app.close_active_view", "Menu Entry")]),
+        wb::ToolbarItem::labeled("test.cmd", "Combo Box").combo(),
+        wb::ToolbarItem::labeled("test.counter", "Shown Twice"),
+        wb::ToolbarItem::labeled("no.such.command", "Unregistered"),
+    ];
+    let mut tab = wb::RibbonTab::new("test.tab", "Test Tab");
+    tab.groups.push(tools);
+    app.host.ws.ribbon.push(tab);
+
+    let listing = app.command_listing();
+    let row = |label: &str| listing.iter().find(|row| row.label == label);
+    let keys = |label: &str, group: &str, hotkey: Option<&str>| {
+        let found = row(label).unwrap_or_else(|| panic!("{label} is listed"));
+        assert_eq!(found.group, group, "{label}");
+        assert_eq!(found.hotkey.as_deref(), hotkey, "{label}");
+    };
+
+    keys("About", "Help", None);
+    keys("Split Main", "Tools", None);
+    keys("Split Entry", "Tools", Some("Ctrl+Z"));
+    keys("Menu Entry", "Tools", Some("Ctrl+W"));
+    keys("Test Command", "Other", Some("Ctrl+T"));
+    keys("Redo", "Other", Some("Ctrl+Y"));
+
+    for hidden in [
+        "Menu Button",
+        "Combo Box",
+        "Shown Twice",
+        "Unregistered",
+        "Change Setting",
+        "Collapse/Expand Ribbon",
+    ] {
+        assert!(row(hidden).is_none(), "{hidden} is not listed");
+    }
+
+    app.host.ws.ribbon_collapse_enabled = true;
+    let listing = app.command_listing();
+    let collapse = listing.iter().find(|row| row.label == "Collapse/Expand Ribbon");
+    assert_eq!(collapse.unwrap().hotkey.as_deref(), Some("Ctrl+F1"));
+}
+
 // ---- Diagnostics ----
 
 const SEND_CRASH_REPORTS: &str = "diagnostics.send_crash_reports";

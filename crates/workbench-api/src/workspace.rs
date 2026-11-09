@@ -545,6 +545,9 @@ pub struct WorkspaceState {
     /// Settings dialog open flag (set by the `app.settings.open` command; the frontend renders
     /// the dialog and closes it).
     pub settings_open: bool,
+    /// Commands & Shortcuts dialog open flag (set by the `app.shortcuts.open` command; the
+    /// frontend renders the dialog and closes it).
+    pub shortcuts_open: bool,
     /// Active settings text edit (`app.settings.edit_begin`): the key being
     /// edited and the edit buffer. Frontend renders an input overlay and
     /// routes keystrokes into the buffer while this is Some; Enter commits
@@ -583,6 +586,7 @@ impl WorkspaceState {
             ribbon_collapse_enabled: false,
             about_open: false,
             settings_open: false,
+            shortcuts_open: false,
             text_edit: None,
             file_picker: None,
             account: AccountPhase::default(),

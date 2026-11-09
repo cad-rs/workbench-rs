@@ -140,6 +140,7 @@ pub(crate) fn overlay_shell(
     let core_esc = core.clone();
     let overlay = div()
         .id("text-edit-backdrop")
+        .occlude()
         .absolute()
         .size_full()
         .flex()
