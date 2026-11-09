@@ -13,6 +13,7 @@ use api::{
     Registry, ServiceHost, TaskEvent, ViewTypeId, Workbench,
 };
 
+use crate::entitlement_refresh::{RefreshSchedule, SessionEntitlements};
 use crate::executor::AsyncExecutor;
 use crate::platform_cmds;
 
@@ -90,6 +91,10 @@ pub struct AppRuntime {
     /// the product limits nothing).
     gated_features: Vec<String>,
     last_answers: Vec<bool>,
+    /// When to fetch the latest answers; None when the product limits nothing.
+    entitlement_checks: Option<RefreshSchedule>,
+    /// The answers `host.entitlements` gives; None when the product limits nothing.
+    session_entitlements: Option<Arc<SessionEntitlements>>,
     /// Seconds accumulated since the last autosave.
     autosave_accum: f32,
     dispatch_depth: u32,
@@ -360,6 +365,7 @@ impl AppRuntime {
         if let Some(phase) = updates.pop() {
             if let api::AccountPhase::LoggedIn(user) = &phase {
                 self.host.log.info(format!("Signed in as {}", user.name));
+                self.account_changed();
             }
             self.host.ws.account = phase;
         }
@@ -378,6 +384,7 @@ impl AppRuntime {
     pub fn frame_tick(&mut self, dt_secs: f32) -> bool {
         let mut changed = self.drain_io();
         changed |= self.entitlements_changed();
+        self.schedule_entitlement_check(|checks| checks.tick(dt_secs));
         changed |= self.drain_account_login();
         changed |= self.pump_task_events();
         // Autosave (phase 5: §18 production extensions)
@@ -560,12 +567,47 @@ impl AppRuntime {
             return false;
         }
         self.last_answers = answers;
+        if let Some(checks) = &mut self.entitlement_checks {
+            checks.answers_changed();
+        }
         self.host.log.info("The available features changed");
         for refusal in self.withdraw_refused() {
             self.host.log.warn(refusal);
         }
         self.snapshot = self.make_snapshot();
         true
+    }
+
+    /// The app's window came back to the foreground, which is when a plan bought elsewhere
+    /// should show up.
+    pub fn window_activated(&mut self) {
+        self.schedule_entitlement_check(RefreshSchedule::activated);
+    }
+
+    /// Someone else is signed in, so what the last user could use doesn't carry over.
+    fn account_changed(&mut self) {
+        if let Some(session) = &self.session_entitlements {
+            session.forget();
+        }
+        self.schedule_entitlement_check(RefreshSchedule::asked);
+    }
+
+    fn schedule_entitlement_check(&mut self, decide: impl FnOnce(&mut RefreshSchedule) -> bool) {
+        if self.entitlement_checks.as_mut().is_some_and(decide) {
+            self.start_entitlement_check();
+        }
+    }
+
+    fn start_entitlement_check(&mut self) {
+        use api::AppServices as _;
+        let Some(entitlements) = self.host.entitlements.clone() else {
+            return;
+        };
+        self.spawn_io(Box::pin(async move {
+            let result = entitlements.refresh().await;
+            Box::new(move |app: &mut dyn api::AppServices| app.finish_entitlements_refresh(result))
+                as api::UiThen
+        }));
     }
 
     /// At startup: say so once if crash reports were written since the last launch, send them
@@ -828,6 +870,7 @@ impl AppRuntime {
             }
             crate::platform_cmds::ACCOUNT_LOGOUT => {
                 self.host.account_logout();
+                self.account_changed();
                 self.note_invocation(seq, InvocationStatus::Succeeded, None);
                 return CommandResult::done();
             }
@@ -1146,6 +1189,38 @@ impl api::AppServices for AppRuntime {
         self.executor.spawn_detached(async move {
             let _ = done.send(io.await);
         });
+    }
+
+    fn refresh_entitlements(&mut self) {
+        self.schedule_entitlement_check(RefreshSchedule::asked_by_user);
+    }
+
+    fn finish_entitlements_refresh(&mut self, result: Result<(), String>) {
+        let changed = self.entitlements_changed();
+        let Some(checks) = self.entitlement_checks.as_mut() else {
+            return;
+        };
+        let again = checks.finished();
+        let report = checks.take_report();
+        if let (false, Some(session)) = (again, &self.session_entitlements) {
+            session.settle();
+        }
+        match result {
+            Err(e) if report => self.host.log.warn(format!("Could not refresh the license: {e}")),
+            Err(e) => log::warn!("Could not refresh the license: {e}"),
+            Ok(()) if report && !changed => self.host.log.info("The license is up to date"),
+            Ok(()) => {}
+        }
+        if again {
+            self.start_entitlement_check();
+        }
+    }
+
+    fn open_purchase_page(&mut self, url: &str) {
+        self.host.ws.url_to_open = Some(url.to_string());
+        if let Some(checks) = &mut self.entitlement_checks {
+            checks.purchase_page_opened();
+        }
     }
 }
 
@@ -1681,7 +1756,12 @@ impl WorkbenchAppBuilder {
         // Account capability (Phase 3): injected by the product; commands and
         // the status bar render from host.account + ws.account.
         host.account = self.account;
-        host.entitlements = self.entitlements.clone();
+        let session_entitlements = self
+            .entitlements
+            .clone()
+            .map(|product| Arc::new(SessionEntitlements::new(product)));
+        host.entitlements =
+            session_entitlements.clone().map(|session| session as Arc<dyn api::Entitlements>);
         host.storage = self.storage;
 
         // The plugin registry mirror (for the diagnostics/management panels).
@@ -1742,6 +1822,8 @@ impl WorkbenchAppBuilder {
             crash_reporter: self.crash_reporter.clone(),
             gated_features: Vec::new(),
             last_answers: Vec::new(),
+            entitlement_checks: self.entitlements.is_some().then(RefreshSchedule::default),
+            session_entitlements,
         };
         runtime.snapshot = runtime.make_snapshot();
 

@@ -27,6 +27,8 @@ pub mod icons {
     pub const ABOUT: &str = "wb-std/about.svg";
     /// Commands & Shortcuts dialog (the Home tab's "Help" group).
     pub const KEYBOARD: &str = "wb-std/keyboard.svg";
+    /// Refresh License (the Home tab's "Help" group).
+    pub const REFRESH: &str = "wb-std/refresh.svg";
 }
 
 static STANDARD_ENTRIES: &[(&str, &[u8])] = &[
@@ -43,6 +45,7 @@ static STANDARD_ENTRIES: &[(&str, &[u8])] = &[
     (icons::SETTINGS, include_bytes!("../assets/std/settings.svg")),
     (icons::ABOUT, include_bytes!("../assets/std/about.svg")),
     (icons::KEYBOARD, include_bytes!("../assets/std/keyboard.svg")),
+    (icons::REFRESH, include_bytes!("../assets/std/refresh.svg")),
 ];
 
 /// The platform standard icon asset source (global static, allocation-free lookup).

@@ -31,6 +31,7 @@ fn standard_assets_resolve_platform_icon_paths() {
         "wb-std/settings.svg",
         "wb-std/about.svg",
         "wb-std/keyboard.svg",
+        "wb-std/refresh.svg",
     ] {
         assert!(std.load(path).is_some(), "standard asset missing: {path}");
     }

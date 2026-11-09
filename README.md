@@ -168,10 +168,30 @@ let builder = builder.with_entitlements(Arc::new(MyLicense::load()));
 Put `.requires("pro.export")` on a `CommandDef`, `ViewDef` or `PanelDef`, or
 `requires = "pro.export"` in a plugin manifest. Without the feature, commands
 and panel toggles are disabled, views don't open, panels stay hidden and plugins
-don't load. If the answer changes while the app runs, the UI follows within a
-tick and what is no longer allowed closes; documents are untouched. Domain code
-can ask `ctx.host().allows("…")` for anything finer. With nothing injected,
-everything is allowed.
+don't load. A feature gained while the app runs applies within a tick. A feature
+lost stays usable until the app closes, so nobody loses a view mid-work; the
+next launch closes what is no longer allowed, and documents are untouched.
+Signing out ends that grace at once, and so does a check at startup that finds
+the plan has lapsed. Domain code can ask `ctx.host().allows("…")` for anything
+finer. With nothing injected, everything is allowed.
+
+A plan can change while the app runs. To pick that up without a restart, fetch
+it in `refresh`:
+
+```rust
+fn refresh(self: Arc<Self>) -> wb::BoxFuture<Result<(), String>> {
+    Box::pin(async move { /* fetch the plan, update what `allows` reads */ Ok(()) })
+}
+```
+
+The platform calls it one at a time: at startup, when the window comes back to
+the foreground (at most every 30 seconds), after sign-in and sign-out, every 30
+minutes and from **Help → Refresh License**. Open the checkout with
+`ctx.open_purchase_page(url)`: when the user comes back, the platform checks
+every few seconds for two minutes, because a payment can take a moment to reach
+the product's server. On an error, leave the answers as they are, so a lost
+connection takes nothing away. Plugins are still only checked as they load, so
+a plugin the new plan allows needs a restart.
 
 Verifying licenses is the product's job. A manifest is a plain text file, so
 gate what matters in compiled code.

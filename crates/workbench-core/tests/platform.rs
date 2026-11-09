@@ -1298,8 +1298,14 @@ fn gated_app(switch: &std::sync::Arc<FeatureSwitch>, allowed: &[&str]) -> AppRun
         .with_entitlements(switch.clone())
         .build()
         .unwrap();
-    app.frame_tick(0.0);
+    settle(&mut app);
     app
+}
+
+/// One tick, then until the checks and I/O it started have finished.
+fn settle(app: &mut AppRuntime) {
+    app.frame_tick(0.0);
+    assert!(pump(app, std::time::Duration::from_secs(5)));
 }
 
 fn panel_visible(app: &AppRuntime, id: &str) -> bool {
@@ -1360,14 +1366,18 @@ fn gaining_a_feature_asks_for_one_redraw() {
 }
 
 #[test]
-fn losing_a_feature_closes_what_it_gated() {
+fn a_feature_lost_before_the_first_check_ends_closes_what_it_gated() {
     let switch = std::sync::Arc::new(FeatureSwitch::default());
-    let mut app = gated_app(&switch, &["pro.view", "pro.panel"]);
+    switch.set(&["pro.view", "pro.panel"]);
+    let mut app = builder()
+        .with_workbench(GatedWb)
+        .with_entitlements(switch.clone())
+        .build()
+        .unwrap();
     let doc = app.host.docs.create(&wb::DocumentTypeId::new("test.shapes"), "Draft").unwrap();
     app.host.docs.commit(doc, "edit", true, Box::new(TestDoc)).unwrap();
     wb::CommandCtx::new(&mut app).open_view("test.gated_view", false).unwrap();
     assert!(panel_visible(&app, "test.gated_panel"));
-    app.frame_tick(0.0);
 
     switch.set(&[]);
     assert!(app.frame_tick(0.0));
@@ -1404,6 +1414,278 @@ fn a_restored_layout_cannot_bring_back_what_is_not_allowed() {
     assert!(!panel_visible(&expired, "test.gated_panel"));
     drop(expired);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- Refreshing entitlements ----
+
+/// A product whose answers come from its server.
+#[derive(Default)]
+struct Subscription {
+    active: std::sync::Mutex<Vec<String>>,
+    on_server: std::sync::Mutex<Vec<String>>,
+    offline: std::sync::atomic::AtomicBool,
+    checks: AtomicU32,
+}
+
+impl Subscription {
+    fn sell(&self, features: &[&str]) {
+        *self.on_server.lock().unwrap() = features.iter().map(ToString::to_string).collect();
+    }
+    /// The plan the product remembers from its last check.
+    fn remember(&self, features: &[&str]) {
+        *self.active.lock().unwrap() = features.iter().map(ToString::to_string).collect();
+    }
+    fn checks(&self) -> u32 {
+        self.checks.load(Ordering::SeqCst)
+    }
+}
+
+impl wb::Entitlements for Subscription {
+    fn allows(&self, feature: &str) -> bool {
+        self.active.lock().unwrap().iter().any(|active| active == feature)
+    }
+    fn refresh(self: std::sync::Arc<Self>) -> wb::BoxFuture<Result<(), String>> {
+        Box::pin(async move {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            if self.offline.load(Ordering::SeqCst) {
+                return Err("offline".to_string());
+            }
+            *self.active.lock().unwrap() = self.on_server.lock().unwrap().clone();
+            Ok(())
+        })
+    }
+}
+
+fn subscribed_builder(subscription: &std::sync::Arc<Subscription>) -> WorkbenchAppBuilder {
+    builder().with_workbench(GatedWb).with_entitlements(subscription.clone())
+}
+
+fn logged(app: &AppRuntime, text: &str) -> bool {
+    app.host.log.entries().any(|entry| entry.message.contains(text))
+}
+
+#[test]
+fn a_plan_bought_in_the_browser_applies_when_the_user_comes_back() {
+    let subscription = std::sync::Arc::new(Subscription::default());
+    let mut app = subscribed_builder(&subscription).build().unwrap();
+    settle(&mut app);
+    assert_eq!(subscription.checks(), 1, "startup checks");
+    assert!(!app.is_enabled("test.gated"));
+
+    wb::CommandCtx::new(&mut app).open_purchase_page("https://example.test/upgrade");
+    assert_eq!(app.host.ws.url_to_open.as_deref(), Some("https://example.test/upgrade"));
+
+    // Back before the payment reached the product's server.
+    app.window_activated();
+    settle(&mut app);
+    assert_eq!(subscription.checks(), 2, "a return is not held back by the gap");
+    assert!(!app.is_enabled("test.gated"));
+
+    app.frame_tick(4.0);
+    settle(&mut app);
+    assert_eq!(subscription.checks(), 3, "it keeps checking");
+
+    subscription.sell(&["pro.export"]);
+    app.frame_tick(4.0);
+    settle(&mut app);
+    assert!(app.is_enabled("test.gated"), "no restart needed");
+    assert!(logged(&app, "The available features changed"));
+
+    let checks = subscription.checks();
+    app.frame_tick(4.0);
+    settle(&mut app);
+    assert_eq!(subscription.checks(), checks, "nothing left to wait for");
+}
+
+#[test]
+fn a_failed_refresh_keeps_the_answers_and_only_the_user_hears_of_it() {
+    let subscription = std::sync::Arc::new(Subscription::default());
+    subscription.sell(&["pro.export"]);
+    let mut app = subscribed_builder(&subscription).build().unwrap();
+    settle(&mut app);
+    assert!(app.is_enabled("test.gated"));
+
+    subscription.offline.store(true, Ordering::SeqCst);
+    subscription.sell(&[]);
+    app.frame_tick(30.0);
+    app.window_activated();
+    settle(&mut app);
+    assert_eq!(subscription.checks(), 2);
+    assert!(app.is_enabled("test.gated"), "a lost connection takes nothing away");
+    assert!(!logged(&app, "Could not refresh"), "the routine check stays quiet");
+
+    let args = wb::CommandArgs::default();
+    assert!(app.execute_command("app.license.refresh", &args).is_ok());
+    settle(&mut app);
+    assert!(logged(&app, "Could not refresh the license: offline"));
+    assert!(app.is_enabled("test.gated"));
+
+    subscription.offline.store(false, Ordering::SeqCst);
+    subscription.sell(&["pro.export"]);
+    assert!(!logged(&app, "up to date"));
+    assert!(app.execute_command("app.license.refresh", &args).is_ok());
+    settle(&mut app);
+    assert!(logged(&app, "The license is up to date"));
+}
+
+/// Signs in at once.
+struct InstantAccount;
+
+impl wb::AccountService for InstantAccount {
+    fn begin_login(&self) -> Result<wb::DeviceAuthRequest, String> {
+        Ok(wb::DeviceAuthRequest {
+            user_code: "CODE".into(),
+            verification_uri: "https://example.test/device".into(),
+            verification_uri_complete: None,
+            expires_in: 600,
+            interval: 0,
+        })
+    }
+    fn poll(&self) -> Result<wb::PollResult, String> {
+        Ok(wb::PollResult::Success(wb::AccountUser {
+            id: "u1".into(),
+            name: "Test User".into(),
+            email: None,
+        }))
+    }
+    fn logout(&self) {}
+    fn current_user(&self) -> Option<wb::AccountUser> {
+        None
+    }
+}
+
+#[test]
+fn signing_in_and_out_fetches_the_answers_for_the_new_user() {
+    let subscription = std::sync::Arc::new(Subscription::default());
+    let mut app = subscribed_builder(&subscription)
+        .with_account(std::sync::Arc::new(InstantAccount))
+        .build()
+        .unwrap();
+    settle(&mut app);
+    let args = wb::CommandArgs::default();
+
+    assert!(app.execute_command("app.account.login", &args).is_ok());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !matches!(app.host.ws.account, wb::AccountPhase::LoggedIn(_)) {
+        assert!(std::time::Instant::now() < deadline, "sign-in never finished");
+        app.frame_tick(0.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    settle(&mut app);
+    assert_eq!(subscription.checks(), 2);
+
+    assert!(app.execute_command("app.account.logout", &args).is_ok());
+    settle(&mut app);
+    assert_eq!(subscription.checks(), 3);
+}
+
+#[test]
+fn a_lost_feature_stays_until_the_next_launch() {
+    let dir = empty_dir("entitlements-grace");
+    let subscription = std::sync::Arc::new(Subscription::default());
+    subscription.remember(&["pro.view", "pro.panel", "pro.export"]);
+    subscription.sell(&["pro.view", "pro.panel", "pro.export"]);
+    let session = || {
+        subscribed_builder(&subscription)
+            .with_layout_path(dir.join("layout.json"))
+            .build()
+            .unwrap()
+    };
+
+    let mut first = session();
+    settle(&mut first);
+    wb::CommandCtx::new(&mut first).open_view("test.gated_view", false).unwrap();
+    assert!(first.is_enabled("test.gated"));
+    assert!(panel_visible(&first, "test.gated_panel"));
+
+    subscription.sell(&[]);
+    first.frame_tick(1800.0);
+    settle(&mut first);
+    assert_eq!(subscription.checks(), 2, "the routine check found the lapse");
+    first.frame_tick(0.0);
+    assert!(first.is_enabled("test.gated"));
+    assert!(tab_open(&first, "test.gated_view"));
+    assert!(panel_visible(&first, "test.gated_panel"));
+    first.save_layout(serde_json::json!({}), None).unwrap();
+    drop(first);
+
+    let mut next = session();
+    assert!(next.load_layout().is_some());
+    settle(&mut next);
+    assert!(!next.is_enabled("test.gated"));
+    assert!(!tab_open(&next, "test.gated_view"));
+    assert!(!panel_visible(&next, "test.gated_panel"));
+    drop(next);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_plan_that_lapsed_between_launches_ends_with_the_startup_check() {
+    let subscription = std::sync::Arc::new(Subscription::default());
+    subscription.remember(&["pro.export"]);
+    let mut app = subscribed_builder(&subscription).build().unwrap();
+    assert!(app.is_enabled("test.gated"), "the cached plan, until the check ends");
+    settle(&mut app);
+    assert!(!app.is_enabled("test.gated"));
+}
+
+#[test]
+fn offline_at_launch_keeps_the_cached_plan_for_the_session() {
+    let subscription = std::sync::Arc::new(Subscription::default());
+    subscription.remember(&["pro.export"]);
+    subscription.offline.store(true, Ordering::SeqCst);
+    let mut app = subscribed_builder(&subscription).build().unwrap();
+    settle(&mut app);
+    app.frame_tick(0.0);
+    assert!(app.is_enabled("test.gated"));
+
+    subscription.offline.store(false, Ordering::SeqCst);
+    app.frame_tick(1800.0);
+    settle(&mut app);
+    assert_eq!(subscription.checks(), 2);
+    assert!(app.is_enabled("test.gated"), "the lapse is found mid-session");
+}
+
+#[test]
+fn signing_out_ends_the_grace() {
+    let subscription = std::sync::Arc::new(Subscription::default());
+    subscription.sell(&["pro.export"]);
+    let mut app = subscribed_builder(&subscription)
+        .with_account(std::sync::Arc::new(InstantAccount))
+        .build()
+        .unwrap();
+    settle(&mut app);
+    app.frame_tick(0.0);
+    assert!(app.is_enabled("test.gated"));
+
+    subscription.sell(&[]);
+    assert!(app.execute_command("app.account.logout", &wb::CommandArgs::default()).is_ok());
+    settle(&mut app);
+    assert!(!app.is_enabled("test.gated"));
+}
+
+#[test]
+fn refresh_license_is_offered_only_when_the_product_limits_features() {
+    let help_has_it = |app: &AppRuntime| {
+        app.host
+            .ws
+            .ribbon
+            .iter()
+            .flat_map(|tab| &tab.groups)
+            .filter(|group| group.id.0 == "app.help")
+            .flat_map(|group| &group.items)
+            .any(|item| item.command.0 == "app.license.refresh")
+    };
+    let mut plain = app();
+    assert!(plain.command_title("app.license.refresh").is_none());
+    assert!(!help_has_it(&plain));
+    plain.window_activated();
+    assert_eq!(plain.pending_io(), 0, "nothing to fetch");
+
+    let subscription = std::sync::Arc::new(Subscription::default());
+    let limited = subscribed_builder(&subscription).build().unwrap();
+    assert!(limited.is_enabled("app.license.refresh"));
+    assert!(help_has_it(&limited));
 }
 
 // ---- Settings ----

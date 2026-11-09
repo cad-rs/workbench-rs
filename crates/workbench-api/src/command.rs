@@ -446,6 +446,14 @@ impl<'a> CommandCtx<'a> {
     pub fn spawn_io(&mut self, io: IoTask) {
         self.app.spawn_io(io);
     }
+    /// Fetch the latest entitlements now; see [`AppServices::refresh_entitlements`].
+    pub fn refresh_entitlements(&mut self) {
+        self.app.refresh_entitlements();
+    }
+    /// Open a purchase page; see [`AppServices::open_purchase_page`].
+    pub fn open_purchase_page(&mut self, url: &str) {
+        self.app.open_purchase_page(url);
+    }
     /// Read the file at `location` through its storage provider, off the UI
     /// thread; `then` gets the bytes (or a user-readable error) on the UI
     /// thread on a later frame tick.

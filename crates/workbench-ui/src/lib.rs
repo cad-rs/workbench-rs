@@ -440,6 +440,14 @@ fn view_canvas(
     (element, wants_repaint)
 }
 
+impl RootView {
+    fn on_window_activation(&mut self, window: &mut Window, _: &mut Context<Self>) {
+        if window.is_window_active() {
+            self.core.lock().unwrap_or_else(|p| p.into_inner()).window_activated();
+        }
+    }
+}
+
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Frame stats are measured only here: they describe the render cadence. The platform tick
@@ -1167,8 +1175,11 @@ fn launch_app(
         let core_window = core.clone();
         let dock_window = dock.clone();
         let handle = cx
-            .open_window(options, |_window, cx| {
-                cx.new(|cx| RootView::new(core_window, dock_window, cx))
+            .open_window(options, |window, cx| {
+                cx.new(|cx| {
+                    cx.observe_window_activation(window, RootView::on_window_activation).detach();
+                    RootView::new(core_window, dock_window, cx)
+                })
             })
             .expect("failed to open the window");
         let _ = handle;
@@ -1233,10 +1244,14 @@ fn launch_app(
             // The old implementation only looked at `running > 0`, so the predicate turned false
             // the moment a task finished and the terminal event never got pumped; the Diagnostics
             // panel's "Background tasks running/total" then lagged until the next input.
-            let needs_repaint = {
+            let (needs_repaint, url_to_open) = {
                 let mut core = core_loop.lock().unwrap_or_else(|p| p.into_inner());
-                core.frame_tick(0.1)
+                let needs_repaint = core.frame_tick(0.1);
+                (needs_repaint, core.host.ws.url_to_open.take())
             };
+            if let Some(url) = url_to_open {
+                cx.update(|cx| cx.open_url(&url));
+            }
             if needs_repaint {
                 if let Some(weak) = weak_root.clone() {
                     cx.update(|cx| notify(&weak, cx));

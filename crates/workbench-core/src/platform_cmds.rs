@@ -23,6 +23,7 @@ pub const ABOUT: &str = "app.about";
 pub const EXPORT_DIAGNOSTICS: &str = "app.export_diagnostics";
 pub const OPEN_SETTINGS: &str = "app.settings.open";
 pub const OPEN_SHORTCUTS: &str = "app.shortcuts.open";
+pub const REFRESH_LICENSE: &str = "app.license.refresh";
 pub const TOGGLE_RIBBON_COLLAPSE: &str = "app.toggle_ribbon_collapse";
 pub const SETTINGS_SET: &str = "app.settings.set";
 pub const SETTINGS_EDIT_BEGIN: &str = "app.settings.edit_begin";
@@ -58,6 +59,7 @@ fn register_builtin_locales(registry: &mut Registry) {
             ("Change Setting", "修改设置"),
             ("About", "关于"),
             ("Commands & Shortcuts", "快捷键命令表"),
+            ("Refresh License", "刷新许可"),
             ("Other", "其他"),
             ("Show/Hide ", "显示/隐藏 "),
             // Ribbon groups & tabs.
@@ -541,6 +543,23 @@ pub fn register(registry: &mut Registry) {
         .enabled_when(|_| true),
     );
 
+    // Refresh License: only for a product that limits features.
+    let limits_features = registry.entitlements.is_some();
+    if limits_features {
+        registry.register_command(
+            CommandDef::sync(
+                REFRESH_LICENSE,
+                "Refresh License",
+                |ctx: &mut CommandCtx, _args: &CommandArgs| {
+                    ctx.refresh_entitlements();
+                    CommandResult::done()
+                },
+            )
+            .icon(crate::assets::icons::REFRESH)
+            .enabled_when(|_| true),
+        );
+    }
+
     registry.register_command(
         CommandDef::sync(
             EXPORT_DIAGNOSTICS,
@@ -602,6 +621,11 @@ pub fn register(registry: &mut Registry) {
     help_group
         .items
         .push(api::ToolbarItem::labeled(EXPORT_DIAGNOSTICS, "Export Diagnostics…"));
+    if limits_features {
+        help_group
+            .items
+            .push(api::ToolbarItem::labeled(REFRESH_LICENSE, "Refresh License"));
+    }
     registry.add_toolbar_group(help_group);
 }
 

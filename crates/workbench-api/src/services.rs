@@ -323,6 +323,15 @@ pub trait AppServices {
     /// browser); what it resolves to runs on the UI thread on a later frame
     /// tick. [`crate::CommandCtx::read_file`] and its siblings build on this.
     fn spawn_io(&mut self, io: IoTask);
+    /// Fetch the latest entitlements now and tell the user how it went (see
+    /// [`crate::Entitlements::refresh`]).
+    fn refresh_entitlements(&mut self);
+    /// A fetch of the latest entitlements ended.
+    fn finish_entitlements_refresh(&mut self, result: Result<(), String>);
+    /// Open the page where the user buys or changes a plan in the browser.
+    /// When they come back to the app the platform keeps checking for a while,
+    /// since the payment can take a moment to reach the product's server.
+    fn open_purchase_page(&mut self, url: &str);
 }
 
 /// Where crash reports go once the user has agreed to send them
