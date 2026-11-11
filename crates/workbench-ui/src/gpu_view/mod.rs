@@ -101,6 +101,14 @@ pub(crate) fn set_web_platform(platform: Rc<gpui_web::WebPlatform>) {
     WEB_PLATFORM.with(|slot| *slot.borrow_mut() = Some(platform));
 }
 
+/// Web: GPUI's wgpu context (the device every dynamic texture must live on).
+/// None until the platform's graphics are up; elements paint nothing and
+/// retry on a later frame.
+#[cfg(target_family = "wasm")]
+pub fn web_context() -> Option<gpui_wgpu::WgpuContext> {
+    WEB_PLATFORM.with(|platform| platform.borrow().as_ref().and_then(|p| p.wgpu_context()))
+}
+
 /// Acquire the process-wide GPU context, creating it on first use.
 ///
 /// A plugin-provided GPU view calls this from its `Element` and builds its own
