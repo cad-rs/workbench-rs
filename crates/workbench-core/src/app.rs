@@ -13,7 +13,9 @@ use api::{
     InvocationStatus, PanelId, Registry, ServiceHost, TaskEvent, ViewTypeId, Workbench,
 };
 
-use crate::entitlement_refresh::{RefreshSchedule, SessionEntitlements};
+use product_kit::RefreshSchedule;
+
+use crate::entitlement_refresh::SessionEntitlements;
 use crate::executor::AsyncExecutor;
 use crate::platform_cmds;
 
