@@ -13,12 +13,17 @@
 
 use std::sync::{Mutex, MutexGuard};
 
+use product_kit::oauth::{
+    classify_poll_error, device_authorization_form, token_poll_form, PollError,
+};
 use serde_json::Value;
 use workbench_api as api;
 use api::{AccountService, AccountUser, DeviceAuthRequest, PollResult};
 
-/// RFC 8628 grant type for the token endpoint.
-pub const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+/// Borrow an owned form for the transport.
+fn pairs(form: &[(String, String)]) -> Vec<(&str, &str)> {
+    form.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect()
+}
 
 /// One HTTP round trip: JSON in, JSON out. Status codes are surfaced in the
 /// body handling — a `400` with an `error` member is a normal RFC 8628
@@ -118,10 +123,8 @@ impl DeviceEndpoints {
 impl<T: HttpTransport> AccountService for DeviceFlowClient<T> {
     fn begin_login(&self) -> Result<DeviceAuthRequest, String> {
         let eps = self.endpoints()?;
-        let body = self.transport.post_form(
-            &eps.device_authorization,
-            &[("client_id", self.client_id.as_str())],
-        )?;
+        let form = device_authorization_form(&self.client_id, &[], None);
+        let body = self.transport.post_form(&eps.device_authorization, &pairs(&form))?;
         let str_field = |key: &str| {
             body.get(key)
                 .and_then(Value::as_str)
@@ -142,14 +145,8 @@ impl<T: HttpTransport> AccountService for DeviceFlowClient<T> {
         let device_code =
             lock(&self.device_code).clone().ok_or("Sign-in has not started (no device code)")?;
         let eps = self.endpoints()?;
-        let body = self.transport.post_form(
-            &eps.token,
-            &[
-                ("grant_type", DEVICE_CODE_GRANT),
-                ("device_code", &device_code),
-                ("client_id", self.client_id.as_str()),
-            ],
-        )?;
+        let form = token_poll_form(&device_code, &self.client_id);
+        let body = self.transport.post_form(&eps.token, &pairs(&form))?;
 
         if let Some(access_token) = body.get("access_token").and_then(Value::as_str) {
             // Success: fetch identity from userinfo when available, else
@@ -167,11 +164,15 @@ impl<T: HttpTransport> AccountService for DeviceFlowClient<T> {
 
         // RFC 8628 §3.5 error responses ride on HTTP 400.
         match body.get("error").and_then(Value::as_str) {
-            Some("authorization_pending") => Ok(PollResult::Pending),
-            Some("slow_down") => Ok(PollResult::SlowDown),
-            Some("access_denied") => Ok(PollResult::Denied),
-            Some("expired_token") => Ok(PollResult::Expired),
-            Some(other) => Err(format!("The token endpoint returned an unknown error: {other}")),
+            Some(error) => match classify_poll_error(error) {
+                PollError::Pending => Ok(PollResult::Pending),
+                PollError::SlowDown => Ok(PollResult::SlowDown),
+                PollError::Denied => Ok(PollResult::Denied),
+                PollError::Expired => Ok(PollResult::Expired),
+                PollError::Unknown(other) => {
+                    Err(format!("The token endpoint returned an unknown error: {other}"))
+                }
+            },
             None => Err("The token response has neither access_token nor error".to_string()),
         }
     }
