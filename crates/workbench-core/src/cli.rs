@@ -107,22 +107,21 @@ pub fn selfcheck_exit(builder: WorkbenchAppBuilder) -> ! {
 /// `make_builder` must assemble the product normally (so its document types are
 /// registered) with an isolated config directory given by `WB_CRASH_DIR`.
 pub fn crash_probe_exit(make_builder: impl Fn() -> WorkbenchAppBuilder) -> i32 {
-    let dir = PathBuf::from(
-        std::env::var("WB_CRASH_DIR").expect("the WB_CRASH_DIR environment variable is required"),
-    );
-    let phase = std::env::var("WB_CRASH_PHASE").unwrap_or_default();
-    match phase.as_str() {
-        "B" => crate::selfcheck::crash_probe_recover(
+    use product_kit::crash_probe::{probe_dir, ProbePhase};
+
+    let dir = probe_dir("WB_CRASH_DIR");
+    match ProbePhase::from_env("WB_CRASH_PHASE") {
+        ProbePhase::Recover => crate::selfcheck::crash_probe_recover(
             make_builder().build().expect("session B assembly failed"),
             &dir,
         ),
-        "C" => crate::selfcheck::crash_probe_clean(
+        ProbePhase::Clean => crate::selfcheck::crash_probe_clean(
             make_builder().build().expect("session C assembly failed"),
             &dir,
         ),
         // Session A: the runtime is dropped by `std::process::exit`, i.e. not at
         // all — no clean marker is written.
-        _ => crate::selfcheck::crash_probe_crash(
+        ProbePhase::Crash => crate::selfcheck::crash_probe_crash(
             make_builder().build().expect("session A assembly failed"),
             &dir,
         ),

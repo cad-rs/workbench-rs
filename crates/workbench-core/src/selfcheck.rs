@@ -7,6 +7,7 @@
 
 use std::time::{Duration, Instant};
 
+use product_kit::crash_probe::ProbePhase;
 use product_kit::selfcheck::{report, Check, Summary};
 use workbench_api as api;
 
@@ -175,37 +176,19 @@ fn count_autosave_files(app: &AppRuntime) -> usize {
 fn run_probe_phase(
     exe: &std::path::Path,
     dir: &std::path::Path,
-    phase: &str,
+    phase: ProbePhase,
 ) -> Result<std::process::Output, String> {
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(exe)
-        .arg("--selfcheck-crash")
-        .env("WB_CRASH_DIR", dir)
-        .env("WB_CRASH_PHASE", phase)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Cannot start the subprocess: {e}"))?;
-    let start = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) => {
-                if start.elapsed() > Duration::from_secs(30) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("The subprocess timed out (phase {phase})"));
-                }
-                std::thread::sleep(Duration::from_millis(20));
+    use product_kit::crash_probe::{run_phase, ProbeFailure};
+    run_phase(exe, dir, phase, "WB_CRASH_DIR", "WB_CRASH_PHASE", "--selfcheck-crash").map_err(
+        |failure| match failure {
+            ProbeFailure::Spawn(e) => format!("Cannot start the subprocess: {e}"),
+            ProbeFailure::Timeout(phase) => {
+                format!("The subprocess timed out (phase {})", phase.as_str())
             }
-            Err(e) => return Err(format!("Failed to wait for the subprocess: {e}")),
-        }
-    };
-    let mut out = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to read the subprocess output: {e}"))?;
-    out.status = status;
-    Ok(out)
+            ProbeFailure::Wait(e) => format!("Failed to wait for the subprocess: {e}"),
+            ProbeFailure::Output(e) => format!("Failed to read the subprocess output: {e}"),
+        },
+    )
 }
 
 /// The crash-recovery subprocess bootstrap check (returns (passed, detail)).
@@ -225,11 +208,12 @@ fn crash_probe_check() -> (bool, String) {
         Err(_) => "Cannot locate the current exe".to_string(),
         Ok(exe) => {
             let mut outcome: Result<(), String> = Ok(());
-            for phase in ["A", "B", "C"] {
+            for phase in [ProbePhase::Crash, ProbePhase::Recover, ProbePhase::Clean] {
+                let letter = phase.as_str();
                 outcome = match run_probe_phase(&exe, &dir, phase) {
                     Err(e) => Err(e),
                     Ok(o) if !o.status.success() => Err(format!(
-                        "Session {phase} failed status={:?} stdout={} stderr={}",
+                        "Session {letter} failed status={:?} stdout={} stderr={}",
                         o.status,
                         String::from_utf8_lossy(&o.stdout),
                         String::from_utf8_lossy(&o.stderr)
