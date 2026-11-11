@@ -16,8 +16,6 @@ pub mod cli;
 pub mod diagnostics;
 mod entitlement_refresh;
 #[cfg(not(target_arch = "wasm32"))]
-mod atomic;
-#[cfg(not(target_arch = "wasm32"))]
 mod dialog;
 pub mod executor;
 pub mod file_picker;

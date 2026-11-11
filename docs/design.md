@@ -749,7 +749,7 @@ the picker.
 - **Saves are all-or-nothing.** `StorageProvider::write` must leave the old
   content when it fails or is cut off. The desktop writes a temporary file
   beside the target, flushes it to the disk and renames it over the target
-  (`workbench_core::atomic`, which the app state store uses too); OPFS gets the
+  (`product_kit::atomic`, which the app state store uses too); OPFS gets the
   same from its writable stream's swap file. A file that an in-place write
   would have been refused on (read-only, locked, another user's) stays refused.
 - **File formats are versioned per document type** (`DocumentTypeDef::format`;

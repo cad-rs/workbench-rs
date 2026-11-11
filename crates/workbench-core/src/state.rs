@@ -68,7 +68,7 @@ mod desktop {
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            crate::atomic::write(&path, bytes)
+            product_kit::atomic_write(&path, bytes)
                 .map_err(|e| format!("Failed to write {}: {e}", path.display()))
         }
 

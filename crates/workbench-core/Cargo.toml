@@ -12,6 +12,8 @@ readme = "../../README.md"
 [dependencies]
 log = { workspace = true }
 workbench-api = { workspace = true }
+# Shared product infrastructure (atomic whole-file writes, storage/picker).
+product-kit = { path = "../../../../product-kit" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

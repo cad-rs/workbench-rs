@@ -23,7 +23,7 @@ impl api::StorageProvider for LocalFiles {
     fn write(&self, key: &str, bytes: Vec<u8>) -> api::StorageFuture<()> {
         let path = PathBuf::from(key);
         Box::pin(blocking::unblock(move || {
-            crate::atomic::write(&path, &bytes).map_err(|e| e.to_string())
+            product_kit::atomic_write(&path, &bytes).map_err(|e| e.to_string())
         }))
     }
 }
