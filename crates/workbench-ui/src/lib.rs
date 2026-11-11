@@ -1065,6 +1065,10 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
     }
 }
 
+/// The decoded window/taskbar icon (the browser has no window icon, but
+/// `WindowOptions::icon` exists on every target).
+type WindowIcon = std::sync::Arc<image::RgbaImage>;
+
 /// Decode the product's window/taskbar icon (PNG asset path) into an
 /// `RgbaImage` for `WindowOptions::icon`. Returns None on a missing asset or
 /// decode failure — the exe's embedded icon stays the fallback.
@@ -1072,7 +1076,7 @@ pub fn run(builder: workbench_core::WorkbenchAppBuilder, window_title: &str) -> 
 fn decode_window_icon(
     assets: &std::sync::Arc<dyn wb::AssetSource>,
     path: &str,
-) -> Option<std::sync::Arc<image::RgbaImage>> {
+) -> Option<WindowIcon> {
     let bytes = assets.load(path)?;
     let img = image::load_from_memory(&bytes).ok()?;
     Some(std::sync::Arc::new(img.into_rgba8()))
@@ -1082,7 +1086,7 @@ fn decode_window_icon(
 fn decode_window_icon(
     _assets: &std::sync::Arc<dyn wb::AssetSource>,
     _path: &str,
-) -> Option<std::sync::Arc<image::RgbaImage>> {
+) -> Option<WindowIcon> {
     None
 }
 
@@ -1096,7 +1100,7 @@ fn launch_app(
     gpu_requirements: Option<Box<dyn std::any::Any>>,
     dock: Option<gpui_component::dock::DockAreaState>,
     theme_name: String,
-    window_icon: Option<std::sync::Arc<image::RgbaImage>>,
+    window_icon: Option<WindowIcon>,
 ) -> impl FnOnce(&mut App) {
     move |cx: &mut App| {
         if !fonts.is_empty() {

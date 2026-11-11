@@ -45,6 +45,10 @@ wasm-bindgen-futures = { workspace = true }
 # dependency on gpui_web.
 gpui-wgpu = { workspace = true }
 gpui-web = { workspace = true }
+wgpu = { workspace = true, features = ["webgpu"] }
+# WindowOptions::icon 在所有平台都存在；web 只是永远解码不出图标（没有资产
+# 时返回 None），所以这里只需要一个能编译的 png 子集。
+image = { workspace = true, default-features = false, features = ["png"] }
 
 # Desktop: the platform layer (the web builds its own WebPlatform, bypassing gpui_platform); the
 # GPU viewport creates its own wgpu device (GPUI is D3D11 on Windows and Metal on macOS, so there
