@@ -1,9 +1,15 @@
 //! What support needs when something goes wrong: a rolling log file and crash
 //! reports on the desktop, and the text report the Export Diagnostics command
 //! hands over on either platform.
+//!
+//! The log file mechanics, the crash-report text and the clock live in
+//! `product_kit` (shared with the nanobot harness); this module keeps the
+//! workbench-specific parts: the logger, the state-store backend, and the
+//! runtime-shaped export.
 
 use std::env::consts::{ARCH, OS};
 
+use product_kit::diagnostics::section;
 use workbench_api as api;
 
 use crate::AppRuntime;
@@ -75,10 +81,6 @@ pub(crate) fn report(app: &AppRuntime) -> String {
     lines.join("\n")
 }
 
-fn section(title: &str) -> String {
-    format!("\n---- {title} ----")
-}
-
 /// The end of the log file, or this session's log when there is no file (the
 /// web, or a product with its own logger).
 fn log_text(app: &AppRuntime) -> String {
@@ -97,26 +99,19 @@ fn log_text(app: &AppRuntime) -> String {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod desktop {
-    use std::fs::{self, File, OpenOptions};
-    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
+    use product_kit::diagnostics::{
+        crash_report, now_secs, panic_message, tail, utc, utc_rfc3339, utc_stamp, RollingFile,
+        CRASH_LOG_BYTES, MAX_LOG_BYTES, MAX_REPORTS_PER_SESSION, REPORTED_LOG_BYTES,
+    };
     use workbench_api as api;
 
     use crate::WorkbenchAppBuilder;
 
-    /// A log file rolls over at this size…
-    const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
-    /// …and this many older ones stay (`app.1.log` is the newest of them).
-    const KEPT_LOGS: u32 = 3;
-    /// How much of the log the diagnostics report includes.
-    const REPORTED_LOG_BYTES: u64 = 1024 * 1024;
-    /// How much of the log a crash report includes.
-    const CRASH_LOG_BYTES: u64 = 64 * 1024;
-    /// A panic storm stops writing reports here; the first are the telling ones.
-    const MAX_REPORTS_PER_SESSION: u32 = 5;
+    use super::CRASH_DIR;
 
     /// The log file, once [`init`] has installed the logger.
     static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
@@ -201,175 +196,32 @@ mod desktop {
         }
     }
 
-    fn install_panic_hook(
-        product: String,
-        state: Arc<dyn api::StateStore>,
-        log_file: PathBuf,
-    ) {
+    fn install_panic_hook(product: String, state: Arc<dyn api::StateStore>, log_file: PathBuf) {
         static WRITTEN: AtomicU32 = AtomicU32::new(0);
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let thread = std::thread::current();
-            let panic = format!(
-                "Thread {} panicked at {}: {}",
-                thread.name().unwrap_or("(unnamed)"),
-                info.location().map_or("(unknown)".to_string(), ToString::to_string),
-                info.payload_as_str().unwrap_or("(no message)"),
-            );
+            let panic = panic_message(&info);
             let written = WRITTEN.fetch_add(1, Ordering::Relaxed);
             if written < MAX_REPORTS_PER_SESSION {
-                let now = chrono::Utc::now();
+                let time = utc(now_secs());
                 let key = format!(
                     "{}crash-{}-{}-{written}.txt",
-                    super::CRASH_DIR,
-                    now.format("%Y%m%d-%H%M%S"),
+                    CRASH_DIR,
+                    utc_stamp(time),
                     std::process::id()
                 );
-                let report = format!(
-                    "{product}\nTime: {}\n{panic}\n\nBacktrace:\n{}\nRecent log:\n{}",
-                    now.to_rfc3339(),
-                    std::backtrace::Backtrace::force_capture(),
-                    tail(&log_file, CRASH_LOG_BYTES),
+                let backtrace = std::backtrace::Backtrace::force_capture();
+                let report = crash_report(
+                    &product,
+                    &utc_rfc3339(time),
+                    &panic,
+                    &backtrace.to_string(),
+                    &tail(&log_file, CRASH_LOG_BYTES),
                 );
                 let _ = state.write(&key, report.as_bytes());
             }
             log::error!(target: "workbench", "{panic}");
             previous(info);
         }));
-    }
-
-    /// At most the last `limit` bytes of the file, starting at a whole line.
-    fn tail(path: &Path, limit: u64) -> String {
-        let Ok(mut file) = File::open(path) else {
-            return String::new();
-        };
-        let start = file.metadata().map_or(0, |meta| meta.len()).saturating_sub(limit);
-        let mut bytes = Vec::new();
-        if file.seek(SeekFrom::Start(start)).is_err() || file.read_to_end(&mut bytes).is_err() {
-            return String::new();
-        }
-        let text = String::from_utf8_lossy(&bytes);
-        match text.find('\n') {
-            Some(end_of_cut_line) if start > 0 => text[end_of_cut_line + 1..].to_string(),
-            _ => text.into_owned(),
-        }
-    }
-
-    /// An append-only file that starts over when full, keeping the last few.
-    /// Logging must never take the app down, so failures only lose lines.
-    struct RollingFile {
-        path: PathBuf,
-        file: Option<File>,
-        size: u64,
-        max_size: u64,
-    }
-
-    impl RollingFile {
-        fn open(path: PathBuf, max_size: u64) -> Self {
-            if let Some(dir) = path.parent() {
-                let _ = fs::create_dir_all(dir);
-            }
-            let mut rolling = Self { path, file: None, size: 0, max_size };
-            rolling.reopen();
-            rolling
-        }
-
-        fn reopen(&mut self) {
-            self.file = OpenOptions::new().create(true).append(true).open(&self.path).ok();
-            self.size = self.file.as_ref().and_then(|f| f.metadata().ok()).map_or(0, |m| m.len());
-        }
-
-        fn write_line(&mut self, line: &str) {
-            if self.size > 0 && self.size + line.len() as u64 > self.max_size {
-                self.roll_over();
-            }
-            if let Some(file) = &mut self.file {
-                if file.write_all(line.as_bytes()).is_ok() {
-                    self.size += line.len() as u64;
-                }
-            }
-        }
-
-        fn roll_over(&mut self) {
-            self.file = None; // Windows can't rename a file that is open
-            for older in (1..KEPT_LOGS).rev() {
-                let _ = fs::rename(self.numbered(older), self.numbered(older + 1));
-            }
-            let _ = fs::rename(&self.path, self.numbered(1));
-            self.reopen();
-        }
-
-        /// `app.log` → `app.<n>.log`.
-        fn numbered(&self, n: u32) -> PathBuf {
-            let stem = self.path.file_stem().unwrap_or_default().to_string_lossy();
-            self.path.with_file_name(format!("{stem}.{n}.log"))
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        fn empty_dir(test: &str) -> PathBuf {
-            let dir = std::env::temp_dir().join(format!("wb-log-{}-{test}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            dir
-        }
-
-        fn read(dir: &Path, name: &str) -> String {
-            fs::read_to_string(dir.join(name)).unwrap()
-        }
-
-        #[test]
-        fn a_full_log_rolls_over_and_the_oldest_is_dropped() {
-            let dir = empty_dir("roll");
-            let mut log = RollingFile::open(dir.join("app.log"), 20);
-            for n in 0..7 {
-                log.write_line(&format!("line {n} of the log\n"));
-            }
-            assert_eq!(read(&dir, "app.log"), "line 6 of the log\n");
-            assert_eq!(read(&dir, "app.1.log"), "line 5 of the log\n");
-            assert_eq!(read(&dir, "app.2.log"), "line 4 of the log\n");
-            assert_eq!(read(&dir, "app.3.log"), "line 3 of the log\n");
-            assert_eq!(fs::read_dir(&dir).unwrap().count(), 4, "nothing older is kept");
-            drop(log);
-            let _ = fs::remove_dir_all(&dir);
-        }
-
-        #[test]
-        fn a_new_session_continues_the_log_and_counts_what_is_there() {
-            let dir = empty_dir("continue");
-            fs::write(dir.join("app.log"), "from the last session\n").unwrap();
-            let mut log = RollingFile::open(dir.join("app.log"), 30);
-            log.write_line("short\n");
-            assert_eq!(read(&dir, "app.log"), "from the last session\nshort\n");
-            log.write_line("this one does not fit\n");
-            assert_eq!(read(&dir, "app.log"), "this one does not fit\n");
-            assert_eq!(read(&dir, "app.1.log"), "from the last session\nshort\n");
-            drop(log);
-            let _ = fs::remove_dir_all(&dir);
-        }
-
-        #[test]
-        fn a_log_that_cannot_be_opened_only_loses_lines() {
-            let dir = empty_dir("unwritable");
-            fs::create_dir(dir.join("app.log")).unwrap();
-            let mut log = RollingFile::open(dir.join("app.log"), 20);
-            log.write_line("nowhere to go\n");
-            drop(log);
-            let _ = fs::remove_dir_all(&dir);
-        }
-
-        #[test]
-        fn the_tail_starts_at_a_whole_line() {
-            let dir = empty_dir("tail");
-            let file = dir.join("log");
-            fs::write(&file, "first line\nsecond line\nthird\n").unwrap();
-            assert_eq!(tail(&file, 1000), "first line\nsecond line\nthird\n");
-            assert_eq!(tail(&file, 15), "third\n");
-            assert_eq!(tail(&dir.join("missing"), 15), "");
-            let _ = fs::remove_dir_all(&dir);
-        }
     }
 }
