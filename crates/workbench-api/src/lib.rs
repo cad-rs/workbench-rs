@@ -73,7 +73,7 @@ pub use registry::Registry;
 pub use services::{
     AppServices, CrashReporter, FileThen, IoTask, PluginEntry, RuntimeStats, ServiceHost, UiThen,
 };
-pub use settings::{SettingKind, SettingScope, SettingSpec, Settings};
+pub use settings::{load_settings, SettingKind, SettingScope, SettingSpec, Settings};
 pub use state::StateStore;
 pub use picker::FilePicker;
 pub use storage::{Entry, Location, Storage, StorageFuture, StorageProvider};

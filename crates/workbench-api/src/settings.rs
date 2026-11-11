@@ -8,13 +8,18 @@
 //! plugins register them during assembly via [`crate::Registry::register_setting`], the
 //! frontend's settings dialog renders controls from the spec and writes back through the
 //! `app.settings.set` command (the write side does type checking and range clamping).
+//!
+//! The store itself lives in `product_kit` (shared with the nanobot harness); this module
+//! keeps the workbench schema layer and the adapter that loads the document from the app's
+//! keyed [`StateStore`].
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::state::StateStore;
+
+pub use product_kit::Settings;
 
 /// A registered setting's value type (drives the control the settings dialog
 /// renders and the validation `app.settings.set` performs).
@@ -100,91 +105,28 @@ impl SettingSpec {
     }
 }
 
+/// Adapts a keyed [`StateStore`] to product-kit's single-document settings
+/// store: the document lives under `key`.
+struct KeyedStateStore(Arc<dyn StateStore>, String);
 
-/// The product settings store (owned by the UI thread).
-#[derive(Default)]
-pub struct Settings {
-    values: BTreeMap<String, Value>,
-    /// Where the values persist, and under which key; None keeps them in
-    /// memory only.
-    store: Option<(Arc<dyn StateStore>, String)>,
+impl product_kit::SettingsStore for KeyedStateStore {
+    fn read(&self) -> Option<Vec<u8>> {
+        self.0.read(&self.1)
+    }
+
+    fn write(&self, bytes: &[u8]) -> Result<(), String> {
+        self.0.write(&self.1, bytes)
+    }
+
+    fn describe(&self) -> Option<String> {
+        Some(self.1.clone())
+    }
 }
 
-impl Settings {
-    /// Load JSON from `key` in the state store; returns empty settings when it is missing or
-    /// fails to parse (the caller logs the parse error). Later writes all go to the same `key`.
-    pub fn load(store: Arc<dyn StateStore>, key: &str) -> (Self, Option<String>) {
-        let parsed = store.read(key).map(|bytes| serde_json::from_slice(&bytes));
-        let (values, error) = match parsed {
-            None => (BTreeMap::new(), None),
-            Some(Ok(values)) => (values, None),
-            Some(Err(e)) => (
-                BTreeMap::new(),
-                Some(format!("Failed to parse the settings file; reset: {e}")),
-            ),
-        };
-        let settings = Self {
-            values,
-            store: Some((store, key.to_string())),
-        };
-        (settings, error)
-    }
-
-    /// In-memory settings that are not persisted (for tests).
-    pub fn in_memory() -> Self {
-        Self::default()
-    }
-
-    pub fn get(&self, key: &str) -> Option<&Value> {
-        self.values.get(key)
-    }
-
-    pub fn get_str(&self, key: &str, default: &str) -> String {
-        self.get(key)
-            .and_then(|v| v.as_str())
-            .unwrap_or(default)
-            .to_string()
-    }
-
-    pub fn get_f64(&self, key: &str, default: f64) -> f64 {
-        self.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
-    }
-
-    pub fn get_bool(&self, key: &str, default: bool) -> bool {
-        self.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
-    }
-
-    /// Write and persist immediately (memory only when there is no store). Returns the error
-    /// message, if any.
-    pub fn set(&mut self, key: &str, value: Value) -> Result<(), String> {
-        self.values.insert(key.to_string(), value);
-        self.save()
-    }
-
-    /// Seed a default into memory only (no disk write): used at build time so
-    /// a registered spec's default is readable before the user ever changes
-    /// it, without polluting settings.json with untouched defaults.
-    pub fn seed(&mut self, key: &str, value: Value) {
-        self.values.entry(key.to_string()).or_insert(value);
-    }
-
-    pub fn remove(&mut self, key: &str) -> Result<(), String> {
-        self.values.remove(key);
-        self.save()
-    }
-
-    pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.values.keys().map(|k| k.as_str())
-    }
-
-    /// Save everything to the state store (a no-op for in-memory settings).
-    pub fn save(&self) -> Result<(), String> {
-        let Some((store, key)) = &self.store else {
-            return Ok(());
-        };
-        let json = serde_json::to_string_pretty(&self.values).map_err(|e| e.to_string())?;
-        store.write(key, json.as_bytes())
-    }
+/// Load settings from `key` in the app's state store; empty when missing,
+/// reset with a message when it fails to parse.
+pub fn load_settings(store: Arc<dyn StateStore>, key: &str) -> (Settings, Option<String>) {
+    Settings::load(Arc::new(KeyedStateStore(store, key.to_string())))
 }
 
 #[cfg(test)]

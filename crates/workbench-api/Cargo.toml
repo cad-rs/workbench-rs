@@ -14,6 +14,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 web-time = { workspace = true }
+# Shared product infrastructure (settings model).
+product-kit = { path = "../../../../product-kit" }
 
 # Desktop async timer (wb::sleep)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

@@ -8414,6 +8414,7 @@ dependencies = [
  "async-io",
  "js-sys",
  "log",
+ "product-kit",
  "serde",
  "serde_json",
  "wasm-bindgen",

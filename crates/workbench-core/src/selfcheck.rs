@@ -683,7 +683,7 @@ pub fn run(app: &mut AppRuntime) -> i32 {
     // 16. (Phase 5) Settings service: write → reload → read back
     let settings_ok = {
         let ok = app.host.settings.set("selfcheck.key", serde_json::json!(42)).is_ok();
-        let (reloaded, err) = api::Settings::load(app.state().clone(), crate::app::SETTINGS);
+        let (reloaded, err) = api::load_settings(app.state().clone(), crate::app::SETTINGS);
         ok && err.is_none() && reloaded.get_f64("selfcheck.key", 0.0) == 42.0
     };
     checks.push(Check::new(

@@ -1751,7 +1751,7 @@ impl WorkbenchAppBuilder {
         // State store: layout + settings + autosaves (phase 5)
         let (state, layout_key) =
             crate::state::open(&self.product_id, self.layout_path.as_deref());
-        let (settings, settings_err) = api::Settings::load(state.clone(), SETTINGS);
+        let (settings, settings_err) = api::load_settings(state.clone(), SETTINGS);
         host.settings = settings;
         if let Some(e) = settings_err {
             host.log.warn(format!("[Settings] {e}"));
