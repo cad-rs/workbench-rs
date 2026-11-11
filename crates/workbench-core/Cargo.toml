@@ -17,10 +17,9 @@ product-kit = { path = "../../../../product-kit" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
-# Browser sign-in
+# Browser sign-in (the PKCE challenge and redirect mechanics come from product-kit)
 base64 = { workspace = true }
 form_urlencoded = { workspace = true }
-sha2 = { workspace = true }
 
 # Desktop only: native file dialogs and local file storage (none on the web), and the async-io
 # timer driving the shared executor (async-io 2.6's rustix/errno chain does not support

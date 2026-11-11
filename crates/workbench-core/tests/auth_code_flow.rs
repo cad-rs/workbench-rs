@@ -9,10 +9,7 @@ use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 use workbench_api::{AccountService, PollResult};
 use workbench_core::account::HttpTransport;
 use workbench_core::auth_code::{AuthCodeClient, AuthCodeConfig};
@@ -136,8 +133,10 @@ fn signing_in_exchanges_the_code_with_the_verifier_behind_the_challenge() {
     assert_eq!(forms[0]["code"], "abc/1", "the code is percent-decoded");
     assert_eq!(forms[0]["client_id"], "client-1");
     assert_eq!(&forms[0]["redirect_uri"], redirect_uri);
-    let digest = URL_SAFE_NO_PAD.encode(Sha256::digest(forms[0]["code_verifier"].as_bytes()));
-    assert_eq!(digest, params["code_challenge"]);
+    assert_eq!(
+        product_kit::auth_code::code_challenge(forms[0]["code_verifier"].as_str()),
+        params["code_challenge"]
+    );
 
     assert_eq!(*idp.bearers.lock().unwrap(), ["tok-1"]);
     assert_eq!(client.access_token().as_deref(), Some("tok-1"));

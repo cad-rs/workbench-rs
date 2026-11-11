@@ -8,8 +8,8 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use product_kit::auth_code::{code_challenge, Callback, CallbackEnd};
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 use workbench_api::{DeviceAuthRequest, PollResult};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -112,31 +112,12 @@ impl Login {
     }
 }
 
-/// What the query of a redirect says about the sign-in with `state`.
-enum Callback {
-    /// Not this sign-in's: only the browser it was sent to knows the state.
-    Forged,
-    /// The sign-in ended at the page; what `poll` answers.
-    Over(Result<PollResult, String>),
-    Code(String),
-}
-
-fn read_callback(query: &str, state: &str) -> Callback {
-    let param = |name: &str| {
-        form_urlencoded::parse(query.as_bytes())
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value.into_owned())
-    };
-    if param("state").as_deref() != Some(state) {
-        return Callback::Forged;
-    }
-    match (param("error"), param("code")) {
-        (Some(error), _) if error == "access_denied" => Callback::Over(Ok(PollResult::Denied)),
-        (Some(error), _) => {
-            Callback::Over(Err(format!("The sign-in page returned an error: {error}")))
-        }
-        (None, Some(code)) => Callback::Code(code),
-        (None, None) => Callback::Over(Err("The sign-in page returned no code".to_string())),
+/// Map the shared callback verdict onto the platform's poll result.
+pub(crate) fn end_to_poll(end: CallbackEnd) -> Result<PollResult, String> {
+    match end {
+        CallbackEnd::Denied => Ok(PollResult::Denied),
+        CallbackEnd::Failed(message) => Err(message),
+        CallbackEnd::NoCode => Err("The sign-in page returned no code".to_string()),
     }
 }
 
@@ -172,17 +153,14 @@ fn random_bytes(bytes: &mut [u8]) -> Result<(), String> {
         .ok_or_else(|| "No secure randomness available".to_string())
 }
 
-fn code_challenge(verifier: &str) -> String {
-    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use product_kit::auth_code::read_callback;
 
     fn over(query: &str) -> Result<PollResult, String> {
         match read_callback(query, "s") {
-            Callback::Over(answer) => answer,
+            Callback::Over(end) => end_to_poll(end),
             _ => panic!("{query} should end the sign-in"),
         }
     }

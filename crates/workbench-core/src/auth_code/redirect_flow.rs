@@ -2,9 +2,10 @@
 //! anywhere: the caller reads the redirect from wherever it arrives and runs
 //! the token exchange, which cannot block on the page's only thread.
 
+use product_kit::auth_code::{read_callback, Callback};
 use workbench_api::{AccountUser, DeviceAuthRequest, PollResult};
 
-use super::{AuthCodeConfig, Callback, Login, read_callback};
+use super::{end_to_poll, AuthCodeConfig, Login};
 
 /// What the caller should do after [`RedirectFlow::advance`].
 #[derive(Debug, PartialEq)]
@@ -74,7 +75,7 @@ impl RedirectFlow {
                     self.phase = Phase::Waiting(login);
                     pending
                 }
-                Some(Callback::Over(answer)) => answer.map(Step::Answer),
+                Some(Callback::Over(end)) => end_to_poll(end).map(Step::Answer),
                 Some(Callback::Code(code)) => {
                     let form = form_urlencoded::Serializer::new(String::new())
                         .extend_pairs(login.token_form(config, &code))

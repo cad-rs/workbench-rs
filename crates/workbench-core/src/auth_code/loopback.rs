@@ -1,13 +1,13 @@
 //! The desktop client: the redirect comes back to a port on 127.0.0.1.
 
-use std::io::{BufRead, BufReader, ErrorKind, Read as _, Write as _};
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::io::ErrorKind;
+use std::net::{Ipv4Addr, TcpListener};
 use std::sync::Mutex;
-use std::time::Duration;
 
+use product_kit::auth_code::{read_callback, read_callback_query, respond};
 use workbench_api::{AccountService, AccountUser, DeviceAuthRequest, PollResult};
 
-use super::{AuthCodeConfig, Callback, Login, access_token, read_callback};
+use super::{end_to_poll, AuthCodeConfig, Callback, Login, access_token};
 use crate::account::{HttpTransport, lock, user_from_claims};
 
 /// A sign-in waiting for the browser to come back.
@@ -84,10 +84,10 @@ impl<T: HttpTransport> AccountService for AuthCodeClient<T> {
                 respond(&mut stream, "400 Bad Request", "This sign-in request is not valid.");
                 return Ok(PollResult::Pending);
             }
-            Callback::Over(answer) => {
+            Callback::Over(end) => {
                 *pending = None;
                 respond(&mut stream, "200 OK", "Sign-in did not complete. You can close this tab.");
-                return answer;
+                return end_to_poll(end);
             }
             Callback::Code(code) => code,
         };
@@ -114,33 +114,4 @@ impl<T: HttpTransport> AccountService for AuthCodeClient<T> {
     fn current_user(&self) -> Option<AccountUser> {
         lock(&self.session).as_ref().map(|(_, user)| user.clone())
     }
-}
-
-/// The query string of a `GET` for `path`; None for any other request. The
-/// whole header is read, because closing a socket with unread data can reset
-/// the connection before the browser sees the response.
-fn read_callback_query(stream: &mut TcpStream, path: &str) -> Option<String> {
-    stream.set_nonblocking(false).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-    let mut reader = BufReader::new(stream.take(16 * 1024));
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line).ok()?;
-    let mut line = String::new();
-    while matches!(reader.read_line(&mut line), Ok(n) if n > 0) && line.trim_end() != "" {
-        line.clear();
-    }
-    let target = request_line.strip_prefix("GET ")?.split_whitespace().next()?;
-    let (target_path, query) = target.split_once('?')?;
-    (target_path == path).then(|| query.to_string())
-}
-
-/// `message` is always fixed text: nothing from the request reaches the page.
-fn respond(stream: &mut TcpStream, status: &str, message: &str) {
-    let body = format!("<!doctype html><meta charset=utf-8><title>Sign-in</title><p>{message}</p>");
-    let _ = write!(
-        stream,
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\
-         Connection: close\r\n\r\n{body}",
-        body.len()
-    );
 }
