@@ -7,27 +7,10 @@
 
 use std::time::{Duration, Instant};
 
+use product_kit::selfcheck::{report, Check, Summary};
 use workbench_api as api;
 
 use crate::app::AppRuntime;
-
-struct Check {
-    name: String,
-    ok: bool,
-    skipped: bool,
-    detail: String,
-}
-
-impl Check {
-    fn new(name: impl Into<String>, ok: bool, detail: impl Into<String>) -> Self {
-        Self { name: name.into(), ok, skipped: false, detail: detail.into() }
-    }
-    /// Skipped when a precondition is not met (a probing selfcheck: any product can run it,
-    /// irrelevant checks SKIP automatically).
-    fn skip(name: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self { name: name.into(), ok: false, skipped: true, detail: reason.into() }
-    }
-}
 
 /// Recovered-document title prefix (`recover_autosaves` renames to
 /// `[Recovered] <title>`), so a probe can identify what recovery produced.
@@ -785,30 +768,7 @@ pub fn run(app: &mut AppRuntime) -> i32 {
     ));
 
     // Summary
-    let failed = checks.iter().filter(|c| !c.ok && !c.skipped).count();
-    let skipped = checks.iter().filter(|c| c.skipped).count();
-    for c in &checks {
-        let tag = if c.skipped {
-            "SKIP"
-        } else if c.ok {
-            "PASS"
-        } else {
-            "FAIL"
-        };
-        println!("[{}] {} — {}", tag, c.name, c.detail);
-    }
-    let run_total = checks.len() - skipped;
-    println!(
-        "selfcheck: {}/{} passed ({} skipped)",
-        run_total - failed,
-        run_total,
-        skipped
-    );
-    if failed == 0 {
-        0
-    } else {
-        1
-    }
+    report(&checks, Summary::English)
 }
 
 /// Read the shape count through the document type's serialization interface (the platform
