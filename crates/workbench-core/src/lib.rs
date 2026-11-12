@@ -23,8 +23,6 @@ pub mod file_picker;
 mod local_files;
 #[cfg(target_arch = "wasm32")]
 mod js;
-#[cfg(target_arch = "wasm32")]
-mod opfs;
 pub mod platform_cmds;
 pub mod product;
 pub mod selfcheck;

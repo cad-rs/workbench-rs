@@ -29,13 +29,11 @@ pub mod ids;
 pub mod i18n;
 pub mod entitlements;
 pub mod log;
-pub mod picker;
 pub mod product;
 pub mod registry;
 pub mod services;
 pub mod settings;
 pub mod state;
-pub mod storage;
 pub mod tasks;
 pub mod view;
 pub mod workbench;
@@ -75,6 +73,10 @@ pub use services::{
 };
 pub use settings::{load_settings, SettingKind, SettingScope, SettingSpec, Settings};
 pub use state::StateStore;
+// The storage contracts and the in-app picker state are the shared product-kit
+// modules (batch 3-3); the names stay so existing `wb::storage` / `wb::picker`
+// paths keep working.
+pub use product_kit::{picker, storage};
 pub use picker::FilePicker;
 pub use storage::{Entry, Location, Storage, StorageFuture, StorageProvider};
 pub use tasks::{

@@ -1382,7 +1382,7 @@ impl WorkbenchAppBuilder {
         #[cfg(not(target_arch = "wasm32"))]
         storage.register(api::storage::LOCAL, Arc::new(crate::local_files::LocalFiles));
         #[cfg(target_arch = "wasm32")]
-        storage.register(crate::opfs::ID, Arc::new(crate::opfs::Opfs));
+        storage.register(product_kit::opfs::ID, Arc::new(product_kit::opfs::Opfs));
         Self {
             product_id: product_id.into(),
             product_name: product_name.into(),
