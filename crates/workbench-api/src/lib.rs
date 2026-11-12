@@ -19,7 +19,6 @@
 //! | a plugin host | the workbench-rhai crate (Host API v1, layered on this crate) |
 
 pub mod account;
-pub mod assets;
 pub mod asyncrt;
 pub mod command;
 pub mod dispatch;
@@ -46,6 +45,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use account::{
     AccountService, AccountUser, DeviceAuthRequest, PollResult, SLOW_DOWN_INTERVAL_SECS,
 };
+// The asset loading contract is the shared product-kit module (batch 1-4); the
+// names stay so existing `wb::AssetSource` paths keep working.
+pub use product_kit::assets;
 pub use assets::{AssetSource, ChainedAssets, StaticAssets};
 pub use asyncrt::{sleep, BoxFuture};
 pub use command::{
