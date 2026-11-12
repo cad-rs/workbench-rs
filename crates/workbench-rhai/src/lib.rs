@@ -12,7 +12,7 @@
 
 mod loader;
 
-pub use loader::{discover, plugin_stage};
+pub use loader::plugin_stage;
 pub use plugin_host::{split_entry_point, PluginManifest, HOST_API_VERSION};
 
 /// Parse and validate a manifest; on failure returns a readable error (the

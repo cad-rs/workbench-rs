@@ -12,12 +12,6 @@ use plugin_host as ph;
 use workbench_api as api;
 use workbench_api::{CommandDef, Registry};
 
-/// Scan the plugin directories (every first-level subdirectory holding a
-/// `plugin.toml` is a plugin; sorted by name).
-pub fn discover(dirs: &[PathBuf]) -> Vec<PathBuf> {
-    ph::discover(dirs)
-}
-
 /// Load one plugin: a failure is recorded in `registry` as a rejection reason
 /// and does not stop the other plugins.
 fn load_one(registry: &mut Registry, dir: &Path) {
