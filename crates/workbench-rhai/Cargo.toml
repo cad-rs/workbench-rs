@@ -12,6 +12,7 @@ readme = "../../README.md"
 [dependencies]
 workbench-api = { workspace = true }
 workbench-core = { workspace = true }
-rhai = { workspace = true }
-toml = { workspace = true }
-serde = { workspace = true }
+# The shared plugin host (manifest, Rhai engines, loading pipeline), consumed
+# through product-kit like the rest of the shared infrastructure. This crate is
+# the workbench adapter that commits into the Registry.
+plugin-host = { path = "../../../../product-kit/crates/plugin-host" }

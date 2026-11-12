@@ -1,49 +1,32 @@
-//! Plugin discovery and loading: directory scan → manifest validation → script `register()`
-//! → committed to the Registry.
+//! The workbench adapter: discovers plugin directories, gates them on the
+//! product's entitlements, runs their entry points and commits the declarations
+//! into the [`Registry`].
+//!
+//! The loading mechanics live in `plugin-host`; this module owns only the
+//! workbench-specific commit and the neutral→`workbench_api` type mapping.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use plugin_host as ph;
 use workbench_api as api;
 use workbench_api::{CommandDef, Registry};
 
-use crate::host::{build_load_engine, call_sync_callback, run_background_callback, RhaiProgram, SharedCollected};
-use crate::manifest::{parse as parse_manifest, split_entry_point, PluginManifest};
-
-/// Scan the plugin directories (every first-level subdirectory holding a `plugin.toml` is a
-/// plugin; sorted by name).
+/// Scan the plugin directories (every first-level subdirectory holding a
+/// `plugin.toml` is a plugin; sorted by name).
 pub fn discover(dirs: &[PathBuf]) -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() && path.join("plugin.toml").is_file() {
-                candidates.push(path);
-            }
-        }
-    }
-    candidates.sort();
-    candidates
+    ph::discover(dirs)
 }
 
-/// Load one plugin: a failure is recorded in `registry` as a rejection reason and does not
-/// stop the other plugins.
+/// Load one plugin: a failure is recorded in `registry` as a rejection reason
+/// and does not stop the other plugins.
 fn load_one(registry: &mut Registry, dir: &Path) {
     let dir_name = dir
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    let Ok(text) = std::fs::read_to_string(dir.join("plugin.toml")) else {
-        registry
-            .plugins_rejected
-            .push((dir_name, "plugin.toml is not readable".to_string()));
-        return;
-    };
-    let manifest: PluginManifest = match parse_manifest(&text) {
-        Ok(m) => m,
+    let manifest = match ph::read_manifest(dir) {
+        Ok(manifest) => manifest,
         Err(reason) => {
             registry.plugins_rejected.push((dir_name, reason));
             return;
@@ -57,47 +40,27 @@ fn load_one(registry: &mut Registry, dir: &Path) {
         ));
         return;
     }
-
-    if let Some(refusal) = manifest.plugin.requires.as_deref().and_then(|f| registry.refusal(f)) {
+    // The product's entitlement answer: the first refused capability rejects,
+    // and the plugin's script never compiles.
+    if let Some(refusal) = manifest
+        .plugin
+        .requires
+        .iter()
+        .find_map(|capability| registry.refusal(capability))
+    {
         registry.plugins_rejected.push((plugin_id, refusal));
         return;
     }
 
-    let (entry_file, entry_fn) = split_entry_point(&manifest.plugin.entry_point);
-    let entry_path = dir.join(&entry_file);
-    let Ok(source) = std::fs::read_to_string(&entry_path) else {
-        registry
-            .plugins_rejected
-            .push((plugin_id, format!("entry script is not readable: {}", entry_path.display())));
-        return;
-    };
-
-    let collected: SharedCollected = Arc::new(Mutex::new(crate::host::Collected::default()));
-    let engine = build_load_engine(dir.to_path_buf(), collected.clone());
-    let ast = match engine.compile(&source) {
-        Ok(ast) => ast,
-        Err(e) => {
-            registry
-                .plugins_rejected
-                .push((plugin_id, format!("script failed to compile: {e}")));
+    let (program, mut collected) = match ph::run_entry(dir, &manifest) {
+        Ok(loaded) => loaded,
+        Err(reason) => {
+            registry.plugins_rejected.push((plugin_id, reason));
             return;
         }
     };
-    let _ = ast; // Compile-time check; command callbacks rebuild the Engine on the calling thread
-
-    // Run the entry function (default `register`); the script registers through the host's
-    // global functions.
-    let mut scope = rhai::Scope::new();
-    if let Err(e) = engine.call_fn::<()>(&mut scope, &ast, &entry_fn, ()) {
-        registry
-            .plugins_rejected
-            .push((plugin_id, format!("entry `{entry_fn}` failed: {e}")));
-        return;
-    }
 
     // Commit: commands + toolbar + script panels + notes
-    let program: RhaiProgram = Arc::new(source);
-    let mut collected = collected.lock().unwrap_or_else(|p| p.into_inner());
     for cmd in collected.commands.drain(..) {
         let def = if cmd.background {
             build_background_command(&cmd.id, &cmd.title, &cmd.callback, program.clone())
@@ -167,8 +130,10 @@ fn load_one(registry: &mut Registry, dir: &Path) {
     registry
         .plugin_modules
         .push((plugin_id.clone(), manifest.plugin.modules.clone()));
-    if let Some(feature) = &manifest.plugin.requires {
-        registry.plugin_requirements.push((plugin_id.clone(), feature.clone()));
+    for capability in &manifest.plugin.requires {
+        registry
+            .plugin_requirements
+            .push((plugin_id.clone(), capability.clone()));
     }
     registry.plugins_loaded.push(plugin_id);
 }
@@ -177,11 +142,18 @@ fn build_sync_command(
     id: &str,
     title: &str,
     callback: &str,
-    program: RhaiProgram,
+    program: ph::RhaiProgram,
 ) -> CommandDef {
     let callback = callback.to_string();
     CommandDef::sync(id, title, move |_ctx, args| {
-        call_sync_callback(&program, &callback, args)
+        let args = ph::CommandArgs {
+            values: args.values.clone(),
+            value: args.value.clone(),
+        };
+        match ph::call_sync_callback(&program, &callback, &args) {
+            ph::CommandResult::Done { note } => api::CommandResult::Done { note },
+            ph::CommandResult::Failed { error } => api::CommandResult::Failed { error },
+        }
     })
 }
 
@@ -189,7 +161,7 @@ fn build_background_command(
     id: &str,
     title: &str,
     callback: &str,
-    program: RhaiProgram,
+    program: ph::RhaiProgram,
 ) -> CommandDef {
     let title_spec = title.to_string();
     let callback_owned = callback.to_string();
@@ -202,10 +174,32 @@ fn build_background_command(
             cancellable: true,
             input: Box::new(()),
             job: Box::new(move |task: &mut api::TaskCtx| {
-                run_background_callback(&program, &callback, task.progress_handle())
+                let sink = ScriptProgress(task.progress_handle());
+                match ph::run_background_callback(&program, &callback, Arc::new(sink)) {
+                    Ok(()) => Ok(None),
+                    Err(ph::TaskFailure::Cancelled) => Err(api::TaskFailure::Cancelled),
+                    Err(ph::TaskFailure::Error(message)) => Err(api::TaskFailure::Error(message)),
+                }
             }),
         })
     })
+}
+
+/// Adapts the workbench progress handle to the neutral [`ph::ProgressSink`].
+struct ScriptProgress(api::ProgressHandle);
+
+impl ph::ProgressSink for ScriptProgress {
+    fn report(&self, fraction: Option<f32>, stage: Option<String>) {
+        self.0.report(fraction, stage.as_deref());
+    }
+
+    fn log(&self, message: String) {
+        self.0.log(message);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
 }
 
 /// The plugin loading stage: called by the builder at assembly time, contributes commands /
@@ -213,7 +207,7 @@ fn build_background_command(
 /// stop assembly (the same isolation policy as any other PluginStage).
 pub fn plugin_stage(dirs: Vec<PathBuf>) -> workbench_core::PluginStage {
     Box::new(move |registry: &mut Registry| {
-        for dir in discover(&dirs) {
+        for dir in ph::discover(&dirs) {
             load_one(registry, &dir);
         }
     })
