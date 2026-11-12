@@ -1,26 +1,24 @@
 //! GPU viewport (a native view extension of the frontend): renders 3D/2D views with its own wgpu
 //! pipelines.
 //!
-//! How a frame reaches the screen is decided per platform by [`present`]: the web renders on
-//! GPUI's own device into a `WgpuDynamicTexture` (joining the draw order as a sprite); Windows
-//! takes a native surface (a DirectComposition visual) in the GPUI window's composition and hangs
-//! the viewport's own DX12 swap chain on it (above GPUI's base content, below menus / popovers /
+//! How a frame reaches the screen is decided per platform by the shared
+//! [`gpui_gpu_view`] slot: the web renders on GPUI's own device into a
+//! `WgpuDynamicTexture` (joining the draw order as a sprite); Windows takes a
+//! native surface (a DirectComposition visual) in the GPUI window's composition and hangs the
+//! viewport's own DX12 swap chain on it (above GPUI's base content, below menus / popovers /
 //! dialogs); other desktops, or Windows without composition, render offscreen + read back into a
-//! texture. Ported from the gpui-wgpu reference implementation (javagg/gpui-demo); the
-//! presentation approach follows javagg/gpui-fast-wgpu-demo.
+//! texture.
 //!
 //! Integration: [`GpuViewportView`] implements [`wb::ViewInstance`], and its `element` returns a
 //! [`GpuViewportElement`], a self-drawn gpui `Element` that positions itself in prepaint and
 //! renders in paint; presentation, input and dirty tracking are all handled by
-//! [`present::Viewport`], and this module and [`host`] only supply their own
-//! [`present::ViewportContent`].
+//! [`gpui_gpu_view::Viewport`], and this module and [`host`] only supply their own
+//! [`gpui_gpu_view::ViewportContent`].
 //!
 //! The device belongs to no single view: [`shared_gpu`] provides the process-wide shared [`Gpu`],
 //! on which plugins' own custom gpui `Element`s build their render resources.
 
 mod camera;
-mod gpu;
-mod present;
 // Product injection contract (design doc, "GPU viewport injection API"): mesh/scene are public,
 // so a product can build its own shaded mesh (Scene::from_mesh) and inject it into an orbit
 // viewport via GpuViewportView::new3d_with_scene; the camera is still driven by the framework
@@ -40,12 +38,15 @@ use gpui::{
     App, AnyElement, Bounds, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior,
     InspectorElementId, IntoElement, LayoutId, Pixels, Window,
 };
-use present::Viewport;
 use scene::{Pipelines, Scene, Uniforms, ViewState};
 use workbench_api as wb;
 
-pub use gpu::{Gpu, GpuRequirements};
-pub(crate) use gpu::set_requirements;
+pub use gpui_gpu_view::{
+    set_gpu_requirements, set_wheel_line_pixels, shared_gpu, Gpu, GpuRequirements,
+};
+#[cfg(target_family = "wasm")]
+pub use gpui_gpu_view::{set_web_platform, web_context};
+use gpui_gpu_view::{Viewport, ViewportContent, ViewportInput};
 
 #[derive(Clone, Copy)]
 enum ViewKind {
@@ -72,81 +73,6 @@ impl ViewportCommon {
         let pipes = Rc::new(Pipelines::new(&gpu.device, gpu.target_format));
         Self { gpu, scene, pipes }
     }
-}
-
-/// Shared GPU slot (rendering happens on the gpui thread).
-enum GpuSlot {
-    /// Not created yet (web: graphics not up yet, retried on the next frame).
-    NotTried,
-    Ready(Rc<Gpu>),
-    /// Device creation failed; not retried, so it does not block every frame.
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
-    Failed,
-}
-
-thread_local! {
-    static SHARED_GPU: RefCell<GpuSlot> = const { RefCell::new(GpuSlot::NotTried) };
-}
-
-#[cfg(target_family = "wasm")]
-thread_local! {
-    /// The web platform the application runs on: it holds GPUI's wgpu
-    /// context, which the viewports render on.
-    static WEB_PLATFORM: RefCell<Option<Rc<gpui_web::WebPlatform>>> = const { RefCell::new(None) };
-}
-
-/// Web: remember the platform, whose wgpu context [`shared_gpu`] hands out.
-#[cfg(target_family = "wasm")]
-pub(crate) fn set_web_platform(platform: Rc<gpui_web::WebPlatform>) {
-    WEB_PLATFORM.with(|slot| *slot.borrow_mut() = Some(platform));
-}
-
-/// Web: GPUI's wgpu context (the device every dynamic texture must live on).
-/// None until the platform's graphics are up; elements paint nothing and
-/// retry on a later frame.
-#[cfg(target_family = "wasm")]
-pub fn web_context() -> Option<gpui_wgpu::WgpuContext> {
-    WEB_PLATFORM.with(|platform| platform.borrow().as_ref().and_then(|p| p.wgpu_context()))
-}
-
-/// Acquire the process-wide GPU context, creating it on first use.
-///
-/// A plugin-provided GPU view calls this from its `Element` and builds its own
-/// pipelines, textures and render targets on the returned device. On the web
-/// this is GPUI's own device (so its textures can be sampled by GPUI); on the
-/// desktop it is a device of the viewports' own.
-///
-/// Returns `None` until the device is available (web: until graphics are up)
-/// or when no adapter exists; callers paint a placeholder and retry on a
-/// later frame.
-pub fn shared_gpu(_window: &Window) -> Option<Rc<Gpu>> {
-    SHARED_GPU.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if matches!(&*slot, GpuSlot::NotTried) {
-            #[cfg(target_family = "wasm")]
-            {
-                let context = WEB_PLATFORM
-                    .with(|platform| platform.borrow().as_ref().and_then(|p| p.wgpu_context()));
-                if let Some(context) = context {
-                    *slot = GpuSlot::Ready(Rc::new(Gpu::from_web_context(context)));
-                }
-            }
-            #[cfg(not(target_family = "wasm"))]
-            {
-                match Gpu::new() {
-                    Ok(gpu) => *slot = GpuSlot::Ready(Rc::new(gpu)),
-                    Err(err) => {
-                        log::error!("gpu viewport: failed to init wgpu device: {err:#}");
-                        *slot = GpuSlot::Failed;
-                    }
-                }
-            }
-        }
-        match &*slot {
-            GpuSlot::Ready(gpu) => Some(gpu.clone()),
-            _ => None,
-        }
-    })
 }
 
 // Demo viewport state (scene + pipelines), built once on top of the shared
@@ -212,6 +138,8 @@ struct SceneView {
     provider: Option<Rc<SceneProvider>>,
     view_state: Option<ViewState>,
     depth: Option<DepthTarget>,
+    /// Where the pointer was last seen with the button held, for drag deltas.
+    last_pointer: Option<gpui::Point<Pixels>>,
 }
 
 impl SceneView {
@@ -224,6 +152,7 @@ impl SceneView {
             provider: None,
             view_state: None,
             depth: None,
+            last_pointer: None,
         }
     }
 
@@ -255,26 +184,45 @@ impl SceneView {
     }
 }
 
-impl present::ViewportContent for SceneView {
-    fn drag(&mut self, dx: f32, dy: f32, shift: bool) -> bool {
-        match (self.kind, shift) {
-            (ViewKind::Orbit3d, false) => self.orbit.orbit(dx, dy),
-            (ViewKind::Orbit3d, true) => self.orbit.pan(dx, dy),
-            (ViewKind::Top2d, _) => self.ortho.pan(dx, dy),
+impl ViewportContent for SceneView {
+    fn input(&mut self, input: ViewportInput) -> bool {
+        if let Some(pixels) = input.scroll {
+            let factor = (-pixels * 0.0012).exp();
+            match self.kind {
+                ViewKind::Orbit3d => self.orbit.zoom(factor),
+                ViewKind::Top2d => self.ortho.zoom(factor),
+            }
+            return true;
         }
-        true
+        let Some(position) = input.mouse_pos else {
+            return false;
+        };
+        if !input.mouse_down {
+            self.last_pointer = None;
+            return false;
+        }
+        let changed = match self.last_pointer {
+            Some(from) => {
+                let dx = f32::from(position.x - from.x);
+                let dy = f32::from(position.y - from.y);
+                if dx == 0.0 && dy == 0.0 {
+                    false
+                } else {
+                    match (self.kind, input.shift) {
+                        (ViewKind::Orbit3d, false) => self.orbit.orbit(dx, dy),
+                        (ViewKind::Orbit3d, true) => self.orbit.pan(dx, dy),
+                        (ViewKind::Top2d, _) => self.ortho.pan(dx, dy),
+                    }
+                    true
+                }
+            }
+            None => false,
+        };
+        self.last_pointer = Some(position);
+        changed
     }
 
-    fn scroll(&mut self, pixels: f32) -> bool {
-        let factor = (-pixels * 0.0012).exp();
-        match self.kind {
-            ViewKind::Orbit3d => self.orbit.zoom(factor),
-            ViewKind::Top2d => self.ortho.zoom(factor),
-        }
-        true
-    }
-
-    fn draw(&mut self, view: &wgpu::TextureView, size: (u32, u32)) {
+    fn draw(&mut self, gpu: &Gpu, view: &wgpu::TextureView, size: (u32, u32)) {
         let (Some(common), Some(view_state)) = (&self.common, &self.view_state) else {
             return;
         };
@@ -295,7 +243,6 @@ impl present::ViewportContent for SceneView {
                 0.002,
             ),
         };
-        let gpu = &common.gpu;
         if self.depth.as_ref().is_none_or(|d| d.size != size) {
             self.depth = Some(DepthTarget::new(&gpu.device, size));
         }
@@ -394,7 +341,7 @@ impl wb::ViewInstance for GpuViewportView {
 }
 
 /// A gpui element that renders one GPU viewport: placed in prepaint, drawn
-/// in paint (see [`present`]).
+/// in paint (see the shared slot).
 struct GpuViewportElement {
     viewport: Rc<RefCell<Viewport<SceneView>>>,
     scene_provider: Option<Rc<SceneProvider>>,
@@ -428,7 +375,7 @@ impl Element for GpuViewportElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        (present::full_size_layout(window, cx), ())
+        (gpui_gpu_view::full_size_layout(window, cx), ())
     }
 
     fn prepaint(

@@ -1110,12 +1110,15 @@ fn launch_app(
         // viewport device is created (when the first GPU view draws).
         if let Some(requirements) = gpu_requirements {
             match requirements.downcast::<gpu_view::GpuRequirements>() {
-                Ok(requirements) => gpu_view::set_requirements(*requirements),
+                Ok(requirements) => gpu_view::set_gpu_requirements(*requirements),
                 Err(_) => log::error!(
                     "with_gpu_requirements: expected workbench_ui::gpu_view::GpuRequirements; ignored"
                 ),
             }
         }
+        // The shared slot's default wheel factor is 40 px/line (a Windows notch);
+        // workbench keeps its historical 20 px/line feel.
+        gpu_view::set_wheel_line_pixels(20.0);
         gpui_component::init(cx);
         gpui_rhai::install(cx);
         // The theme is applied after component init and before any window opens: shell colors,

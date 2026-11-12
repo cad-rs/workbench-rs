@@ -4,8 +4,8 @@
 //! the two copies of the shell had drifted apart: a zero-height layout bug fixed separately in
 //! each kept a "surface sharing is broken" misdiagnosis alive for 7 rounds, and hit testing
 //! existed only on the product side; since then the framework has the only implementation).
-//! Full-size layout, raw input forwarding and the presentation path all live in
-//! [`super::present::Viewport`]; this module only maps input onto the render core's interactive
+//! Full-size layout, raw input forwarding and the presentation path all live in the shared
+//! [`gpui_gpu_view::Viewport`]; this module only maps input onto the render core's interactive
 //! camera and, at paint time, draws the product's scene with the render core. Without an adapter
 //! it shows the dark background as is.
 //!
@@ -22,13 +22,12 @@ use gpui::{
     Bounds, Element, ElementId, GlobalElementId, HitboxBehavior, InspectorElementId, LayoutId,
     Pixels, Window,
 };
+use gpui_gpu_view::{Gpu, Viewport, ViewportContent, ViewportInput};
 use workbench_render as wbr;
 
-use super::present::{Viewport, ViewportContent};
-
 /// Generic render viewport: the product passes the scene (base camera) + base view, and the render
-/// core layers the interactive offset on top. For the presentation path see [`super::present`];
-/// with no usable adapter it shows the dark background as is.
+/// core layers the interactive offset on top. For the presentation path see the shared
+/// [`gpui_gpu_view::Viewport`]; with no usable adapter it shows the dark background as is.
 ///
 /// There is only one host per process (the renderer and the presentation target are singletons,
 /// as before the migration): two of these elements shown at once contend for the same target.
@@ -49,27 +48,47 @@ struct HostScene {
     /// The scene, its base camera (before the interactive offset) and base
     /// view.
     scene: Option<(wbr::RenderScene, wbr::OrthoCamera, (f64, f64))>,
+    /// Where the pointer was last seen with the button held, for drag deltas.
+    last_pointer: Option<gpui::Point<Pixels>>,
 }
 
 impl ViewportContent for HostScene {
     // Raw input forwarding: drag offset (px) + the Shift key state, wheel pixels → zoom factor;
     // the sensitivity / conversion / clamp semantics all live in the render core
     // (`wbr::CamOffset`).
-    fn drag(&mut self, dx: f32, dy: f32, shift: bool) -> bool {
-        if shift {
-            wbr::cam_pan(dx as f64, dy as f64);
-        } else {
-            wbr::cam_orbit(dx as f64, dy as f64);
+    fn input(&mut self, input: ViewportInput) -> bool {
+        if let Some(pixels) = input.scroll {
+            wbr::cam_zoom((-pixels as f64 * 0.0012).exp());
+            return true;
         }
-        true
+        let Some(position) = input.mouse_pos else {
+            return false;
+        };
+        if !input.mouse_down {
+            self.last_pointer = None;
+            return false;
+        }
+        let changed = match self.last_pointer {
+            Some(from) => {
+                let dx = f32::from(position.x - from.x);
+                let dy = f32::from(position.y - from.y);
+                if dx == 0.0 && dy == 0.0 {
+                    false
+                } else if input.shift {
+                    wbr::cam_pan(dx as f64, dy as f64);
+                    true
+                } else {
+                    wbr::cam_orbit(dx as f64, dy as f64);
+                    true
+                }
+            }
+            None => false,
+        };
+        self.last_pointer = Some(position);
+        changed
     }
 
-    fn scroll(&mut self, pixels: f32) -> bool {
-        wbr::cam_zoom((-pixels as f64 * 0.0012).exp());
-        true
-    }
-
-    fn draw(&mut self, view: &wgpu::TextureView, size: (u32, u32)) {
+    fn draw(&mut self, _gpu: &Gpu, view: &wgpu::TextureView, size: (u32, u32)) {
         let (Some(renderer), Some((scene, base_camera, base_view))) =
             (self.renderer.as_mut(), self.scene.as_mut())
         else {
@@ -91,6 +110,7 @@ thread_local! {
         HostScene {
             renderer: None,
             scene: None,
+            last_pointer: None,
         },
     )));
 }
@@ -98,7 +118,7 @@ thread_local! {
 impl gpui::IntoElement for RenderViewportElement {
     type Element = Self;
 
-    fn into_element(self) -> Self {
+    fn into_element(self) -> Self::Element {
         self
     }
 }
@@ -123,7 +143,7 @@ impl Element for RenderViewportElement {
         window: &mut Window,
         cx: &mut gpui::App,
     ) -> (LayoutId, ()) {
-        (super::present::full_size_layout(window, cx), ())
+        (gpui_gpu_view::full_size_layout(window, cx), ())
     }
 
     fn prepaint(
@@ -138,7 +158,7 @@ impl Element for RenderViewportElement {
         let host = HOST.with(Rc::clone);
         // The framework's shared GPU slot; when it is unavailable (no adapter), paint shows the
         // dark background as is.
-        let gpu = super::shared_gpu(window);
+        let gpu = gpui_gpu_view::shared_gpu(window);
         {
             let mut viewport = host.borrow_mut();
             // The product rebuilt its scene for this frame.

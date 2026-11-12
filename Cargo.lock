@@ -2215,6 +2215,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-readback"
+version = "0.1.0"
+dependencies = [
+ "wgpu",
+]
+
+[[package]]
 name = "gpui"
 version = "0.2.2"
 source = "git+https://github.com/longbridge/gpui-fast?rev=a10f393d8033c5f52f34821d6a25cddadc6174b4#a10f393d8033c5f52f34821d6a25cddadc6174b4"
@@ -2377,6 +2384,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "gpui-gpu-view"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpu-readback",
+ "gpui",
+ "gpui_web",
+ "gpui_wgpu",
+ "image",
+ "log",
+ "pollster",
+ "wgpu",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -8468,6 +8491,7 @@ name = "workbench-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "gpu-readback",
  "pollster",
  "wgpu",
 ]
@@ -8492,21 +8516,19 @@ dependencies = [
  "glam",
  "gpui",
  "gpui-component",
+ "gpui-gpu-view",
  "gpui-kit-assets",
  "gpui-rhai",
  "gpui_platform",
  "gpui_web",
- "gpui_wgpu",
  "image",
  "log",
- "pollster",
  "ribbon",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
  "wgpu",
- "windows 0.62.2",
  "workbench-api",
  "workbench-core",
  "workbench-example",

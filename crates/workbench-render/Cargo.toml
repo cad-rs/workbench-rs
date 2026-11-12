@@ -13,3 +13,5 @@ readme = "../../README.md"
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
+# The offscreen readback target, shared with the GPU view slot (product-kit).
+gpu-readback = { path = "../../../../product-kit/crates/gpu-readback" }

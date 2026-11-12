@@ -29,7 +29,10 @@ anyhow = { workspace = true }
 # target anyway; the web build only names the type.
 image = { workspace = true }
 
-# GPU viewport (native view extension; the gpu_view module; the host Element uses the render core)
+# GPU viewport (native view extension; the gpu_view module; the host Element uses the render core).
+# The presentation slot itself (device, per-platform presenters, input routing) is the shared
+# gpui-gpu-view crate, consumed through product-kit like the rest of the shared infrastructure.
+gpui-gpu-view = { path = "../../../../product-kit/crates/gpui-gpu-view" }
 workbench-render = { workspace = true }
 wgpu = { workspace = true }
 glam = { workspace = true }
@@ -43,25 +46,15 @@ wasm-bindgen-futures = { workspace = true }
 # WgpuDynamicTexture, which joins the draw order as an ordinary sprite. Getting that context takes
 # the concrete WebPlatform (gpui_platform's web constructor doesn't hand it back), hence the direct
 # dependency on gpui_web.
-gpui-wgpu = { workspace = true }
 gpui-web = { workspace = true }
 wgpu = { workspace = true, features = ["webgpu"] }
 # WindowOptions::icon 在所有平台都存在；web 只是永远解码不出图标（没有资产
 # 时返回 None），所以这里只需要一个能编译的 png 子集。
 image = { workspace = true, default-features = false, features = ["png"] }
 
-# Desktop: the platform layer (the web builds its own WebPlatform, bypassing gpui_platform); the
-# GPU viewport creates its own wgpu device (GPUI is D3D11 on Windows and Metal on macOS, so there
-# is no wgpu device to share).
+# Desktop: the platform layer (the web builds its own WebPlatform, bypassing gpui_platform).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 gpui-platform = { workspace = true }
-pollster = { workspace = true }
-
-# Windows: the viewport's wgpu swap chain hangs on a DirectComposition visual in the GPUI window's
-# composition. The version must match gpui_windows': the native surface handle is handed out as
-# this crate's IUnknown and recovered via Any::downcast.
-[target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62", features = ["Win32_Graphics_DirectComposition"] }
 
 [dev-dependencies]
 # The splitter-drag unit tests need a real Runtime (panel registration + the area_active lookup
