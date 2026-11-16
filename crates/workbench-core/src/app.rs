@@ -402,6 +402,10 @@ impl AppRuntime {
     /// background task count then lags).
     pub fn frame_tick(&mut self, dt_secs: f32) -> bool {
         let mut changed = self.drain_io();
+        // Services' own background pumps (a collaboration room's socket, a
+        // feed) drain here and report whether anything landed — so an idle
+        // pump requests no redraw at all.
+        changed |= self.host.run_tick_hooks();
         changed |= self.entitlements_changed();
         self.schedule_entitlement_check(|checks| checks.tick(dt_secs));
         changed |= self.drain_account_login();

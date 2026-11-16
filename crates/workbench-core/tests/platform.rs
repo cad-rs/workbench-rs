@@ -3,6 +3,7 @@
 use workbench_api as wb;
 use wb::AppServices as _;
 use workbench_core::{AppRuntime, WorkbenchAppBuilder};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
 
 /// A test Workbench: one command, one panel, one view, one document type.
@@ -542,6 +543,40 @@ fn task_tick_still_reports_redraw_after_task_finishes() {
         wb::TaskStatus::Succeeded
     );
     assert!(!a.frame_tick(0.0), "an idle tick after pumping should not request a redraw");
+}
+
+/// A service's tick hook runs once per tick, and its return value is what the
+/// frontend schedules frames on: a hook with nothing to report keeps the tick
+/// idle (no redraw), so a background pump costs no frames while it has no news.
+#[test]
+fn tick_hooks_run_each_tick_and_report_their_own_changes() {
+    let mut a = app();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let news = Arc::new(AtomicBool::new(false));
+    let calls_in_hook = Arc::clone(&calls);
+    let news_in_hook = Arc::clone(&news);
+    let id = a.host.on_tick(Box::new(move |_| {
+        calls_in_hook.fetch_add(1, Ordering::SeqCst);
+        news_in_hook.load(Ordering::SeqCst)
+    }));
+
+    assert!(
+        !a.frame_tick(0.0),
+        "an idle hook must not request a redraw"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the hook ran on the tick");
+
+    news.store(true, Ordering::SeqCst);
+    assert!(
+        a.frame_tick(0.0),
+        "a hook that reports a change requests a redraw"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    a.host.remove_tick_hook(id);
+    news.store(false, Ordering::SeqCst);
+    assert!(!a.frame_tick(0.0), "a removed hook no longer runs");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[test]

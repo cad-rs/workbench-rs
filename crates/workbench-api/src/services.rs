@@ -27,6 +27,19 @@ pub struct RuntimeStats {
     pub autosaves: u64,
 }
 
+/// A service's per-tick callback (the platform's own tick, driven by the
+/// frontend's timer — see `AppRuntime::frame_tick`).
+///
+/// This is the extension point for background pumps: a service whose work
+/// arrives on a channel (a collaboration room's socket, a feed) drains it
+/// here and returns whether the UI needs a redraw. The frontend runs the
+/// tick on its own timer precisely so such a pump cannot stall an idle UI,
+/// and so an idle pump costs no frames at all.
+pub type TickHook = Box<dyn FnMut(&mut ServiceHost) -> bool + Send>;
+
+/// Identifies a registered [`TickHook`] (for `ServiceHost::remove_tick_hook`).
+pub type TickHookId = u64;
+
 /// A plugin registry entry (for the diagnostics/management panels).
 #[derive(Clone, Debug)]
 pub struct PluginEntry {
@@ -72,6 +85,10 @@ pub struct ServiceHost {
     pub started: web_time::Instant,
     extras: std::collections::HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     task_rx: TaskEventRx,
+    /// Per-tick callbacks ([`TickHook`]) with the id they were registered
+    /// under; run by the platform's tick.
+    tick_hooks: Vec<(TickHookId, TickHook)>,
+    next_tick_hook_id: TickHookId,
 }
 
 impl ServiceHost {
@@ -98,6 +115,8 @@ impl ServiceHost {
             started: web_time::Instant::now(),
             extras: std::collections::HashMap::new(),
             task_rx,
+            tick_hooks: Vec::new(),
+            next_tick_hook_id: 0,
         }
     }
 
@@ -209,6 +228,37 @@ impl ServiceHost {
     /// Moved in as-is during assembly (from Registry.take_services).
     pub fn insert_raw(&mut self, ty: TypeId, value: Box<dyn Any + Send + Sync>) {
         self.extras.insert(ty, value);
+    }
+
+    // ---- Per-tick hooks (the platform's own tick, not a view's render) ----
+
+    /// Registers a [`TickHook`], returning its id.
+    ///
+    /// Hooks run once per platform tick (`AppRuntime::frame_tick`, driven by
+    /// the frontend's timer). A hook that keeps no state of its own can be
+    /// registered once and left there; one bound to a session removes itself
+    /// with [`Self::remove_tick_hook`] when that session ends.
+    pub fn on_tick(&mut self, hook: TickHook) -> TickHookId {
+        let id = self.next_tick_hook_id;
+        self.next_tick_hook_id += 1;
+        self.tick_hooks.push((id, hook));
+        id
+    }
+
+    /// Removes a tick hook by id (a no-op when it is already gone).
+    pub fn remove_tick_hook(&mut self, id: TickHookId) {
+        self.tick_hooks.retain(|(hook_id, _)| *hook_id != id);
+    }
+
+    /// Runs every registered hook; returns whether any reported a change.
+    pub fn run_tick_hooks(&mut self) -> bool {
+        let mut hooks = std::mem::take(&mut self.tick_hooks);
+        let mut changed = false;
+        for (_, hook) in hooks.iter_mut() {
+            changed |= hook(self);
+        }
+        self.tick_hooks = hooks;
+        changed
     }
 }
 
