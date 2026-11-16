@@ -702,6 +702,32 @@ fn undo_and_redo_go_through_the_sink_then_fall_back() {
     assert!(a.host.undo_document(wb::DocumentId(9)).is_err());
 }
 
+/// `app.undo` / `app.redo` route through the sink, and the ribbon's enabled
+/// state follows it.
+#[test]
+fn the_undo_and_redo_commands_go_through_the_sink() {
+    let mut a = app();
+    let id = a
+        .host
+        .docs
+        .create(&wb::DocumentTypeId::new("test.shapes"), "undoable")
+        .expect("doc creates");
+    a.host.docs.set_active(Some(id));
+    let sink = test_sink(id);
+    let undone = Arc::clone(&sink.undone);
+    a.host.set_command_sink(Some(Box::new(sink)));
+    a.frame_tick(0.0); // the snapshot's active document follows the tick
+
+    let result = a.execute_command("app.undo", &wb::CommandArgs::default());
+    assert!(matches!(result, wb::CommandResult::Done { .. }), "{result:?}");
+    assert_eq!(undone.load(Ordering::SeqCst), 1);
+
+    let snapshot = a.snapshot();
+    let doc = snapshot.active_document.as_ref().expect("the active document");
+    assert!(doc.can_undo, "the ribbon's enabled state follows the sink");
+    assert!(!doc.can_redo);
+}
+
 /// A service's tick hook runs once per tick, and its return value is what the
 /// frontend schedules frames on: a hook with nothing to report keeps the tick
 /// idle (no redraw), so a background pump costs no frames while it has no news.

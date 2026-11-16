@@ -352,7 +352,7 @@ pub fn register(registry: &mut Registry, ribbon_collapse: bool) {
             let Some(doc_id) = ctx.active_document() else {
                 return CommandResult::failed("No active document");
             };
-            match ctx.host().docs.undo(doc_id) {
+            match ctx.host().undo_document(doc_id) {
                 Ok(label) => {
                     ctx.host().log.info(format!("Undid \"{label}\""));
                     CommandResult::done_with(label)
@@ -372,7 +372,7 @@ pub fn register(registry: &mut Registry, ribbon_collapse: bool) {
             let Some(doc_id) = ctx.active_document() else {
                 return CommandResult::failed("No active document");
             };
-            match ctx.host().docs.redo(doc_id) {
+            match ctx.host().redo_document(doc_id) {
                 Ok(label) => {
                     ctx.host().log.info(format!("Redid \"{label}\""));
                     CommandResult::done_with(label)

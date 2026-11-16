@@ -1049,8 +1049,10 @@ impl AppRuntime {
                 title: d.title.clone(),
                 dirty: d.dirty,
                 revision: d.revision,
-                can_undo: self.host.docs.can_undo(id),
-                can_redo: self.host.docs.can_redo(id),
+                // A collaboration session owns undo/redo while it lives on
+                // this document; otherwise the platform's own history.
+                can_undo: self.host.can_undo_document(id),
+                can_redo: self.host.can_redo_document(id),
             })
         });
         let active_view_type = self.host.ws.active_tab().map(|t| t.type_id.0.clone());
