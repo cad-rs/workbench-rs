@@ -545,6 +545,163 @@ fn task_tick_still_reports_redraw_after_task_finishes() {
     assert!(!a.frame_tick(0.0), "an idle tick after pumping should not request a redraw");
 }
 
+/// A test command sink: takes commands for one document, counts them, and
+/// optionally handles undo.
+struct TestSink {
+    bound: wb::DocumentId,
+    applied: Arc<AtomicUsize>,
+    undone: Arc<AtomicUsize>,
+    handles_undo: bool,
+    refuse: bool,
+}
+
+impl wb::CommandSink for TestSink {
+    fn apply(
+        &mut self,
+        _host: &mut wb::ServiceHost,
+        id: wb::DocumentId,
+        _label: &str,
+        command: Box<dyn std::any::Any + Send>,
+    ) -> Result<bool, String> {
+        if id != self.bound {
+            return Ok(false);
+        }
+        if self.refuse {
+            return Err("the session refused the edit".to_string());
+        }
+        let text = command.downcast::<String>().map(|b| *b).unwrap_or_default();
+        assert_eq!(text, "cmd", "the domain command crossed as-is");
+        self.applied.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
+    }
+
+    fn undo(
+        &mut self,
+        _host: &mut wb::ServiceHost,
+        id: wb::DocumentId,
+    ) -> Result<Option<String>, String> {
+        if id != self.bound || !self.handles_undo {
+            return Ok(None);
+        }
+        self.undone.fetch_add(1, Ordering::SeqCst);
+        Ok(Some("session undo".to_string()))
+    }
+
+    fn redo(
+        &mut self,
+        _host: &mut wb::ServiceHost,
+        _id: wb::DocumentId,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    fn can_undo(&self, _host: &wb::ServiceHost, id: wb::DocumentId) -> bool {
+        id == self.bound && self.handles_undo
+    }
+
+    fn can_redo(&self, _host: &wb::ServiceHost, _id: wb::DocumentId) -> bool {
+        false
+    }
+}
+
+fn test_sink(bound: wb::DocumentId) -> TestSink {
+    TestSink {
+        bound,
+        applied: Arc::new(AtomicUsize::new(0)),
+        undone: Arc::new(AtomicUsize::new(0)),
+        handles_undo: true,
+        refuse: false,
+    }
+}
+
+/// The sink takes its own document's commands and hands other documents back
+/// to the plain path; a refused edit surfaces the error without ending the
+/// session.
+#[test]
+fn a_command_sink_takes_its_document_and_hands_the_rest_back() {
+    let mut a = app();
+    let mine = a
+        .host
+        .docs
+        .create(&wb::DocumentTypeId::new("test.shapes"), "mine")
+        .expect("doc creates");
+    let other = a
+        .host
+        .docs
+        .create(&wb::DocumentTypeId::new("test.shapes"), "other")
+        .expect("doc creates");
+
+    let sink = test_sink(mine);
+    let applied = Arc::clone(&sink.applied);
+    a.host.set_command_sink(Some(Box::new(sink)));
+    assert!(a.host.has_command_sink());
+
+    assert_eq!(
+        a.host
+            .apply_document_command(mine, "edit", Box::new("cmd".to_string()))
+            .expect("the sink takes its document"),
+        true
+    );
+    assert_eq!(applied.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        a.host
+            .apply_document_command(other, "edit", Box::new("cmd".to_string()))
+            .expect("another document falls back"),
+        false,
+        "the sink does not own that document"
+    );
+    assert_eq!(applied.load(Ordering::SeqCst), 1, "the other document was not sunk");
+
+    // A refused edit surfaces the session's error and leaves the sink in place.
+    let refusing = TestSink {
+        refuse: true,
+        ..test_sink(mine)
+    };
+    a.host.set_command_sink(Some(Box::new(refusing)));
+    assert!(a
+        .host
+        .apply_document_command(mine, "edit", Box::new("cmd".to_string()))
+        .is_err());
+    assert!(a.host.has_command_sink(), "a refused edit must not end the session");
+
+    // Clearing is how `leave` stops the take-over.
+    a.host.set_command_sink(None);
+    assert!(!a.host.has_command_sink());
+    assert_eq!(
+        a.host
+            .apply_document_command(mine, "edit", Box::new("cmd".to_string()))
+            .expect("no sink"),
+        false
+    );
+}
+
+/// Undo / redo go through the sink when it handles them, fall back to the
+/// platform's history when it does not, and the ribbon's enabled state
+/// follows the sink.
+#[test]
+fn undo_and_redo_go_through_the_sink_then_fall_back() {
+    let mut a = app();
+    let sink = test_sink(wb::DocumentId(7));
+    let undone = Arc::clone(&sink.undone);
+    a.host.set_command_sink(Some(Box::new(sink)));
+
+    assert_eq!(
+        a.host.undo_document(wb::DocumentId(7)).expect("the sink handles undo"),
+        "session undo"
+    );
+    assert_eq!(undone.load(Ordering::SeqCst), 1);
+    assert!(a.host.can_undo_document(wb::DocumentId(7)));
+    assert!(!a.host.can_redo_document(wb::DocumentId(7)));
+
+    // A sink that does not handle the document falls back to the platform.
+    assert!(a.host.undo_document(wb::DocumentId(8)).is_err());
+    assert!(!a.host.can_undo_document(wb::DocumentId(8)));
+
+    // And with no sink at all the platform's own history is the answer.
+    a.host.set_command_sink(None);
+    assert!(a.host.undo_document(wb::DocumentId(9)).is_err());
+}
+
 /// A service's tick hook runs once per tick, and its return value is what the
 /// frontend schedules frames on: a hook with nothing to report keeps the tick
 /// idle (no redraw), so a background pump costs no frames while it has no news.

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::command::{CommandArgs, CommandResult, CtxSnapshot};
 use crate::documents::DocumentService;
+use crate::ids::DocumentId;
 use crate::log::LogStore;
 use crate::settings::Settings;
 use crate::storage::{Location, Storage};
@@ -39,6 +40,41 @@ pub type TickHook = Box<dyn FnMut(&mut ServiceHost) -> bool + Send>;
 
 /// Identifies a registered [`TickHook`] (for `ServiceHost::remove_tick_hook`).
 pub type TickHookId = u64;
+
+/// A document-command sink: a collaboration session's apply path.
+///
+/// The domain layer's edit choke point hands the command it built to the
+/// installed sink; a session applies it (minting the op) instead of the
+/// document's plain apply. The command is the domain's own type, boxed — the
+/// same type erasure the platform already uses for `DocumentContent`, so the
+/// platform keeps no domain schema. The sink downcasts it.
+pub trait CommandSink: Send {
+    /// Apply one domain command. `Ok(false)` = this document is not the
+    /// session's, so the caller applies it the plain way.
+    fn apply(
+        &mut self,
+        host: &mut ServiceHost,
+        id: DocumentId,
+        label: &str,
+        command: Box<dyn Any + Send>,
+    ) -> Result<bool, String>;
+
+    /// Undo one step for `id`. `Ok(None)` = not handled, the caller falls back
+    /// to the platform's own history.
+    fn undo(&mut self, host: &mut ServiceHost, id: DocumentId)
+        -> Result<Option<String>, String>;
+
+    /// Redo one step for `id`; the same `Ok(None)` fallback contract.
+    fn redo(&mut self, host: &mut ServiceHost, id: DocumentId)
+        -> Result<Option<String>, String>;
+
+    /// Whether the session would take `id`'s undo step (the ribbon's and the
+    /// hotkey's enabled state).
+    fn can_undo(&self, host: &ServiceHost, id: DocumentId) -> bool;
+
+    /// Whether the session would take `id`'s redo step.
+    fn can_redo(&self, host: &ServiceHost, id: DocumentId) -> bool;
+}
 
 /// A plugin registry entry (for the diagnostics/management panels).
 #[derive(Clone, Debug)]
@@ -89,6 +125,8 @@ pub struct ServiceHost {
     /// under; run by the platform's tick.
     tick_hooks: Vec<(TickHookId, TickHook)>,
     next_tick_hook_id: TickHookId,
+    /// The installed collaboration session's command sink (see [`CommandSink`]).
+    command_sink: Option<Box<dyn CommandSink>>,
 }
 
 impl ServiceHost {
@@ -117,6 +155,7 @@ impl ServiceHost {
             task_rx,
             tick_hooks: Vec::new(),
             next_tick_hook_id: 0,
+            command_sink: None,
         }
     }
 
@@ -259,6 +298,83 @@ impl ServiceHost {
         }
         self.tick_hooks = hooks;
         changed
+    }
+
+    // ---- Document-command sink (a collaboration session's apply path) ----
+
+    /// Installs / clears the command sink. A session installs it when it
+    /// begins and clears it when it ends (a stale sink would keep minting
+    /// ops for a room nobody is in).
+    pub fn set_command_sink(&mut self, sink: Option<Box<dyn CommandSink>>) {
+        self.command_sink = sink;
+    }
+
+    /// Whether a session currently takes documents' commands.
+    pub fn has_command_sink(&self) -> bool {
+        self.command_sink.is_some()
+    }
+
+    /// Hands one domain command to the installed sink. `Ok(false)` = no sink
+    /// (or the sink says the document is not its session's), so the caller
+    /// applies the command the plain way.
+    pub fn apply_document_command(
+        &mut self,
+        id: DocumentId,
+        label: &str,
+        command: Box<dyn Any + Send>,
+    ) -> Result<bool, String> {
+        let Some(mut sink) = self.command_sink.take() else {
+            return Ok(false);
+        };
+        let outcome = sink.apply(self, id, label, command);
+        // Put it back even on error: a refused edit must not end the session.
+        self.command_sink = Some(sink);
+        outcome
+    }
+
+    /// Undo one step for `id`: the session's step when it handles it,
+    /// otherwise the platform's own history.
+    pub fn undo_document(&mut self, id: DocumentId) -> Result<String, String> {
+        let Some(mut sink) = self.command_sink.take() else {
+            return self.docs.undo(id);
+        };
+        let outcome = sink.undo(self, id);
+        self.command_sink = Some(sink);
+        match outcome {
+            Ok(Some(label)) => Ok(label),
+            Ok(None) => self.docs.undo(id),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Redo one step for `id`; the same contract as [`Self::undo_document`].
+    pub fn redo_document(&mut self, id: DocumentId) -> Result<String, String> {
+        let Some(mut sink) = self.command_sink.take() else {
+            return self.docs.redo(id);
+        };
+        let outcome = sink.redo(self, id);
+        self.command_sink = Some(sink);
+        match outcome {
+            Ok(Some(label)) => Ok(label),
+            Ok(None) => self.docs.redo(id),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether a session would take `id`'s undo (the ribbon's enabled state).
+    pub fn can_undo_document(&self, id: DocumentId) -> bool {
+        match self.command_sink.as_ref() {
+            Some(sink) => sink.can_undo(self, id),
+            None => self.docs.can_undo(id),
+        }
+    }
+
+    /// Whether a session would take `id`'s redo.
+    pub fn can_redo_document(&self, id: DocumentId) -> bool {
+        match self.command_sink.as_ref() {
+            Some(sink) => sink.can_redo(self, id),
+            None => self.docs.can_redo(id),
+        }
     }
 }
 

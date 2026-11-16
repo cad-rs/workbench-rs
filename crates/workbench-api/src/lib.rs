@@ -71,8 +71,8 @@ pub use log::{LogEntry, LogLevel, LogStore};
 pub use product::{I18nSection, ProductProfile, ProductToml};
 pub use registry::Registry;
 pub use services::{
-    AppServices, CrashReporter, FileThen, IoTask, PluginEntry, RuntimeStats, ServiceHost, TickHook,
-    TickHookId, UiThen,
+    AppServices, CommandSink, CrashReporter, FileThen, IoTask, PluginEntry, RuntimeStats,
+    ServiceHost, TickHook, TickHookId, UiThen,
 };
 pub use settings::{load_settings, SettingKind, SettingScope, SettingSpec, Settings};
 pub use state::StateStore;
