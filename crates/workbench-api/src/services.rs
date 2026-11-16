@@ -314,6 +314,36 @@ impl ServiceHost {
         self.command_sink.is_some()
     }
 
+    /// Runs `f` with the installed sink and puts it back afterwards — even
+    /// when `f` fails, so one refused edit cannot end the session.
+    ///
+    /// The take/put-back is forced by the sink's contract: it is handed
+    /// `&mut ServiceHost`, which it cannot be borrowing at the same time.
+    /// `None` = no sink installed.
+    fn with_command_sink<T>(
+        &mut self,
+        f: impl FnOnce(&mut dyn CommandSink, &mut ServiceHost) -> T,
+    ) -> Option<T> {
+        let mut sink = self.command_sink.take()?;
+        let outcome = f(&mut *sink, self);
+        self.command_sink = Some(sink);
+        Some(outcome)
+    }
+
+    /// The installed sink's answer for one undo/redo step, mapped onto the
+    /// platform's own history when the sink has no step.
+    fn settle_step(
+        &mut self,
+        outcome: Result<Option<String>, String>,
+        plain: impl FnOnce(&mut Self) -> Result<String, String>,
+    ) -> Result<String, String> {
+        match outcome {
+            Ok(Some(label)) => Ok(label),
+            Ok(None) => plain(self),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Hands one domain command to the installed sink. `Ok(false)` = no sink
     /// (or the sink says the document is not its session's), so the caller
     /// applies the command the plain way.
@@ -323,42 +353,25 @@ impl ServiceHost {
         label: &str,
         command: Box<dyn Any + Send>,
     ) -> Result<bool, String> {
-        let Some(mut sink) = self.command_sink.take() else {
-            return Ok(false);
-        };
-        let outcome = sink.apply(self, id, label, command);
-        // Put it back even on error: a refused edit must not end the session.
-        self.command_sink = Some(sink);
-        outcome
+        self.with_command_sink(|sink, host| sink.apply(host, id, label, command))
+            .unwrap_or(Ok(false))
     }
 
     /// Undo one step for `id`: the session's step when it handles it,
     /// otherwise the platform's own history.
     pub fn undo_document(&mut self, id: DocumentId) -> Result<String, String> {
-        let Some(mut sink) = self.command_sink.take() else {
+        let Some(outcome) = self.with_command_sink(|sink, host| sink.undo(host, id)) else {
             return self.docs.undo(id);
         };
-        let outcome = sink.undo(self, id);
-        self.command_sink = Some(sink);
-        match outcome {
-            Ok(Some(label)) => Ok(label),
-            Ok(None) => self.docs.undo(id),
-            Err(error) => Err(error),
-        }
+        self.settle_step(outcome, |host| host.docs.undo(id))
     }
 
     /// Redo one step for `id`; the same contract as [`Self::undo_document`].
     pub fn redo_document(&mut self, id: DocumentId) -> Result<String, String> {
-        let Some(mut sink) = self.command_sink.take() else {
+        let Some(outcome) = self.with_command_sink(|sink, host| sink.redo(host, id)) else {
             return self.docs.redo(id);
         };
-        let outcome = sink.redo(self, id);
-        self.command_sink = Some(sink);
-        match outcome {
-            Ok(Some(label)) => Ok(label),
-            Ok(None) => self.docs.redo(id),
-            Err(error) => Err(error),
-        }
+        self.settle_step(outcome, |host| host.docs.redo(id))
     }
 
     /// Whether a session would take `id`'s undo (the ribbon's enabled state).
