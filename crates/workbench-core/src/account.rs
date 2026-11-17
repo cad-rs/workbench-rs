@@ -230,35 +230,36 @@ impl HttpTransport for UreqTransport {
     }
 }
 
-/// The shared web account: the rcad.app Supabase session.
+/// The shared Supabase account, as the platform's account service.
 ///
-/// A workbench product served from the site (`creator` web) is signed in by
-/// the same Supabase session `web-console` writes; this service reads it and
-/// turns the platform's login state machine into "open the console's login
-/// page, then watch local storage". The access token it exposes is what the
-/// cloud collaboration room authenticates.
-///
-/// Native builds have no local storage ([`product_kit::supabase::load`] is
-/// `None`), so a desktop product keeps its own account implementation.
+/// One account system across every deployed product: the web app reads the
+/// session `web-console` wrote, the desktop app runs Supabase's
+/// authorization-code + PKCE flow against a loopback redirect. Both come from
+/// [`product_kit::supabase::SupabaseAccount`], which this service only maps
+/// onto the platform's login state machine. The access token it exposes is
+/// what the cloud collaboration room authenticates.
 #[derive(Clone, Debug)]
 pub struct SupabaseSessionService {
-    /// The same-origin path to return to after the console's login page.
-    next: String,
+    account: product_kit::supabase::SupabaseAccount,
 }
 
 impl SupabaseSessionService {
-    /// Signs in back to the current page.
     pub fn new() -> Self {
+        Self::with_config(product_kit::supabase::Config::default())
+    }
+
+    /// Signs in against an explicit Supabase project configuration.
+    pub fn with_config(config: product_kit::supabase::Config) -> Self {
         Self {
-            next: product_kit::supabase::current_path(),
+            account: product_kit::supabase::SupabaseAccount::new(config),
         }
     }
 
-    /// Signs in back to an explicit same-origin path.
-    pub fn with_next(next: impl Into<String>) -> Self {
-        Self { next: next.into() }
+    /// The underlying capability (a product with its own sign-in loop, or a
+    /// custom configuration).
+    pub fn supabase(&self) -> &product_kit::supabase::SupabaseAccount {
+        &self.account
     }
-
 }
 
 impl Default for SupabaseSessionService {
@@ -269,47 +270,47 @@ impl Default for SupabaseSessionService {
 
 impl AccountService for SupabaseSessionService {
     fn begin_login(&self) -> Result<DeviceAuthRequest, String> {
+        let request = self.account.begin()?;
         Ok(DeviceAuthRequest {
-            // Nothing to type: the platform opens the console's login page.
-            user_code: None,
-            verification_uri: product_kit::supabase::login_url(&self.next),
-            expires_in: 300,
-            interval: 1,
+            user_code: request.user_code,
+            verification_uri: request.url,
+            expires_in: request.expires_in,
+            interval: request.interval,
         })
     }
 
     fn poll(&self) -> Result<PollResult, String> {
-        match product_kit::supabase::load() {
-            Some(session) if session.is_expired() => Ok(PollResult::Expired),
-            Some(session) => Ok(PollResult::Success(user_from_session(&session))),
-            None => Ok(PollResult::Pending),
+        match self.account.poll()? {
+            product_kit::supabase::Poll::Pending => Ok(PollResult::Pending),
+            product_kit::supabase::Poll::SlowDown => Ok(PollResult::SlowDown),
+            product_kit::supabase::Poll::Success(account) => {
+                Ok(PollResult::Success(user_from_account(&account)))
+            }
+            product_kit::supabase::Poll::Denied => Ok(PollResult::Denied),
+            product_kit::supabase::Poll::Expired => Ok(PollResult::Expired),
+            product_kit::supabase::Poll::Failed(message) => Err(message),
         }
     }
 
     fn logout(&self) {
-        product_kit::supabase::clear();
+        self.account.logout();
     }
 
     fn current_user(&self) -> Option<AccountUser> {
-        product_kit::supabase::load()
-            .filter(|session| !session.is_expired())
-            .map(|session| user_from_session(&session))
+        self.account.account().map(|account| user_from_account(&account))
     }
 
     fn access_token(&self) -> Option<String> {
-        product_kit::supabase::load()
-            .filter(|session| !session.is_expired())
-            .map(|session| session.access_token)
+        self.account.access_token()
     }
 }
 
-/// Maps the shared session's identity onto the platform's account user.
-fn user_from_session(session: &product_kit::supabase::Session) -> AccountUser {
-    let identity = session.identity();
+/// Maps the shared account onto the platform's account user.
+fn user_from_account(account: &product_kit::supabase::Account) -> AccountUser {
     AccountUser {
-        id: identity.id,
-        name: identity.name,
-        email: identity.email,
+        id: account.id.clone(),
+        name: account.name.clone(),
+        email: account.email.clone(),
     }
 }
 
@@ -332,27 +333,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_web_service_starts_signed_out_and_points_at_the_console_login() {
+    fn the_service_starts_signed_out() {
         let service = SupabaseSessionService::new();
         assert!(service.current_user().is_none());
         assert!(service.access_token().is_none());
         assert_eq!(service.poll(), Ok(PollResult::Pending));
-
-        let request = service.begin_login().expect("the login request");
-        assert!(request.user_code.is_none(), "there is nothing to type");
-        assert!(
-            request.verification_uri.contains("/login"),
-            "{}",
-            request.verification_uri
-        );
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[test]
-    fn the_return_path_rides_in_the_login_url() {
-        let service = SupabaseSessionService::with_next("/creator/");
-        let url = service.begin_login().expect("the login request").verification_uri;
-        assert!(url.contains("next="), "{url}");
-        assert!(url.contains("%2Fcreator%2F"), "{url}");
+    fn the_desktop_sign_in_opens_supabases_authorize_page() {
+        let service = SupabaseSessionService::new();
+        let request = service.begin_login().expect("the login request");
+        assert!(request.user_code.is_none(), "the loopback redirect has no code");
+        let url = request.verification_uri;
+        assert!(url.contains("/auth/v1/authorize"), "{url}");
+        assert!(url.contains("provider=github"), "{url}");
+        assert!(url.contains("code_challenge="), "{url}");
+        // The loopback redirect is waiting; polling without a browser stays
+        // pending.
+        assert_eq!(service.poll(), Ok(PollResult::Pending));
     }
 
     #[test]
