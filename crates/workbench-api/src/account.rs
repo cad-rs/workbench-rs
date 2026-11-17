@@ -71,6 +71,13 @@ pub trait AccountService: Send + Sync {
 
     /// The cached logged-in user, if any (session restore).
     fn current_user(&self) -> Option<AccountUser>;
+
+    /// The bearer token for the product's own services while signed in (the
+    /// cloud collaboration room authenticates it). `None` when the
+    /// implementation issues no such token.
+    fn access_token(&self) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]

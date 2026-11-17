@@ -230,6 +230,89 @@ impl HttpTransport for UreqTransport {
     }
 }
 
+/// The shared web account: the rcad.app Supabase session.
+///
+/// A workbench product served from the site (`creator` web) is signed in by
+/// the same Supabase session `web-console` writes; this service reads it and
+/// turns the platform's login state machine into "open the console's login
+/// page, then watch local storage". The access token it exposes is what the
+/// cloud collaboration room authenticates.
+///
+/// Native builds have no local storage ([`product_kit::supabase::load`] is
+/// `None`), so a desktop product keeps its own account implementation.
+#[derive(Clone, Debug)]
+pub struct SupabaseSessionService {
+    /// The same-origin path to return to after the console's login page.
+    next: String,
+}
+
+impl SupabaseSessionService {
+    /// Signs in back to the current page.
+    pub fn new() -> Self {
+        Self {
+            next: product_kit::supabase::current_path(),
+        }
+    }
+
+    /// Signs in back to an explicit same-origin path.
+    pub fn with_next(next: impl Into<String>) -> Self {
+        Self { next: next.into() }
+    }
+
+}
+
+impl Default for SupabaseSessionService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AccountService for SupabaseSessionService {
+    fn begin_login(&self) -> Result<DeviceAuthRequest, String> {
+        Ok(DeviceAuthRequest {
+            // Nothing to type: the platform opens the console's login page.
+            user_code: None,
+            verification_uri: product_kit::supabase::login_url(&self.next),
+            expires_in: 300,
+            interval: 1,
+        })
+    }
+
+    fn poll(&self) -> Result<PollResult, String> {
+        match product_kit::supabase::load() {
+            Some(session) if session.is_expired() => Ok(PollResult::Expired),
+            Some(session) => Ok(PollResult::Success(user_from_session(&session))),
+            None => Ok(PollResult::Pending),
+        }
+    }
+
+    fn logout(&self) {
+        product_kit::supabase::clear();
+    }
+
+    fn current_user(&self) -> Option<AccountUser> {
+        product_kit::supabase::load()
+            .filter(|session| !session.is_expired())
+            .map(|session| user_from_session(&session))
+    }
+
+    fn access_token(&self) -> Option<String> {
+        product_kit::supabase::load()
+            .filter(|session| !session.is_expired())
+            .map(|session| session.access_token)
+    }
+}
+
+/// Maps the shared session's identity onto the platform's account user.
+fn user_from_session(session: &product_kit::supabase::Session) -> AccountUser {
+    let identity = session.identity();
+    AccountUser {
+        id: identity.id,
+        name: identity.name,
+        email: identity.email,
+    }
+}
+
 /// Read a JSON body from a ureq response (any status: the caller interprets
 /// RFC 8628 error members in 400 bodies).
 #[cfg(not(target_arch = "wasm32"))]
@@ -242,4 +325,40 @@ fn read_json(
         .read_to_string()
         .map_err(|e| format!("Failed to read the response: {e}"))?;
     serde_json::from_str(&text).map_err(|e| format!("The response is not JSON: {e}; body: {text}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_web_service_starts_signed_out_and_points_at_the_console_login() {
+        let service = SupabaseSessionService::new();
+        assert!(service.current_user().is_none());
+        assert!(service.access_token().is_none());
+        assert_eq!(service.poll(), Ok(PollResult::Pending));
+
+        let request = service.begin_login().expect("the login request");
+        assert!(request.user_code.is_none(), "there is nothing to type");
+        assert!(
+            request.verification_uri.contains("/login"),
+            "{}",
+            request.verification_uri
+        );
+    }
+
+    #[test]
+    fn the_return_path_rides_in_the_login_url() {
+        let service = SupabaseSessionService::with_next("/creator/");
+        let url = service.begin_login().expect("the login request").verification_uri;
+        assert!(url.contains("next="), "{url}");
+        assert!(url.contains("%2Fcreator%2F"), "{url}");
+    }
+
+    #[test]
+    fn signing_out_clears_the_session() {
+        let service = SupabaseSessionService::new();
+        service.logout();
+        assert!(service.current_user().is_none());
+    }
 }

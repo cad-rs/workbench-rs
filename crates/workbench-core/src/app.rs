@@ -1817,6 +1817,12 @@ impl WorkbenchAppBuilder {
         #[cfg(feature = "account")]
         {
             host.account = self.account;
+            // Session restore: a product whose service keeps a cached user
+            // (the shared web session) starts signed in, not on the login
+            // screen.
+            if let Some(user) = host.account.as_ref().and_then(|service| service.current_user()) {
+                host.ws.account = api::AccountPhase::LoggedIn(user);
+            }
         }
         let session_entitlements = self
             .entitlements
