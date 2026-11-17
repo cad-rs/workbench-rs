@@ -18,6 +18,7 @@
 //! | a view/panel author | view::ViewInstance (content is a frontend element tree) |
 //! | a plugin host | the workbench-rhai crate (Host API v1, layered on this crate) |
 
+#[cfg(feature = "account")]
 pub mod account;
 pub mod asyncrt;
 pub mod command;
@@ -42,6 +43,7 @@ pub mod workspace;
 /// is managed separately — see workbench-rhai)..
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(feature = "account")]
 pub use account::{
     AccountService, AccountUser, DeviceAuthRequest, PollResult, SLOW_DOWN_INTERVAL_SECS,
 };
@@ -88,8 +90,10 @@ pub use tasks::{
 };
 pub use view::ViewInstance;
 pub use workbench::{boxed, Workbench};
+#[cfg(feature = "account")]
+pub use workspace::AccountPhase;
 pub use workspace::{
-    AccountPhase, DockArea, ItemSize, LayoutFile, PanelDef, PanelSlot, PlatformDialog,
+    DockArea, ItemSize, LayoutFile, PanelDef, PanelSlot, PlatformDialog,
     RibbonItemKind, RibbonTab,
     SavedPanel, SavedTab, TabSlot, TextEdit, ToolbarGroup, ToolbarItem, ViewDef, ViewFactory,
     WorkspaceState, LAYOUT_VERSION,

@@ -562,6 +562,7 @@ impl Render for RootView {
                     .map(|e| (e.level, format!("{} {}", e.time, e.message))),
                 // Account entry (Phase 3): only present when the product
                 // injected an account service.
+                #[cfg(feature = "account")]
                 account: core.host.account.as_ref().map(|_| {
                     let tr = |k: &str| core.host.tr(k);
                     match &core.host.ws.account {
@@ -742,6 +743,8 @@ struct StatusData {
     task: Option<wb::TaskInfo>,
     last_log: Option<(wb::LogLevel, String)>,
     /// Account chip (Phase 3); None when the product has no account service.
+    /// Only in builds with the `account` feature.
+    #[cfg(feature = "account")]
     account: Option<AccountChip>,
 }
 
@@ -772,6 +775,7 @@ fn render_status_bar(
 ) -> gpui::AnyElement {
     let mut right_side = div().flex().flex_row().items_center().gap_2();
     // Account chip (Phase 3): login / pending code / user + logout.
+    #[cfg(feature = "account")]
     if let Some(chip) = &data.account {
         right_side = right_side.child(render_account_chip(chip, core.clone(), weak.clone()));
     }
@@ -878,6 +882,7 @@ fn render_status_bar(
 }
 
 /// The status-bar account entry (Phase 3): a click-dispatch chip per phase.
+#[cfg(feature = "account")]
 fn render_account_chip(
     chip: &AccountChip,
     _core: SharedCore,

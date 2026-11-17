@@ -27,8 +27,11 @@ pub const REFRESH_LICENSE: &str = "app.license.refresh";
 pub const TOGGLE_RIBBON_COLLAPSE: &str = "app.toggle_ribbon_collapse";
 pub const SETTINGS_SET: &str = "app.settings.set";
 pub const SETTINGS_EDIT_BEGIN: &str = "app.settings.edit_begin";
+#[cfg(feature = "account")]
 pub const ACCOUNT_LOGIN: &str = "app.account.login";
+#[cfg(feature = "account")]
 pub const ACCOUNT_CANCEL_LOGIN: &str = "app.account.cancel_login";
+#[cfg(feature = "account")]
 pub const ACCOUNT_LOGOUT: &str = "app.account.logout";
 
 /// The built-in Chinese UI (`ui.locale = "zh-CN"`). The English strings at

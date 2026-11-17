@@ -105,13 +105,17 @@ pub struct ServiceHost {
     /// Merged locale tables (platform built-ins + plugin contributions),
     /// filled at build time; display sites go through [`ServiceHost::tr`].
     pub localizer: crate::i18n::Localizer,
-    /// Injected account capability (Phase 3); None = no login surface.
     /// What decides gated features; None = everything is allowed.
     pub entitlements: Option<std::sync::Arc<dyn crate::entitlements::Entitlements>>,
+    /// Injected account capability (Phase 3); None = no login surface. Only in
+    /// builds with the `account` feature.
+    #[cfg(feature = "account")]
     pub account: Option<std::sync::Arc<dyn crate::account::AccountService>>,
     /// In-flight device-login poll thread: phase updates (drained each frame
     /// into `ws.account` by the runtime) and the cancel flag.
+    #[cfg(feature = "account")]
     pub account_login_rx: Option<std::sync::mpsc::Receiver<crate::workspace::AccountPhase>>,
+    #[cfg(feature = "account")]
     pub account_login_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub stats: RuntimeStats,
     /// Mirror of the plugin registry (filled at build time, updated when a plugin is disabled at
@@ -145,8 +149,11 @@ impl ServiceHost {
             setting_specs: Vec::new(),
             localizer: crate::i18n::Localizer::new(),
             entitlements: None,
+            #[cfg(feature = "account")]
             account: None,
+            #[cfg(feature = "account")]
             account_login_rx: None,
+            #[cfg(feature = "account")]
             account_login_cancel: None,
             stats: RuntimeStats::default(),
             plugins: Vec::new(),
@@ -207,6 +214,7 @@ impl ServiceHost {
     /// Start signing in. Phase updates arrive via the channel and land in `ws.account` each
     /// tick (drained by the runtime). The desktop's network calls block, so they get a thread;
     /// on the web they are written not to.
+    #[cfg(feature = "account")]
     pub fn begin_account_login(&mut self) -> Result<(), String> {
         let Some(service) = self.account.clone() else {
             return Err("The product has no account service configured".to_string());
@@ -227,6 +235,7 @@ impl ServiceHost {
 
     /// Abort an in-flight device login (the poll thread exits on the flag;
     /// the phase returns to LoggedOut).
+    #[cfg(feature = "account")]
     pub fn cancel_account_login(&mut self) {
         if let Some(flag) = self.account_login_cancel.take() {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -236,6 +245,7 @@ impl ServiceHost {
     }
 
     /// End the session (Phase 3).
+    #[cfg(feature = "account")]
     pub fn account_logout(&mut self) {
         self.cancel_account_login();
         if let Some(service) = &self.account {
@@ -450,6 +460,7 @@ pub trait AppServices {
 }
 
 /// One sign-in from start to finish, reporting each phase.
+#[cfg(feature = "account")]
 async fn sign_in(
     service: Arc<dyn crate::account::AccountService>,
     tx: std::sync::mpsc::Sender<crate::workspace::AccountPhase>,

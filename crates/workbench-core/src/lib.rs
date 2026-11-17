@@ -8,9 +8,11 @@
 //! - [`diagnostics`]: log file and crash reports (call `init` from `main`);
 //! - [`selfcheck`]: headless selfcheck (probe-based; unrelated items SKIP).
 
+#[cfg(feature = "account")]
 pub mod account;
 pub mod app;
 pub mod assets;
+#[cfg(feature = "account")]
 pub mod auth_code;
 pub mod cli;
 pub mod diagnostics;

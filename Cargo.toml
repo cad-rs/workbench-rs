@@ -23,10 +23,10 @@ repository = "https://github.com/cad-rs/workbench-rs"
 [workspace.dependencies]
 # Internal crates (path + version dual declaration so member crates can be
 # published to crates.io directly)
-workbench-api = { path = "crates/workbench-api", version = "0.1.0" }
-workbench-core = { path = "crates/workbench-core", version = "0.1.0" }
+workbench-api = { path = "crates/workbench-api", version = "0.1.0", default-features = false }
+workbench-core = { path = "crates/workbench-core", version = "0.1.0", default-features = false }
 workbench-render = { path = "crates/workbench-render", version = "0.1.0" }
-workbench-ui = { path = "crates/workbench-ui", version = "0.1.0" }
+workbench-ui = { path = "crates/workbench-ui", version = "0.1.0", default-features = false }
 workbench-rhai = { path = "crates/workbench-rhai", version = "0.1.0" }
 workbench-example = { path = "workbenches/wb-example", version = "0.1.0" }
 ribbon = { path = "crates/ribbon", version = "0.1.0" }

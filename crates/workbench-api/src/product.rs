@@ -47,9 +47,12 @@ pub struct ProductProfile {
     /// `ui.locale` setting when the user has not chosen one.
     pub default_locale: Option<String>,
     /// OIDC issuer URL from `[account]`; when present the product gets the
-    /// device-flow login (with `account_client_id`).
+    /// device-flow login (with `account_client_id`). Only in builds with the
+    /// `account` feature.
+    #[cfg(feature = "account")]
     pub account_issuer: Option<String>,
     /// OAuth client id for the device-flow login.
+    #[cfg(feature = "account")]
     pub account_client_id: Option<String>,
 }
 
@@ -67,7 +70,9 @@ impl Default for ProductProfile {
             copyright: None,
             license_text: None,
             default_locale: None,
+            #[cfg(feature = "account")]
             account_issuer: None,
+            #[cfg(feature = "account")]
             account_client_id: None,
         }
     }
@@ -95,6 +100,7 @@ pub struct ProductToml {
     pub branding: BrandingSection,
     pub about: AboutSection,
     pub i18n: I18nSection,
+    #[cfg(feature = "account")]
     pub account: AccountSection,
 }
 
@@ -144,7 +150,9 @@ pub struct I18nSection {
 }
 
 /// `[account]`: OIDC device-flow login (Phase 3). Both fields are required
-/// together; with neither set the login surface stays hidden.
+/// together; with neither set the login surface stays hidden. Only parsed in
+/// builds with the `account` feature.
+#[cfg(feature = "account")]
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct AccountSection {
@@ -166,7 +174,9 @@ impl From<ProductToml> for ProductProfile {
             copyright: raw.about.copyright,
             license_text: raw.about.license_text,
             default_locale: raw.i18n.default_locale,
+            #[cfg(feature = "account")]
             account_issuer: raw.account.issuer,
+            #[cfg(feature = "account")]
             account_client_id: raw.account.client_id,
         }
     }
@@ -198,6 +208,7 @@ mod tests {
             i18n: I18nSection {
                 default_locale: Some("en".into()),
             },
+            #[cfg(feature = "account")]
             account: AccountSection::default(),
         };
         let profile: ProductProfile = raw.into();

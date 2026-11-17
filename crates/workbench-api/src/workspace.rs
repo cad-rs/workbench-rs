@@ -520,6 +520,7 @@ impl TextEdit {
 /// The login/session state the UI renders (status bar account entry). The
 /// platform state machine transitions it via the `app.account.*` commands;
 /// the account service itself lives on the runtime.
+#[cfg(feature = "account")]
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum AccountPhase {
     /// No session.
@@ -565,6 +566,7 @@ pub struct WorkspaceState {
     pub file_picker: Option<crate::picker::FilePicker>,
     /// Login/session state (Phase 3 account integration); the status bar
     /// account entry renders from this.
+    #[cfg(feature = "account")]
     pub account: AccountPhase,
     pub panels: Vec<PanelSlot>,
     pub tabs: Vec<TabSlot>,
@@ -596,6 +598,7 @@ impl WorkspaceState {
             url_to_open: None,
             text_edit: None,
             file_picker: None,
+            #[cfg(feature = "account")]
             account: AccountPhase::default(),
             panels: Vec::new(),
             tabs: Vec::new(),

@@ -355,6 +355,7 @@ impl AppRuntime {
 
     /// Drain pending login-phase updates into `ws.account` (once per tick).
     /// Returns whether any phase update was consumed (the UI needs a redraw).
+    #[cfg(feature = "account")]
     fn drain_account_login(&mut self) -> bool {
         let Some(rx) = self.host.account_login_rx.as_ref() else {
             return false;
@@ -408,7 +409,10 @@ impl AppRuntime {
         changed |= self.host.run_tick_hooks();
         changed |= self.entitlements_changed();
         self.schedule_entitlement_check(|checks| checks.tick(dt_secs));
-        changed |= self.drain_account_login();
+        #[cfg(feature = "account")]
+        {
+            changed |= self.drain_account_login();
+        }
         changed |= self.pump_task_events();
         // Autosave (phase 5: §18 production extensions)
         let interval = self
@@ -628,6 +632,7 @@ impl AppRuntime {
     }
 
     /// Someone else is signed in, so what the last user could use doesn't carry over.
+    #[cfg(feature = "account")]
     fn account_changed(&mut self) {
         if let Some(state) = &self.entitlements {
             state.session.forget();
@@ -893,7 +898,9 @@ impl AppRuntime {
         }
         // Account commands run on the host directly (they manage the
         // background login thread).
-        match id {
+        #[cfg(feature = "account")]
+        {
+            match id {
             crate::platform_cmds::ACCOUNT_LOGIN => {
                 let result = match self.host.begin_account_login() {
                     Ok(()) => CommandResult::done(),
@@ -919,6 +926,7 @@ impl AppRuntime {
                 return CommandResult::done();
             }
             _ => {}
+            }
         }
         let Some(mut def) = self.registry.take_command(id) else {
             let msg = format!("Unregistered command: {id}");
@@ -1361,12 +1369,14 @@ pub struct WorkbenchAppBuilder {
     /// carrying code. The product supplies this `module ID -> Workbench` table, and the
     /// platform calls it after loading plugins.
     module_loader: Option<ModuleLoader>,
-    /// Injected account capability (Phase 3); None = no login surface.
     /// What decides gated features; None = everything is allowed.
     entitlements: Option<Arc<dyn api::Entitlements>>,
+    /// Injected account capability (Phase 3); None = no login surface. Only in
+    /// builds with the `account` feature.
+    #[cfg(feature = "account")]
+    account: Option<Arc<dyn api::AccountService>>,
     /// Where crash reports go if the user agrees; None = they stay local.
     crash_reporter: Option<Arc<dyn api::CrashReporter>>,
-    account: Option<Arc<dyn api::AccountService>>,
     /// Where user files live: the local file system on the desktop, plus
     /// whatever the product adds.
     storage: api::Storage,
@@ -1409,6 +1419,7 @@ impl WorkbenchAppBuilder {
             ribbon_collapse_enabled: false,
             theme: "dark".to_string(),
             module_loader: None,
+            #[cfg(feature = "account")]
             account: None,
             entitlements: None,
             crash_reporter: None,
@@ -1450,6 +1461,7 @@ impl WorkbenchAppBuilder {
     /// Inject the account capability (Phase 3). None (the default) hides the
     /// login surface; the reference implementation is
     /// [`crate::account::DeviceFlowClient`] and `auth_code::AuthCodeClient`.
+    #[cfg(feature = "account")]
     pub fn with_account(mut self, service: Arc<dyn api::AccountService>) -> Self {
         self.account = Some(service);
         self
@@ -1802,7 +1814,10 @@ impl WorkbenchAppBuilder {
         host.stats.backend = self.backend_label.clone();
         // Account capability (Phase 3): injected by the product; commands and
         // the status bar render from host.account + ws.account.
-        host.account = self.account;
+        #[cfg(feature = "account")]
+        {
+            host.account = self.account;
+        }
         let session_entitlements = self
             .entitlements
             .clone()

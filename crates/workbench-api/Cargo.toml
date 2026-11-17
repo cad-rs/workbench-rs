@@ -9,6 +9,13 @@ license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
 
+# The account (sign-in) surface. On by default so the Pro product keeps its
+# behaviour; the open-source creator turns it off and then compiles without any
+# account capability at all (no service slot, no chip, no commands).
+[features]
+default = ["account"]
+account = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
