@@ -245,20 +245,11 @@ pub struct SupabaseSessionService {
 
 impl SupabaseSessionService {
     pub fn new() -> Self {
-        Self::with_config(product_kit::supabase::Config::default())
-    }
-
-    /// Signs in against an explicit Supabase project configuration.
-    pub fn with_config(config: product_kit::supabase::Config) -> Self {
         Self {
-            account: product_kit::supabase::SupabaseAccount::new(config),
+            account: product_kit::supabase::SupabaseAccount::new(
+                product_kit::supabase::Config::default(),
+            ),
         }
-    }
-
-    /// The underlying capability (a product with its own sign-in loop, or a
-    /// custom configuration).
-    pub fn supabase(&self) -> &product_kit::supabase::SupabaseAccount {
-        &self.account
     }
 }
 
@@ -272,7 +263,7 @@ impl AccountService for SupabaseSessionService {
     fn begin_login(&self) -> Result<DeviceAuthRequest, String> {
         let request = self.account.begin()?;
         Ok(DeviceAuthRequest {
-            user_code: request.user_code,
+            user_code: None,
             verification_uri: request.url,
             expires_in: request.expires_in,
             interval: request.interval,
@@ -282,7 +273,6 @@ impl AccountService for SupabaseSessionService {
     fn poll(&self) -> Result<PollResult, String> {
         match self.account.poll()? {
             product_kit::supabase::Poll::Pending => Ok(PollResult::Pending),
-            product_kit::supabase::Poll::SlowDown => Ok(PollResult::SlowDown),
             product_kit::supabase::Poll::Success(account) => {
                 Ok(PollResult::Success(user_from_account(&account)))
             }
@@ -308,8 +298,8 @@ impl AccountService for SupabaseSessionService {
 /// Maps the shared account onto the platform's account user.
 fn user_from_account(account: &product_kit::supabase::Account) -> AccountUser {
     AccountUser {
-        id: account.id.clone(),
-        name: account.name.clone(),
+        id: account.user_id.clone(),
+        name: account.display_name().to_string(),
         email: account.email.clone(),
     }
 }
